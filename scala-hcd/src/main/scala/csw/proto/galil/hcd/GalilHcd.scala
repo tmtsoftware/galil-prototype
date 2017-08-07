@@ -14,7 +14,6 @@ import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.StateVariable.CurrentState
-import csw.param.commands.Setup
 import csw.services.location.models.ConnectionType.AkkaType
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -22,7 +21,9 @@ import scala.async.Async._
 import scala.concurrent.duration.{DurationLong, FiniteDuration}
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
+// Base trait for Galil HCD domain messages
 sealed trait GalilMsg extends DomainMsg
+// Add messages here...
 
 object GalilLogger extends ComponentLogger("GalilHcd")
 
@@ -43,29 +44,25 @@ class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: Component
   var pubSubRef: ActorRef[PubSub[CurrentState]] = ctx.system.deadLetters
 
   override def initialize(): Future[Unit] = async {
-    println("in initialize")
+    log.debug("Initialize called")
   }
 
-  override def onRun(): Unit = log.info("received Running")
+  override def onRun(): Unit = log.debug("onRun called")
 
-  override def onShutdown(): Unit = log.info("shutdown complete during Running context")
+  override def onShutdown(): Unit = log.debug("onShutdown called")
 
-  override def onRestart(): Unit = log.info("Received do restart")
+  override def onRestart(): Unit = log.debug("onRestart called")
 
-  override def onGoOffline(): Unit = log.info("Received running offline")
+  override def onGoOffline(): Unit = log.debug("onGoOffline called")
 
-  override def onGoOnline(): Unit = log.info("Received running offline")
+  override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
-  def onSetup(sc: Setup): Unit = {
-    log.info(s"Galil process received sc: $sc")
-  }
-
-  def onDomainMsg(galilMsg: GalilMsg): Unit = galilMsg match {
-    case x => log.info(s"Received domain message: $x")
+  override def onDomainMsg(galilMsg: GalilMsg): Unit = galilMsg match {
+    case x => log.debug(s"onDomainMsg called: $x")
   }
 
   override def onControlCommand(commandMsg: CommandMsg): Validation.Validation = {
-    log.info(s"Received command: $commandMsg")
+    log.debug(s"onControlCommand called: $commandMsg")
     Validation.Valid
   }
 }
