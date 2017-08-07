@@ -4,18 +4,23 @@ import java.net.InetAddress
 
 import akka.actor.Scheduler
 import akka.typed.ActorRef
-import akka.typed.scaladsl.ActorContext
+import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.util.Timeout
 import csw.common.ccs.Validation
 import csw.common.framework.internal.supervisor.Supervisor
+import csw.common.framework.models.CommandMsg.Submit
 import csw.common.framework.models.Component.{ComponentInfo, HcdInfo, RegisterOnly}
 import csw.common.framework.models.PubSub.PublisherMsg
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.StateVariable.CurrentState
+import csw.param.commands.{CommandInfo, ControlCommand, Setup}
+import csw.param.models.ObsId
+import csw.param.parameters.KeyType
 import csw.services.location.models.ConnectionType.AkkaType
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.units.Units.degrees
 
 import scala.async.Async._
 import scala.concurrent.duration.{DurationLong, FiniteDuration}
@@ -86,7 +91,14 @@ object GalilHcdApp extends App with GalilLogger.Simple {
 
     val system = akka.typed.ActorSystem("GalilHcd", akka.typed.scaladsl.Actor.empty)
     implicit val timeout: Timeout = Timeout(2.seconds)
-    system.systemActorOf(Supervisor.behavior(hcdInfo, new GalilHcdBehaviorFactory()), "GalilHcdSupervisor")
+    val f = system.systemActorOf(Supervisor.behavior(hcdInfo, new GalilHcdBehaviorFactory()), "GalilHcdSupervisor")
+
+    // XXX temp: Until Supervisor.registerWithLocationService() is implemented...
+    // Start a dummy HCD client class that sends it a Submit message
+    import system.executionContext
+    f.foreach { supervisor =>
+      DummyHcdClient.start(supervisor)
+    }
   }
 
   startLogging()
