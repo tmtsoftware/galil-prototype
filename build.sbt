@@ -8,27 +8,27 @@ lazy val `scala-hcd` = project
   .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
-    `csw-params`
+    `csw-vslice`
   ))
 
 lazy val `scala-assembly` = project
   .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
-    `csw-params`
+    `csw-vslice`
   ))
 
 lazy val `java-hcd` = project
   .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
-    `csw-params`
+    `csw-vslice`
   ))
 
 lazy val `java-assembly` = project
   .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
-    `csw-params`
+    `csw-vslice`
   ))
 
