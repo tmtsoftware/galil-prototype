@@ -4,23 +4,18 @@ import java.net.InetAddress
 
 import akka.actor.Scheduler
 import akka.typed.ActorRef
-import akka.typed.scaladsl.{Actor, ActorContext}
+import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import csw.common.ccs.Validation
 import csw.common.framework.internal.supervisor.Supervisor
-import csw.common.framework.models.CommandMsg.Submit
 import csw.common.framework.models.Component.{ComponentInfo, HcdInfo, RegisterOnly}
 import csw.common.framework.models.PubSub.PublisherMsg
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.param.StateVariable.CurrentState
-import csw.param.commands.{CommandInfo, ControlCommand, Setup}
-import csw.param.models.ObsId
-import csw.param.parameters.KeyType
+import csw.param.states.CurrentState
 import csw.services.location.models.ConnectionType.AkkaType
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
-import csw.units.Units.degrees
 
 import scala.async.Async._
 import scala.concurrent.duration.{DurationLong, FiniteDuration}

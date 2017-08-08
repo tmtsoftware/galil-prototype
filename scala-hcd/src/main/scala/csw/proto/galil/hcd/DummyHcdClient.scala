@@ -5,7 +5,7 @@ import akka.typed.scaladsl.Actor
 import csw.common.framework.models.CommandMsg.Submit
 import csw.common.framework.models.SupervisorMsg
 import csw.param.commands.Setup
-import csw.param.parameters.KeyType
+import csw.param.generics.KeyType
 import csw.units.Units.degrees
 
 // Temporary dummy HCD client to test sending the HCD a Submit message
