@@ -2,7 +2,6 @@ package csw.proto.galil.hcd
 
 import java.net.InetAddress
 
-import akka.actor.Scheduler
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
@@ -37,11 +36,7 @@ class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilMsg] {
 class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo)
   extends ComponentHandlers[GalilMsg](ctx, componentInfo) with GalilLogger.Simple {
 
-  implicit val timeout: Timeout = Timeout(2.seconds)
-  implicit val scheduler: Scheduler         = ctx.system.scheduler
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
-
-  var pubSubRef: ActorRef[PubSub[CurrentState]] = ctx.system.deadLetters
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
