@@ -1,7 +1,7 @@
-package csw.proto.galil.hcd
+package csw.proto.galil.assembly
 
-import akka.typed.{ActorRef, ActorSystem, Behavior}
 import akka.typed.scaladsl.Actor
+import akka.typed.{ActorRef, ActorSystem, Behavior}
 import csw.common.framework.models.CommandMsg.Submit
 import csw.common.framework.models.SupervisorMsg
 import csw.param.commands.Setup
@@ -9,8 +9,8 @@ import csw.param.generics.KeyType
 import csw.param.models.Prefix
 import csw.units.Units.degrees
 
-// Temporary dummy HCD client to test sending the HCD a Submit message
-object DummyHcdClient {
+// Temporary dummy Assembly client to test sending the Assembly a Submit message
+object DummyAssemblyClient {
 
   private def behavior(supervisor: ActorRef[SupervisorMsg]): Behavior[Submit] =
     Actor.immutable[Submit] { (ctx, submit) =>
@@ -18,10 +18,10 @@ object DummyHcdClient {
       Actor.same
     }
 
-  // Starts the DummyHcdClient actor in a new ActorSystem and sends it a Submit
+  // Starts the DummyAssemblyClient actor in a new ActorSystem and sends it a Submit
   def start(supervisor: ActorRef[SupervisorMsg]): Unit = {
     val root = Actor.deferred[Nothing] { ctx =>
-      ctx.spawn(DummyHcdClient.behavior(supervisor), "DummyHcdClient")
+      ctx.spawn(DummyAssemblyClient.behavior(supervisor), "DummyAssemblyClient")
       val k1 = KeyType.IntKey.make("encoder")
       val k2 = KeyType.StringKey.make("filter")
       val i1 = k1.set(22, 33, 44)

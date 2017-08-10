@@ -1,4 +1,4 @@
-package csw.proto.galil.hcd
+package csw.proto.galil.assembly
 
 import java.net.InetAddress
 
@@ -6,11 +6,14 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import csw.common.ccs.Validation
-import csw.common.framework.models.Component.{ComponentInfo, HcdInfo, RegisterOnly}
+import csw.common.framework.models.Component.{AssemblyInfo, ComponentInfo, RegisterOnly}
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
 import csw.param.states.CurrentState
+import csw.services.location.models.ComponentId
+import csw.services.location.models.ComponentType.HCD
+import csw.services.location.models.Connection.AkkaConnection
 import csw.services.location.models.ConnectionType.AkkaType
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -18,23 +21,23 @@ import scala.async.Async._
 import scala.concurrent.duration.{DurationLong, FiniteDuration}
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
-// Base trait for Galil HCD domain messages
-sealed trait GalilHcdDomainMsg extends DomainMsg
+// Base trait for Galil Assembly domain messages
+sealed trait GalilAssemblyDomainMsg extends DomainMsg
 
 // Add messages here...
 
 // Temporary logger, until one is provided by the API
-object GalilHcdLogger extends ComponentLogger("GalilHcd")
+object GalilAssemblyLogger extends ComponentLogger("GalilAssembly")
 
-private class GalilHcdWiring extends ComponentWiring[GalilHcdDomainMsg] {
+private class GalilAssemblyWiring extends ComponentWiring[GalilAssemblyDomainMsg] {
   override def handlers(ctx: ActorContext[ComponentMsg],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]]
-                       ): ComponentHandlers[GalilHcdDomainMsg] = new GalilHcdHandlers(ctx, componentInfo)
+                       ): ComponentHandlers[GalilAssemblyDomainMsg] = new GalilAssemblyHandlers(ctx, componentInfo)
 }
 
-private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo)
-  extends ComponentHandlers[GalilHcdDomainMsg](ctx, componentInfo) with GalilHcdLogger.Simple {
+private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo)
+  extends ComponentHandlers[GalilAssemblyDomainMsg](ctx, componentInfo) with GalilAssemblyLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -52,7 +55,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: C
 
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
-  override def onDomainMsg(galilMsg: GalilHcdDomainMsg): Unit = galilMsg match {
+  override def onDomainMsg(galilMsg: GalilAssemblyDomainMsg): Unit = galilMsg match {
     case x => log.debug(s"onDomainMsg called: $x")
   }
 
@@ -62,35 +65,36 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: C
   }
 }
 
-object GalilHcdApp extends App with GalilHcdLogger.Simple {
+object GalilAssemblyApp extends App with GalilAssemblyLogger.Simple {
   def startLogging(): Unit = {
     val host = InetAddress.getLocalHost.getHostName
     val system = akka.actor.ActorSystem()
-    LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
-    log.debug("Starting Galil HCD")
+    LoggingSystemFactory.start("GalilAssembly", "0.1", host, system)
+    log.debug("Starting Galil Assembly")
   }
 
-  def startHcd(): Unit = {
+  def startAssembly(): Unit = {
     // XXX This should be read from a config file
-    val hcdInfo = HcdInfo("GalilHcd",
+    val assemblyInfo = AssemblyInfo("GalilAssembly",
       "wfos",
-      "csw.proto.galil.hcd.GalilHcdWiring",
+      "csw.proto.galil.assembly.GalilAssemblyWiring",
       RegisterOnly,
       Set(AkkaType),
-      FiniteDuration(5, "seconds"))
+      Set(AkkaConnection(ComponentId("GalilHcd", HCD)))
+    )
 
-    val system = akka.typed.ActorSystem("GalilHcd", akka.typed.scaladsl.Actor.empty)
+    val system = akka.typed.ActorSystem("GalilAssembly", akka.typed.scaladsl.Actor.empty)
     implicit val timeout: Timeout = Timeout(2.seconds)
-    val f = system.systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor")
+    val f = system.systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor")
 
-    //    // XXX temp: Until Supervisor.registerWithLocationService() is implemented...
-    //    // Start a dummy HCD client class that sends it a Submit message
-    //    import system.executionContext
-    //    f.foreach { supervisor =>
-    //      DummyHcdClient.start(supervisor)
-    //    }
+//    // XXX temp: Until Supervisor.registerWithLocationService() is implemented...
+//    // Start a dummy assembly client class that sends it a Submit message
+//    import system.executionContext
+//    f.foreach { supervisor =>
+//      DummyAssemblyClient.start(supervisor)
+//    }
   }
 
   startLogging()
-  startHcd()
+  startAssembly()
 }
