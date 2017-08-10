@@ -1,4 +1,4 @@
-package csw.proto.galil.hcd;
+package csw.proto.galil.assembly;
 
 import akka.typed.ActorRef;
 import akka.typed.Props;
@@ -13,7 +13,6 @@ import csw.param.states.CurrentState;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
-import scala.concurrent.duration.FiniteDuration;
 import scala.reflect.ClassTag;
 import scala.runtime.BoxedUnit;
 
@@ -22,48 +21,47 @@ import java.net.UnknownHostException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import csw.common.framework.models.Component.ComponentInfo;
 import scala.runtime.Nothing$;
 
-import static csw.common.framework.models.JComponent.DoNotRegister;
+import static csw.common.framework.models.JComponent.RegisterOnly;
 
-public class JGalilHcd {
+public class JGalilAssembly {
 
-  // Base trait for Galil HCD domain messages
-  interface JGalilHcdDomainMsg extends RunningMsg.DomainMsg {
+  // Base trait for Galil Assembly domain messages
+  interface JGalilAssemblyDomainMsg extends RunningMsg.DomainMsg {
   }
   // Add messages here...
 
 
-  interface JGalilHcdLogger extends JComponentLogger {
+  interface JGalilAssemblyLogger extends JComponentLogger {
     @Override
     default String componentName() {
-      return "GalilHcd";
+      return "GalilAssembly";
     }
   }
 
   @SuppressWarnings("unused")
-  public static class JGalilHcdWiring extends JComponentWiring<JGalilHcdDomainMsg> {
+  public static class JGalilAssemblyWiring extends JComponentWiring<JGalilAssemblyDomainMsg> {
     // XXX FIXME
-    private ClassTag<JGalilHcd.JGalilHcdDomainMsg> classTag = scala.reflect.ClassTag$.MODULE$.apply(JGalilHcd.JGalilHcdDomainMsg.class);
+    private ClassTag<JGalilAssemblyDomainMsg> classTag = scala.reflect.ClassTag$.MODULE$.apply(JGalilAssembly.JGalilAssemblyDomainMsg.class);
 
-    public JGalilHcdWiring() {
-      super(JGalilHcd.JGalilHcdDomainMsg.class);
+    public JGalilAssemblyWiring() {
+      super(JGalilAssembly.JGalilAssemblyDomainMsg.class);
     }
 
     @Override
-    public JComponentHandlers<JGalilHcd.JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, classTag);
+    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
+      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, classTag);
     }
   }
 
-  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMsg> implements JGalilHcdLogger {
+  static class JGalilAssemblyHandlers extends JComponentHandlers<JGalilAssemblyDomainMsg> implements JGalilAssemblyLogger {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    JGalilHcdHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ClassTag<JGalilHcdDomainMsg> classTag) {
+    JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ClassTag<JGalilAssemblyDomainMsg> classTag) {
       super(ctx, componentInfo, classTag);
-      log.debug("Starting Galil HCD");
+      log.debug("Starting Galil Assembly");
     }
 
     private BoxedUnit init() {
@@ -83,8 +81,8 @@ public class JGalilHcd {
     }
 
     @Override
-    public void onDomainMsg(JGalilHcdDomainMsg galilHcdDomainMsg) {
-      log.debug("onDomainMsg called: " + galilHcdDomainMsg);
+    public void onDomainMsg(JGalilAssemblyDomainMsg galilAssemblyDomainMsg) {
+      log.debug("onDomainMsg called: " + galilAssemblyDomainMsg);
     }
 
     @Override
@@ -117,28 +115,28 @@ public class JGalilHcd {
   private static void startLogging() throws UnknownHostException {
     String host = InetAddress.getLocalHost().getHostName();
     akka.actor.ActorSystem system = akka.actor.ActorSystem.create();
-    LoggingSystemFactory.start("GalilHcd", "0.1", host, system);
+    LoggingSystemFactory.start("GalilAssembly", "0.1", host, system);
 
     // XXX: How to log here?
-//    log.debug("Starting Galil HCD");
+//    log.debug("Starting Galil Assembly");
   }
 
-  private static void startHcd() {
-    Component.HcdInfo hcdInfo = new Component.HcdInfo("GalilHcd",
+  private static void startAssembly() {
+    Component.AssemblyInfo assemblyInfo = new Component.AssemblyInfo("GalilAssembly",
         "wfos",
-        "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring",
-        DoNotRegister,
+        "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
+        RegisterOnly,
         null, // XXX Set(AkkaType) - No easy Java API yet, Scala Set required...
-        FiniteDuration.create(5, TimeUnit.SECONDS));
+        null); // XXX Set(AkkaConnection(ComponentId("GalilHcd", HCD))
 
-    akka.typed.ActorSystem system = akka.typed.ActorSystem.create("GalilHcd", akka.typed.scaladsl.Actor.empty());
+    akka.typed.ActorSystem system = akka.typed.ActorSystem.create("GalilAssembly", akka.typed.scaladsl.Actor.empty());
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
     // XXX What is the correct syntax here?
-    system.<Nothing$>systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
+    system.<Nothing$>systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
   }
 
   public static void main(String[] args) throws UnknownHostException {
     startLogging();
-    startHcd();
+    startAssembly();
   }
 }
