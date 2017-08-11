@@ -20,8 +20,11 @@ import scala.runtime.BoxedUnit;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
+import static csw.services.location.javadsl.JConnectionType.AkkaType;
 
 public class JGalilHcd {
 
@@ -121,8 +124,8 @@ public class JGalilHcd {
     ComponentInfo.HcdInfo hcdInfo = JHcdInfoFactory.make("GalilHcd",
         "wfos",
         "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring",
-        LocationServiceUsages.JDoNotRegister(),
-        null,
+        LocationServiceUsages.JRegisterOnly(),
+        Collections.singleton(AkkaType),
         FiniteDuration.create(5, TimeUnit.SECONDS));
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilHcd");

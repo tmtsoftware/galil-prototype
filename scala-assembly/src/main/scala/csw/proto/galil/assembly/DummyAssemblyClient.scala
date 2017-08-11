@@ -7,7 +7,7 @@ import csw.common.framework.models.SupervisorMsg
 import csw.param.commands.Setup
 import csw.param.generics.KeyType
 import csw.param.models.Prefix
-import csw.units.Units.degrees
+import csw.units.Units.degree
 
 // Temporary dummy Assembly client to test sending the Assembly a Submit message
 object DummyAssemblyClient {
@@ -25,7 +25,7 @@ object DummyAssemblyClient {
       val k1 = KeyType.IntKey.make("encoder")
       val k2 = KeyType.StringKey.make("filter")
       val i1 = k1.set(22, 33, 44)
-      val i2 = k2.set("a", "b", "c").withUnits(degrees)
+      val i2 = k2.set("a", "b", "c").withUnits(degree)
       val setup = Setup("Obs001", Prefix("wfos.blue.filter")).add(i1).add(i2)
       supervisor ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
 

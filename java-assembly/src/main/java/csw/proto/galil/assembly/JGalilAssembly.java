@@ -6,21 +6,29 @@ import akka.typed.javadsl.ActorContext;
 import akka.util.Timeout;
 import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
+import csw.common.framework.javadsl.JAssemblyInfoFactory;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
 import csw.common.framework.models.*;
 import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
 import csw.param.states.CurrentState;
+import csw.services.location.models.ComponentId;
+import csw.services.location.models.Connection;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
 import scala.runtime.Nothing$;
+import csw.services.location.models.Connection.AkkaConnection;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
+import static csw.services.location.javadsl.JComponentType.HCD;
+import static csw.services.location.javadsl.JConnectionType.AkkaType;
 
 public class JGalilAssembly {
 
@@ -117,17 +125,17 @@ public class JGalilAssembly {
   }
 
   private static void startAssembly() {
-    ComponentInfo.AssemblyInfo assemblyInfo = new ComponentInfo.AssemblyInfo("GalilAssembly",
+    ComponentInfo.AssemblyInfo assemblyInfo = JAssemblyInfoFactory.make("GalilAssembly",
         "wfos",
         "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
-        LocationServiceUsages.JRegisterOnly(),
-        null, // XXX Set(AkkaType) - No easy Java API yet, Scala Set required...
-        null); // XXX Set(AkkaConnection(ComponentId("GalilHcd", HCD))
+        LocationServiceUsages.JRegisterAndTrackServices(),
+        Collections.singleton(AkkaType),
+        Collections.singleton(new AkkaConnection(new ComponentId("GalilHcd", HCD))));
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilAssembly");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
-    // XXX What is the correct syntax here?
-    system.<Nothing$>systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
+    // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
+    system.<Void>systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
   }
 
   public static void main(String[] args) throws UnknownHostException {
