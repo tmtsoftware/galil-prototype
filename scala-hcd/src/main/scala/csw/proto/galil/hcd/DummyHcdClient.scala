@@ -31,7 +31,7 @@ object DummyHcdClient {
 
       Actor.empty
     }
-    val system = ActorSystem[Nothing]("DummyRoot", root)
+    val system = ActorSystem[Nothing](root, "DummyRoot")
 
   }
 }

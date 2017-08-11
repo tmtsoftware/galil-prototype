@@ -5,8 +5,9 @@ import java.net.InetAddress
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
-import csw.common.ccs.Validation
-import csw.common.framework.models.Component.{ComponentInfo, HcdInfo, RegisterOnly}
+import csw.common.ccs.{Validation, Validations}
+import csw.common.framework.models.ComponentInfo.HcdInfo
+import csw.common.framework.models.LocationServiceUsages.RegisterOnly
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
@@ -56,9 +57,9 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: C
     case x => log.debug(s"onDomainMsg called: $x")
   }
 
-  override def onControlCommand(commandMsg: CommandMsg): Validation.Validation = {
+  override def onControlCommand(commandMsg: CommandMsg): Validation = {
     log.debug(s"onControlCommand called: $commandMsg")
-    Validation.Valid
+    Validations.Valid
   }
 }
 
@@ -79,7 +80,7 @@ object GalilHcdApp extends App with GalilHcdLogger.Simple {
       Set(AkkaType),
       FiniteDuration(5, "seconds"))
 
-    val system = akka.typed.ActorSystem("GalilHcd", akka.typed.scaladsl.Actor.empty)
+    val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilHcd")
     implicit val timeout: Timeout = Timeout(2.seconds)
     val f = system.systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor")
 

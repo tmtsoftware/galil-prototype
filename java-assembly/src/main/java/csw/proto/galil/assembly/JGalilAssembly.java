@@ -5,6 +5,7 @@ import akka.typed.Props;
 import akka.typed.javadsl.ActorContext;
 import akka.util.Timeout;
 import csw.common.ccs.Validation;
+import csw.common.ccs.Validations;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
 import csw.common.framework.models.*;
@@ -13,17 +14,13 @@ import csw.param.states.CurrentState;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
-import scala.reflect.ClassTag;
 import scala.runtime.BoxedUnit;
+import scala.runtime.Nothing$;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
-import scala.runtime.Nothing$;
-
-import static csw.common.framework.models.JComponent.RegisterOnly;
 
 public class JGalilAssembly {
 
@@ -42,16 +39,14 @@ public class JGalilAssembly {
 
   @SuppressWarnings("unused")
   public static class JGalilAssemblyWiring extends JComponentWiring<JGalilAssemblyDomainMsg> {
-    // XXX FIXME
-    private ClassTag<JGalilAssemblyDomainMsg> classTag = scala.reflect.ClassTag$.MODULE$.apply(JGalilAssembly.JGalilAssemblyDomainMsg.class);
 
     public JGalilAssemblyWiring() {
       super(JGalilAssembly.JGalilAssemblyDomainMsg.class);
     }
 
     @Override
-    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, classTag);
+    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
+      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, JGalilAssemblyDomainMsg.class);
     }
   }
 
@@ -59,8 +54,8 @@ public class JGalilAssembly {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ClassTag<JGalilAssemblyDomainMsg> classTag) {
-      super(ctx, componentInfo, classTag);
+    public JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, Class<JGalilAssemblyDomainMsg> klass) {
+      super(ctx, componentInfo, klass);
       log.debug("Starting Galil Assembly");
     }
 
@@ -86,9 +81,9 @@ public class JGalilAssembly {
     }
 
     @Override
-    public Validation.Validation onControlCommand(CommandMsg commandMsg) {
+    public Validation onControlCommand(CommandMsg commandMsg) {
       log.debug("onControlCommand called: " + commandMsg);
-      return Validation.Valid$.MODULE$; // XXX Need Java API for this
+      return Validations.JValid(); // XXX Need Java API for this
     }
 
     @Override
@@ -122,14 +117,14 @@ public class JGalilAssembly {
   }
 
   private static void startAssembly() {
-    Component.AssemblyInfo assemblyInfo = new Component.AssemblyInfo("GalilAssembly",
+    ComponentInfo.AssemblyInfo assemblyInfo = new ComponentInfo.AssemblyInfo("GalilAssembly",
         "wfos",
         "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
-        RegisterOnly,
+        LocationServiceUsages.JRegisterOnly(),
         null, // XXX Set(AkkaType) - No easy Java API yet, Scala Set required...
         null); // XXX Set(AkkaConnection(ComponentId("GalilHcd", HCD))
 
-    akka.typed.ActorSystem system = akka.typed.ActorSystem.create("GalilAssembly", akka.typed.scaladsl.Actor.empty());
+    akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilAssembly");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
     // XXX What is the correct syntax here?
     system.<Nothing$>systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);

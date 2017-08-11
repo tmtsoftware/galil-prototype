@@ -5,8 +5,10 @@ import akka.typed.Props;
 import akka.typed.javadsl.ActorContext;
 import akka.util.Timeout;
 import csw.common.ccs.Validation;
+import csw.common.ccs.Validations;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
+import csw.common.framework.javadsl.JHcdInfoFactory;
 import csw.common.framework.models.*;
 import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
 import csw.param.states.CurrentState;
@@ -14,18 +16,12 @@ import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.concurrent.duration.FiniteDuration;
-import scala.reflect.ClassTag;
 import scala.runtime.BoxedUnit;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
-import csw.common.framework.models.Component.ComponentInfo;
-import scala.runtime.Nothing$;
-
-import static csw.common.framework.models.JComponent.DoNotRegister;
 
 public class JGalilHcd {
 
@@ -44,16 +40,14 @@ public class JGalilHcd {
 
   @SuppressWarnings("unused")
   public static class JGalilHcdWiring extends JComponentWiring<JGalilHcdDomainMsg> {
-    // XXX FIXME
-    private ClassTag<JGalilHcd.JGalilHcdDomainMsg> classTag = scala.reflect.ClassTag$.MODULE$.apply(JGalilHcd.JGalilHcdDomainMsg.class);
 
     public JGalilHcdWiring() {
       super(JGalilHcd.JGalilHcdDomainMsg.class);
     }
 
     @Override
-    public JComponentHandlers<JGalilHcd.JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, Component.ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, classTag);
+    public JComponentHandlers<JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
+      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, JGalilHcd.JGalilHcdDomainMsg.class);
     }
   }
 
@@ -61,8 +55,8 @@ public class JGalilHcd {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    JGalilHcdHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ClassTag<JGalilHcdDomainMsg> classTag) {
-      super(ctx, componentInfo, classTag);
+    public JGalilHcdHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, Class<JGalilHcdDomainMsg> klass) {
+      super(ctx, componentInfo, klass);
       log.debug("Starting Galil HCD");
     }
 
@@ -88,9 +82,9 @@ public class JGalilHcd {
     }
 
     @Override
-    public Validation.Validation onControlCommand(CommandMsg commandMsg) {
+    public Validation onControlCommand(CommandMsg commandMsg) {
       log.debug("onControlCommand called: " + commandMsg);
-      return Validation.Valid$.MODULE$; // XXX Need Java API for this
+      return Validations.JValid();
     }
 
     @Override
@@ -124,17 +118,17 @@ public class JGalilHcd {
   }
 
   private static void startHcd() {
-    Component.HcdInfo hcdInfo = new Component.HcdInfo("GalilHcd",
+    ComponentInfo.HcdInfo hcdInfo = JHcdInfoFactory.make("GalilHcd",
         "wfos",
         "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring",
-        DoNotRegister,
-        null, // XXX Set(AkkaType) - No easy Java API yet, Scala Set required...
+        LocationServiceUsages.JDoNotRegister(),
+        null,
         FiniteDuration.create(5, TimeUnit.SECONDS));
 
-    akka.typed.ActorSystem system = akka.typed.ActorSystem.create("GalilHcd", akka.typed.scaladsl.Actor.empty());
+    akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilHcd");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
-    // XXX What is the correct syntax here?
-    system.<Nothing$>systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
+    // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
+    system.<Void>systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
   }
 
   public static void main(String[] args) throws UnknownHostException {
