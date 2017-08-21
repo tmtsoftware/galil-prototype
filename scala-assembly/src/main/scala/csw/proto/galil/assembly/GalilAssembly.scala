@@ -6,16 +6,15 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import csw.common.ccs.{Validation, Validations}
-import csw.common.framework.models.ComponentInfo.AssemblyInfo
+import csw.common.framework.models.ComponentInfo
 import csw.common.framework.models.LocationServiceUsages.RegisterOnly
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
 import csw.param.states.CurrentState
 import csw.services.location.models.ComponentId
-import csw.services.location.models.ComponentType.HCD
+import csw.services.location.models.ComponentType.{Assembly, HCD}
 import csw.services.location.models.Connection.AkkaConnection
-import csw.services.location.models.ConnectionType.AkkaType
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
@@ -34,11 +33,12 @@ private class GalilAssemblyWiring extends ComponentWiring[GalilAssemblyDomainMsg
   override def handlers(ctx: ActorContext[ComponentMsg],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]]
-                       ): ComponentHandlers[GalilAssemblyDomainMsg] = new GalilAssemblyHandlers(ctx, componentInfo)
+                       ): ComponentHandlers[GalilAssemblyDomainMsg] = new GalilAssemblyHandlers(ctx, componentInfo, pubSubRef)
 }
 
-private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo)
-  extends ComponentHandlers[GalilAssemblyDomainMsg](ctx, componentInfo) with GalilAssemblyLogger.Simple {
+private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo,
+                                    pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]])
+  extends ComponentHandlers[GalilAssemblyDomainMsg](ctx, componentInfo, pubSubRef) with GalilAssemblyLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -76,12 +76,12 @@ object GalilAssemblyApp extends App with GalilAssemblyLogger.Simple {
 
   def startAssembly(): Unit = {
     // XXX This should be read from a config file
-    val assemblyInfo = AssemblyInfo("GalilAssembly",
+    val assemblyInfo = ComponentInfo("GalilAssembly",
+      Assembly,
       "wfos",
       "csw.proto.galil.assembly.GalilAssemblyWiring",
       RegisterOnly,
-      Set(AkkaType),
-      Set(AkkaConnection(ComponentId("GalilHcd", HCD)))
+      Some(Set(AkkaConnection(ComponentId("GalilHcd", HCD))))
     )
 
     val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilAssembly")

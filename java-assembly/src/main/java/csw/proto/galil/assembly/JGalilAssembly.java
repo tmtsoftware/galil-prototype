@@ -6,19 +6,17 @@ import akka.typed.javadsl.ActorContext;
 import akka.util.Timeout;
 import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
-import csw.common.framework.javadsl.JAssemblyInfoFactory;
+import csw.common.framework.javadsl.JComponentInfoFactory;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
 import csw.common.framework.models.*;
 import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
 import csw.param.states.CurrentState;
 import csw.services.location.models.ComponentId;
-import csw.services.location.models.Connection;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
-import scala.runtime.Nothing$;
 import csw.services.location.models.Connection.AkkaConnection;
 
 import java.net.InetAddress;
@@ -53,8 +51,10 @@ public class JGalilAssembly {
     }
 
     @Override
-    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, JGalilAssemblyDomainMsg.class);
+    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx,
+                                                            ComponentInfo componentInfo,
+                                                            ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
+      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, pubSubRef, JGalilAssemblyDomainMsg.class);
     }
   }
 
@@ -62,8 +62,11 @@ public class JGalilAssembly {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    public JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, Class<JGalilAssemblyDomainMsg> klass) {
-      super(ctx, componentInfo, klass);
+    JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx,
+                           ComponentInfo componentInfo,
+                           ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef,
+                           Class<JGalilAssemblyDomainMsg> klass) {
+      super(ctx, componentInfo, pubSubRef, klass);
       log.debug("Starting Galil Assembly");
     }
 
@@ -125,11 +128,10 @@ public class JGalilAssembly {
   }
 
   private static void startAssembly() {
-    ComponentInfo.AssemblyInfo assemblyInfo = JAssemblyInfoFactory.make("GalilAssembly",
+    ComponentInfo assemblyInfo = JComponentInfoFactory.makeAssembly("GalilAssembly",
         "wfos",
         "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
         LocationServiceUsages.JRegisterAndTrackServices(),
-        Collections.singleton(AkkaType),
         Collections.singleton(new AkkaConnection(new ComponentId("GalilHcd", HCD))));
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilAssembly");

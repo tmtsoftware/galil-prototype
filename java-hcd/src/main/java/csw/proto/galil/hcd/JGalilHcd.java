@@ -8,23 +8,19 @@ import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
-import csw.common.framework.javadsl.JHcdInfoFactory;
+import csw.common.framework.javadsl.JComponentInfoFactory;
 import csw.common.framework.models.*;
 import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
 import csw.param.states.CurrentState;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
-import scala.concurrent.duration.FiniteDuration;
 import scala.runtime.BoxedUnit;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
-import static csw.services.location.javadsl.JConnectionType.AkkaType;
 
 public class JGalilHcd {
 
@@ -49,8 +45,9 @@ public class JGalilHcd {
     }
 
     @Override
-    public JComponentHandlers<JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, JGalilHcd.JGalilHcdDomainMsg.class);
+    public JComponentHandlers<JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo,
+                                                       ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
+      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, pubSubRef, JGalilHcd.JGalilHcdDomainMsg.class);
     }
   }
 
@@ -58,8 +55,11 @@ public class JGalilHcd {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    public JGalilHcdHandlers(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo, Class<JGalilHcdDomainMsg> klass) {
-      super(ctx, componentInfo, klass);
+    JGalilHcdHandlers(ActorContext<ComponentMsg> ctx,
+                      ComponentInfo componentInfo,
+                      ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef,
+                      Class<JGalilHcdDomainMsg> klass) {
+      super(ctx, componentInfo, pubSubRef, klass);
       log.debug("Starting Galil HCD");
     }
 
@@ -121,12 +121,10 @@ public class JGalilHcd {
   }
 
   private static void startHcd() {
-    ComponentInfo.HcdInfo hcdInfo = JHcdInfoFactory.make("GalilHcd",
+    ComponentInfo hcdInfo = JComponentInfoFactory.makeHcd("GalilHcd",
         "wfos",
         "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring",
-        LocationServiceUsages.JRegisterOnly(),
-        Collections.singleton(AkkaType),
-        FiniteDuration.create(5, TimeUnit.SECONDS));
+        LocationServiceUsages.JRegisterOnly());
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilHcd");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);

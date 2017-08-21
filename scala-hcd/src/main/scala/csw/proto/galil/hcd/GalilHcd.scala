@@ -6,17 +6,17 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import csw.common.ccs.{Validation, Validations}
-import csw.common.framework.models.ComponentInfo.HcdInfo
+import csw.common.framework.models.ComponentInfo
 import csw.common.framework.models.LocationServiceUsages.RegisterOnly
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
 import csw.param.states.CurrentState
-import csw.services.location.models.ConnectionType.AkkaType
+import csw.services.location.models.ComponentType.HCD
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
-import scala.concurrent.duration.{DurationLong, FiniteDuration}
+import scala.concurrent.duration.DurationLong
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Base trait for Galil HCD domain messages
@@ -31,11 +31,12 @@ private class GalilHcdWiring extends ComponentWiring[GalilHcdDomainMsg] {
   override def handlers(ctx: ActorContext[ComponentMsg],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]]
-                       ): ComponentHandlers[GalilHcdDomainMsg] = new GalilHcdHandlers(ctx, componentInfo)
+                       ): ComponentHandlers[GalilHcdDomainMsg] = new GalilHcdHandlers(ctx, componentInfo, pubSubRef)
 }
 
-private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo)
-  extends ComponentHandlers[GalilHcdDomainMsg](ctx, componentInfo) with GalilHcdLogger.Simple {
+private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo,
+                               pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]])
+  extends ComponentHandlers[GalilHcdDomainMsg](ctx, componentInfo, pubSubRef) with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -73,12 +74,11 @@ object GalilHcdApp extends App with GalilHcdLogger.Simple {
 
   def startHcd(): Unit = {
     // XXX This should be read from a config file
-    val hcdInfo = HcdInfo("GalilHcd",
+    val hcdInfo = ComponentInfo("GalilHcd",
+      HCD,
       "wfos",
       "csw.proto.galil.hcd.GalilHcdWiring",
-      RegisterOnly,
-      Set(AkkaType),
-      FiniteDuration(5, "seconds"))
+      RegisterOnly)
 
     val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilHcd")
     implicit val timeout: Timeout = Timeout(2.seconds)
