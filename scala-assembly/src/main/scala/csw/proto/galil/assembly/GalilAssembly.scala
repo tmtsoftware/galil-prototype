@@ -5,12 +5,12 @@ import java.net.InetAddress
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
+import com.typesafe.config.ConfigFactory
 import csw.common.ccs.{Validation, Validations}
 import csw.common.framework.models.ComponentInfo
-import csw.common.framework.models.LocationServiceUsages.RegisterOnly
 import csw.common.framework.models.RunningMsg.DomainMsg
 import csw.common.framework.models._
-import csw.common.framework.scaladsl.{ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
+import csw.common.framework.scaladsl.{Component, ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
 import csw.param.states.CurrentState
 import csw.services.location.models.ComponentId
 import csw.services.location.models.ComponentType.{Assembly, HCD}
@@ -76,17 +76,18 @@ object GalilAssemblyApp extends App with GalilAssemblyLogger.Simple {
 
   def startAssembly(): Unit = {
     // XXX This should be read from a config file
-    val assemblyInfo = ComponentInfo("GalilAssembly",
-      Assembly,
-      "wfos",
-      "csw.proto.galil.assembly.GalilAssemblyWiring",
-      RegisterOnly,
-      Some(Set(AkkaConnection(ComponentId("GalilHcd", HCD))))
-    )
+//    val assemblyInfo = ComponentInfo("GalilAssembly",
+//      Assembly,
+//      "wfos",
+//      "csw.proto.galil.assembly.GalilAssemblyWiring",
+//      Set(AkkaConnection(ComponentId("GalilHcd", HCD)))
+//    )
 
-    val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilAssembly")
-    implicit val timeout: Timeout = Timeout(2.seconds)
-    val f = system.systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor")
+//    val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilAssembly")
+//    implicit val timeout: Timeout = Timeout(2.seconds)
+//    val f = system.systemActorOf(SupervisorBehaviorFactory.behavior(assemblyInfo), "GalilAssemblySupervisor")
+
+    Component.createStandalone(ConfigFactory.load("GalilAssembly.conf"))
 
 //    // XXX temp: Until Supervisor.registerWithLocationService() is implemented...
 //    // Start a dummy assembly client class that sends it a Submit message

@@ -123,13 +123,15 @@ public class JGalilHcd {
   private static void startHcd() {
     ComponentInfo hcdInfo = JComponentInfoFactory.makeHcd("GalilHcd",
         "wfos",
-        "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring",
-        LocationServiceUsages.JRegisterOnly());
+        "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring");
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilHcd");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
     // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
-    system.<Void>systemActorOf(SupervisorBehaviorFactory.make(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
+    system.<Void>systemActorOf(SupervisorBehaviorFactory.behavior(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
+
+    // XXX Java API not implemented yet!
+//    Component.createStandalone(ConfigFactory.load("GalilHcd.conf"));
   }
 
   public static void main(String[] args) throws UnknownHostException {

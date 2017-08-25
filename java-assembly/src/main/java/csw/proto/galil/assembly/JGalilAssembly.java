@@ -4,6 +4,7 @@ import akka.typed.ActorRef;
 import akka.typed.Props;
 import akka.typed.javadsl.ActorContext;
 import akka.util.Timeout;
+import com.typesafe.config.ConfigFactory;
 import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
 import csw.common.framework.javadsl.JComponentInfoFactory;
@@ -26,7 +27,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static csw.services.location.javadsl.JComponentType.HCD;
-import static csw.services.location.javadsl.JConnectionType.AkkaType;
 
 public class JGalilAssembly {
 
@@ -131,13 +131,16 @@ public class JGalilAssembly {
     ComponentInfo assemblyInfo = JComponentInfoFactory.makeAssembly("GalilAssembly",
         "wfos",
         "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
-        LocationServiceUsages.JRegisterAndTrackServices(),
         Collections.singleton(new AkkaConnection(new ComponentId("GalilHcd", HCD))));
 
     akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilAssembly");
     Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
     // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
-    system.<Void>systemActorOf(SupervisorBehaviorFactory.make(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
+    system.<Void>systemActorOf(SupervisorBehaviorFactory.behavior(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
+
+    // XXX Java API not implemented yet!
+//    Component.createStandalone(ConfigFactory.load("GalilAssembly.conf"));
+
   }
 
   public static void main(String[] args) throws UnknownHostException {
