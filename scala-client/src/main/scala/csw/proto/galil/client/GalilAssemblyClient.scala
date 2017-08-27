@@ -1,27 +1,27 @@
-package csw.proto.galil.assembly
+package csw.proto.galil.client
 
 import akka.typed.scaladsl.Actor
 import akka.typed.{ActorRef, ActorSystem, Behavior}
-import csw.common.framework.models.CommandMsg.Submit
-import csw.common.framework.models.SupervisorMsg
+import csw.common.framework.models.CommandMessage.Submit
+import csw.common.framework.models.SupervisorMessage
 import csw.param.commands.Setup
 import csw.param.generics.KeyType
 import csw.param.models.Prefix
 import csw.units.Units.degree
 
-// Temporary dummy Assembly client to test sending the Assembly a Submit message
-object DummyAssemblyClient {
+// A client to test locating and communicating with the Galil assembly
+object GalilAssemblyClient {
 
-  private def behavior(supervisor: ActorRef[SupervisorMsg]): Behavior[Submit] =
+  private def behavior(supervisor: ActorRef[SupervisorMessage]): Behavior[Submit] =
     Actor.immutable[Submit] { (ctx, submit) =>
       supervisor ! submit
       Actor.same
     }
 
   // Starts the DummyAssemblyClient actor in a new ActorSystem and sends it a Submit
-  def start(supervisor: ActorRef[SupervisorMsg]): Unit = {
+  def start(supervisor: ActorRef[SupervisorMessage]): Unit = {
     val root = Actor.deferred[Nothing] { ctx =>
-      ctx.spawn(DummyAssemblyClient.behavior(supervisor), "DummyAssemblyClient")
+      ctx.spawn(GalilAssemblyClient.behavior(supervisor), "DummyAssemblyClient")
       val k1 = KeyType.IntKey.make("encoder")
       val k2 = KeyType.StringKey.make("filter")
       val i1 = k1.set(22, 33, 44)

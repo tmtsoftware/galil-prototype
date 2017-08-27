@@ -1,37 +1,28 @@
 package csw.proto.galil.assembly;
 
 import akka.typed.ActorRef;
-import akka.typed.Props;
 import akka.typed.javadsl.ActorContext;
-import akka.util.Timeout;
 import com.typesafe.config.ConfigFactory;
 import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
-import csw.common.framework.javadsl.JComponentInfoFactory;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
 import csw.common.framework.models.*;
-import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
+import csw.common.framework.scaladsl.Component$;
 import csw.param.states.CurrentState;
-import csw.services.location.models.ComponentId;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
-import csw.services.location.models.Connection.AkkaConnection;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-
-import static csw.services.location.javadsl.JComponentType.HCD;
 
 public class JGalilAssembly {
 
   // Base trait for Galil Assembly domain messages
-  interface JGalilAssemblyDomainMsg extends RunningMsg.DomainMsg {
+  interface JGalilAssemblyDomainMessage extends RunningMessage.DomainMessage {
   }
   // Add messages here...
 
@@ -44,28 +35,28 @@ public class JGalilAssembly {
   }
 
   @SuppressWarnings("unused")
-  public static class JGalilAssemblyWiring extends JComponentWiring<JGalilAssemblyDomainMsg> {
+  public static class JGalilAssemblyWiring extends JComponentWiring<JGalilAssemblyDomainMessage> {
 
     public JGalilAssemblyWiring() {
-      super(JGalilAssembly.JGalilAssemblyDomainMsg.class);
+      super(JGalilAssembly.JGalilAssemblyDomainMessage.class);
     }
 
     @Override
-    public JComponentHandlers<JGalilAssemblyDomainMsg> make(ActorContext<ComponentMsg> ctx,
+    public JComponentHandlers<JGalilAssemblyDomainMessage> make(ActorContext<ComponentMessage> ctx,
                                                             ComponentInfo componentInfo,
-                                                            ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, pubSubRef, JGalilAssemblyDomainMsg.class);
+                                                            ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef) {
+      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, pubSubRef, JGalilAssemblyDomainMessage.class);
     }
   }
 
-  static class JGalilAssemblyHandlers extends JComponentHandlers<JGalilAssemblyDomainMsg> implements JGalilAssemblyLogger {
+  static class JGalilAssemblyHandlers extends JComponentHandlers<JGalilAssemblyDomainMessage> implements JGalilAssemblyLogger {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    JGalilAssemblyHandlers(ActorContext<ComponentMsg> ctx,
+    JGalilAssemblyHandlers(ActorContext<ComponentMessage> ctx,
                            ComponentInfo componentInfo,
-                           ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef,
-                           Class<JGalilAssemblyDomainMsg> klass) {
+                           ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+                           Class<JGalilAssemblyDomainMessage> klass) {
       super(ctx, componentInfo, pubSubRef, klass);
       log.debug("Starting Galil Assembly");
     }
@@ -87,14 +78,14 @@ public class JGalilAssembly {
     }
 
     @Override
-    public void onDomainMsg(JGalilAssemblyDomainMsg galilAssemblyDomainMsg) {
-      log.debug("onDomainMsg called: " + galilAssemblyDomainMsg);
+    public void onDomainMsg(JGalilAssemblyDomainMessage galilAssemblyDomainMessage) {
+      log.debug("onDomainMessage called: " + galilAssemblyDomainMessage);
     }
 
     @Override
-    public Validation onControlCommand(CommandMsg commandMsg) {
+    public Validation onControlCommand(CommandMessage commandMsg) {
       log.debug("onControlCommand called: " + commandMsg);
-      return Validations.JValid(); // XXX Need Java API for this
+      return Validations.JValid();
     }
 
     @Override
@@ -128,19 +119,8 @@ public class JGalilAssembly {
   }
 
   private static void startAssembly() {
-    ComponentInfo assemblyInfo = JComponentInfoFactory.makeAssembly("GalilAssembly",
-        "wfos",
-        "csw.proto.galil.assembly.JGalilAssembly$JGalilAssemblyWiring",
-        Collections.singleton(new AkkaConnection(new ComponentId("GalilHcd", HCD))));
-
-    akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilAssembly");
-    Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
-    // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
-    system.<Void>systemActorOf(SupervisorBehaviorFactory.behavior(assemblyInfo), "GalilAssemblySupervisor", Props.empty(), timeout);
-
-    // XXX Java API not implemented yet!
-//    Component.createStandalone(ConfigFactory.load("GalilAssembly.conf"));
-
+    // XXX TODO: Java API not implemented yet!
+    Component$.MODULE$.createStandalone(ConfigFactory.load("GalilAssembly.conf"));
   }
 
   public static void main(String[] args) throws UnknownHostException {

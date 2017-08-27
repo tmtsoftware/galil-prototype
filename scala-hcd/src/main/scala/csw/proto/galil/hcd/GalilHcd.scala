@@ -4,39 +4,36 @@ import java.net.InetAddress
 
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
-import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.common.ccs.{Validation, Validations}
 import csw.common.framework.models.ComponentInfo
-import csw.common.framework.models.RunningMsg.DomainMsg
+import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
-import csw.common.framework.scaladsl.{Component, ComponentHandlers, ComponentWiring, SupervisorBehaviorFactory}
+import csw.common.framework.scaladsl.{Component, ComponentHandlers, ComponentWiring}
 import csw.param.states.CurrentState
-import csw.services.location.models.ComponentType.HCD
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
-import scala.concurrent.duration.DurationLong
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Base trait for Galil HCD domain messages
-sealed trait GalilHcdDomainMsg extends DomainMsg
+sealed trait GalilHcdDomainMessage extends DomainMessage
 
 // Add messages here...
 
 // Temporary logger, until one is provided by the API
 object GalilHcdLogger extends ComponentLogger("GalilHcd")
 
-private class GalilHcdWiring extends ComponentWiring[GalilHcdDomainMsg] {
-  override def handlers(ctx: ActorContext[ComponentMsg],
+private class GalilHcdWiring extends ComponentWiring[GalilHcdDomainMessage] {
+  override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
-                        pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]]
-                       ): ComponentHandlers[GalilHcdDomainMsg] = new GalilHcdHandlers(ctx, componentInfo, pubSubRef)
+                        pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
+                       ): ComponentHandlers[GalilHcdDomainMessage] = new GalilHcdHandlers(ctx, componentInfo, pubSubRef)
 }
 
-private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: ComponentInfo,
-                               pubSubRef: ActorRef[PubSub.PublisherMsg[CurrentState]])
-  extends ComponentHandlers[GalilHcdDomainMsg](ctx, componentInfo, pubSubRef) with GalilHcdLogger.Simple {
+private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInfo: ComponentInfo,
+                               pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]])
+  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef) with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -54,11 +51,11 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMsg], componentInfo: C
 
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
-  override def onDomainMsg(galilMsg: GalilHcdDomainMsg): Unit = galilMsg match {
-    case x => log.debug(s"onDomainMsg called: $x")
+  override def onDomainMsg(galilMsg: GalilHcdDomainMessage): Unit = galilMsg match {
+    case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  override def onControlCommand(commandMsg: CommandMsg): Validation = {
+  override def onControlCommand(commandMsg: CommandMessage): Validation = {
     log.debug(s"onControlCommand called: $commandMsg")
     Validations.Valid
   }
@@ -73,25 +70,7 @@ object GalilHcdApp extends App with GalilHcdLogger.Simple {
   }
 
   def startHcd(): Unit = {
-//    // XXX This should be read from a config file
-//    val hcdInfo = ComponentInfo("GalilHcd",
-//      HCD,
-//      "wfos",
-//      "csw.proto.galil.hcd.GalilHcdWiring")
-//
-//    val system = akka.typed.ActorSystem(akka.typed.scaladsl.Actor.empty, "GalilHcd")
-//    implicit val timeout: Timeout = Timeout(2.seconds)
-//    val f = system.systemActorOf(SupervisorBehaviorFactory.behavior(hcdInfo), "GalilHcdSupervisor")
-
     Component.createStandalone(ConfigFactory.load("GalilHcd.conf"))
-
-
-    //    // XXX temp: Until Supervisor.registerWithLocationService() is implemented...
-    //    // Start a dummy HCD client class that sends it a Submit message
-    //    import system.executionContext
-    //    f.foreach { supervisor =>
-    //      DummyHcdClient.start(supervisor)
-    //    }
   }
 
   startLogging()

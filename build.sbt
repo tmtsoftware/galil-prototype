@@ -32,3 +32,17 @@ lazy val `java-assembly` = project
     `csw-vslice`
   ))
 
+lazy val `scala-client` = project
+  .enablePlugins(DeployApp)
+  .settings(defaultSettings: _*)
+  .settings(libraryDependencies ++= Seq(
+    `csw-vslice`
+  ))
+
+lazy val `java-client` = project
+  .enablePlugins(DeployApp)
+  .settings(defaultSettings: _*)
+  .settings(libraryDependencies ++= Seq(
+    `csw-vslice`
+  ))
+

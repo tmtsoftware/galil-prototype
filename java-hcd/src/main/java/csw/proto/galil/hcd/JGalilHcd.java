@@ -1,16 +1,14 @@
 package csw.proto.galil.hcd;
 
 import akka.typed.ActorRef;
-import akka.typed.Props;
 import akka.typed.javadsl.ActorContext;
-import akka.util.Timeout;
+import com.typesafe.config.ConfigFactory;
 import csw.common.ccs.Validation;
 import csw.common.ccs.Validations;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.javadsl.JComponentWiring;
-import csw.common.framework.javadsl.JComponentInfoFactory;
 import csw.common.framework.models.*;
-import csw.common.framework.scaladsl.SupervisorBehaviorFactory;
+import csw.common.framework.scaladsl.Component$;
 import csw.param.states.CurrentState;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
@@ -20,12 +18,11 @@ import scala.runtime.BoxedUnit;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 public class JGalilHcd {
 
   // Base trait for Galil HCD domain messages
-  interface JGalilHcdDomainMsg extends RunningMsg.DomainMsg {
+  interface JGalilHcdDomainMessage extends RunningMessage.DomainMessage {
   }
   // Add messages here...
 
@@ -38,27 +35,27 @@ public class JGalilHcd {
   }
 
   @SuppressWarnings("unused")
-  public static class JGalilHcdWiring extends JComponentWiring<JGalilHcdDomainMsg> {
+  public static class JGalilHcdWiring extends JComponentWiring<JGalilHcdDomainMessage> {
 
     public JGalilHcdWiring() {
-      super(JGalilHcd.JGalilHcdDomainMsg.class);
+      super(JGalilHcd.JGalilHcdDomainMessage.class);
     }
 
     @Override
-    public JComponentHandlers<JGalilHcdDomainMsg> make(ActorContext<ComponentMsg> ctx, ComponentInfo componentInfo,
-                                                       ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef) {
-      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, pubSubRef, JGalilHcd.JGalilHcdDomainMsg.class);
+    public JComponentHandlers<JGalilHcdDomainMessage> make(ActorContext<ComponentMessage> ctx, ComponentInfo componentInfo,
+                                                       ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef) {
+      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, pubSubRef, JGalilHcd.JGalilHcdDomainMessage.class);
     }
   }
 
-  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMsg> implements JGalilHcdLogger {
+  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMessage> implements JGalilHcdLogger {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
-    JGalilHcdHandlers(ActorContext<ComponentMsg> ctx,
+    JGalilHcdHandlers(ActorContext<ComponentMessage> ctx,
                       ComponentInfo componentInfo,
-                      ActorRef<PubSub.PublisherMsg<CurrentState>> pubSubRef,
-                      Class<JGalilHcdDomainMsg> klass) {
+                      ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+                      Class<JGalilHcdDomainMessage> klass) {
       super(ctx, componentInfo, pubSubRef, klass);
       log.debug("Starting Galil HCD");
     }
@@ -80,12 +77,12 @@ public class JGalilHcd {
     }
 
     @Override
-    public void onDomainMsg(JGalilHcdDomainMsg galilHcdDomainMsg) {
-      log.debug("onDomainMsg called: " + galilHcdDomainMsg);
+    public void onDomainMsg(JGalilHcdDomainMessage galilHcdDomainMessage) {
+      log.debug("onDomainMessage called: " + galilHcdDomainMessage);
     }
 
     @Override
-    public Validation onControlCommand(CommandMsg commandMsg) {
+    public Validation onControlCommand(CommandMessage commandMsg) {
       log.debug("onControlCommand called: " + commandMsg);
       return Validations.JValid();
     }
@@ -121,17 +118,8 @@ public class JGalilHcd {
   }
 
   private static void startHcd() {
-    ComponentInfo hcdInfo = JComponentInfoFactory.makeHcd("GalilHcd",
-        "wfos",
-        "csw.proto.galil.hcd.JGalilHcd$JGalilHcdWiring");
-
-    akka.typed.ActorSystem system = akka.typed.ActorSystem.create(akka.typed.scaladsl.Actor.empty(), "GalilHcd");
-    Timeout timeout = Timeout.apply(2, TimeUnit.SECONDS);
-    // A component developer will never have to create an actor as they will only create and test handlers. In java we could use Void if need be.
-    system.<Void>systemActorOf(SupervisorBehaviorFactory.behavior(hcdInfo), "GalilHcdSupervisor", Props.empty(), timeout);
-
-    // XXX Java API not implemented yet!
-//    Component.createStandalone(ConfigFactory.load("GalilHcd.conf"));
+    // XXX TODO: Java API not implemented yet!
+    Component$.MODULE$.createStandalone(ConfigFactory.load("GalilHcd.conf"));
   }
 
   public static void main(String[] args) throws UnknownHostException {
