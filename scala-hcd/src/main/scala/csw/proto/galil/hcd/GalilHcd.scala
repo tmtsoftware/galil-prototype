@@ -6,10 +6,11 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.common.ccs.{Validation, Validations}
+import csw.common.framework.internal.wiring.{FrameworkWiring, Standalone}
 import csw.common.framework.models.ComponentInfo
 import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
-import csw.common.framework.scaladsl.{Component, ComponentHandlers, ComponentWiring}
+import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -24,7 +25,7 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 // Temporary logger, until one is provided by the API
 object GalilHcdLogger extends ComponentLogger("GalilHcd")
 
-private class GalilHcdWiring extends ComponentWiring[GalilHcdDomainMessage] {
+private class GalilHcdWiring extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
@@ -41,11 +42,13 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInf
     log.debug("Initialize called")
   }
 
-  override def onRun(): Unit = log.debug("onRun called")
+  override def onRun(): Future[Unit] = async {
+    log.debug("onRun called")
+  }
 
-  override def onShutdown(): Unit = log.debug("onShutdown called")
-
-  override def onRestart(): Unit = log.debug("onRestart called")
+  override def onShutdown(): Future[Unit] = async {
+    log.debug("onShutdown called")
+  }
 
   override def onGoOffline(): Unit = log.debug("onGoOffline called")
 
@@ -62,17 +65,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInf
 }
 
 object GalilHcdApp extends App with GalilHcdLogger.Simple {
-  def startLogging(): Unit = {
-    val host = InetAddress.getLocalHost.getHostName
-    val system = akka.actor.ActorSystem()
-    LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
-    log.debug("Starting Galil HCD")
-  }
-
-  def startHcd(): Unit = {
-    Component.createStandalone(ConfigFactory.load("GalilHcd.conf"))
-  }
-
-  startLogging()
-  startHcd()
+  val host = InetAddress.getLocalHost.getHostName
+  val system = akka.actor.ActorSystem()
+  LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
+  log.debug("Starting Galil HCD")
+  val wiring = FrameworkWiring.make(system)
+  Standalone.spawn(ConfigFactory.load("GalilHcd.conf"), wiring)
 }
