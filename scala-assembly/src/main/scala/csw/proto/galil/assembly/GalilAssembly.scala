@@ -2,6 +2,7 @@ package csw.proto.galil.assembly
 
 import java.net.InetAddress
 
+import akka.actor.ActorSystem
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,6 +13,7 @@ import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
+import csw.services.location.scaladsl.ActorSystemFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
@@ -24,7 +26,7 @@ sealed trait GalilAssemblyDomainMessage extends DomainMessage
 
 object GalilAssemblyLogger extends ComponentLogger("GalilAssembly")
 
-private class GalilAssemblyWiring extends ComponentBehaviorFactory[GalilAssemblyDomainMessage] {
+private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[GalilAssemblyDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
@@ -39,10 +41,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage], compone
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
-  }
-
-  override def onRun(): Future[Unit] = async {
-    log.debug("onRun called")
   }
 
   override def onShutdown(): Future[Unit] = async {

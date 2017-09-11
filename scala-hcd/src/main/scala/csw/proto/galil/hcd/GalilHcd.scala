@@ -2,6 +2,7 @@ package csw.proto.galil.hcd
 
 import java.net.InetAddress
 
+import akka.actor.ActorSystem
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,6 +13,7 @@ import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
+import csw.services.location.scaladsl.ActorSystemFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
@@ -25,7 +27,7 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 // Temporary logger, until one is provided by the API
 object GalilHcdLogger extends ComponentLogger("GalilHcd")
 
-private class GalilHcdWiring extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
+private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
                         pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
@@ -40,10 +42,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInf
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
-  }
-
-  override def onRun(): Future[Unit] = async {
-    log.debug("onRun called")
   }
 
   override def onShutdown(): Future[Unit] = async {

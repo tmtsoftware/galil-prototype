@@ -11,6 +11,7 @@ import csw.common.framework.javadsl.JComponentBehaviorFactory;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.models.*;
 import csw.param.states.CurrentState;
+import csw.services.location.scaladsl.ActorSystemFactory;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
@@ -36,9 +37,9 @@ public class JGalilAssembly {
   }
 
   @SuppressWarnings("unused")
-  public static class JGalilAssemblyWiring extends JComponentBehaviorFactory<JGalilAssemblyDomainMessage> {
+  public static class JGalilAssemblyBehaviorFactory extends JComponentBehaviorFactory<JGalilAssemblyDomainMessage> {
 
-    public JGalilAssemblyWiring() {
+    public JGalilAssemblyBehaviorFactory() {
       super(JGalilAssembly.JGalilAssemblyDomainMessage.class);
     }
 
@@ -69,13 +70,6 @@ public class JGalilAssembly {
     @Override
     public CompletableFuture<BoxedUnit> jInitialize() {
       log.debug("jInitialize called");
-      return CompletableFuture.supplyAsync(this::doNothing);
-    }
-
-
-    @Override
-    public CompletableFuture<BoxedUnit> jOnRun() {
-      log.debug("jOnRun called");
       return CompletableFuture.supplyAsync(this::doNothing);
     }
 
