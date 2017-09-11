@@ -75,12 +75,12 @@ object GalilSimulator extends App {
       val welcome = Source.single(welcomeMsg)
 
       val serverLogic = Flow[ByteString]
-        .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 256, allowTruncation = true))
+        .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
         .map(_.utf8String)
         .via(commandParser)
         // merge in the initial banner after parser
         .merge(welcome)
-        .map(_ + "\n")
+        .map(_ + "\r")
         .map(ByteString(_))
 
       connection.handleWith(serverLogic)

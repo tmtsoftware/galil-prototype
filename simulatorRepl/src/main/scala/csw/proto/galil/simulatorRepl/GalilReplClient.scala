@@ -5,6 +5,8 @@ import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
 import akka.util.ByteString
 
+import scala.io.StdIn
+
 object GalilReplClient extends App {
 
   implicit val system: ActorSystem = ActorSystem()
@@ -14,7 +16,7 @@ object GalilReplClient extends App {
 
   // Parses the command line options
   private val parser = new scopt.OptionParser[Options]("test-akka-service-app") {
-    head("galil-repl-client", System.getProperty("CSW_VERSION"))
+    head("simulatorrepl", System.getProperty("CSW_VERSION"))
 
     opt[String]("host") valueName "<hostname>" action { (x, c) =>
       c.copy(host = x)
@@ -48,16 +50,13 @@ object GalilReplClient extends App {
     val replParser =
       Flow[String].takeWhile(_ != "q")
         .concat(Source.single("BYE"))
-        .map(elem => ByteString(s"$elem\n"))
+        .map(elem => ByteString(s"$elem\r"))
 
     val repl = Flow[ByteString]
-      .via(Framing.delimiter(
-        ByteString("\n"),
-        maximumFrameLength = 256,
-        allowTruncation = true))
+      .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
       .map(_.utf8String)
       .map(text => println("Server: " + text))
-      .map(_ => readLine("> "))
+      .map(_ => StdIn.readLine("> "))
       .via(replParser)
 
     connection.join(repl).run()
