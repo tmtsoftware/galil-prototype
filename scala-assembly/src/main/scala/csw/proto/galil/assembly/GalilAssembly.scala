@@ -13,6 +13,7 @@ import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
+import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.ActorSystemFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -63,7 +64,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage], compone
 
 object GalilAssemblyApp extends App with GalilAssemblyLogger.Simple {
   val host = InetAddress.getLocalHost.getHostName
-  val system = akka.actor.ActorSystem()
+//  val system = akka.actor.ActorSystem()
+  val system: ActorSystem = ClusterAwareSettings.system
   LoggingSystemFactory.start("GalilAssembly", "0.1", host, system)
   log.debug("Starting Galil Assembly")
   val wiring  = FrameworkWiring.make(system)

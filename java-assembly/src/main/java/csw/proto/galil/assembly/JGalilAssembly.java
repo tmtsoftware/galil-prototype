@@ -11,6 +11,7 @@ import csw.common.framework.javadsl.JComponentBehaviorFactory;
 import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.models.*;
 import csw.param.states.CurrentState;
+import csw.services.location.commons.ClusterAwareSettings;
 import csw.services.location.scaladsl.ActorSystemFactory;
 import csw.services.logging.javadsl.ILogger;
 import csw.services.logging.javadsl.JComponentLogger;
@@ -103,7 +104,8 @@ public class JGalilAssembly {
 
   public static void main(String[] args) throws UnknownHostException {
     String host = InetAddress.getLocalHost().getHostName();
-    akka.actor.ActorSystem system = akka.actor.ActorSystem.create();
+//    akka.actor.ActorSystem system = akka.actor.ActorSystem.create();
+    akka.actor.ActorSystem system = ClusterAwareSettings.system();
     LoggingSystemFactory.start("GalilAssembly", "0.1", host, system);
     FrameworkWiring wiring = FrameworkWiring.make(system);
     Standalone.spawn(ConfigFactory.load("GalilAssembly.conf"), wiring);
