@@ -104,7 +104,6 @@ public class JGalilAssembly {
 
   public static void main(String[] args) throws UnknownHostException {
     String host = InetAddress.getLocalHost().getHostName();
-//    akka.actor.ActorSystem system = akka.actor.ActorSystem.create();
     akka.actor.ActorSystem system = ClusterAwareSettings.system();
     LoggingSystemFactory.start("GalilAssembly", "0.1", host, system);
     FrameworkWiring wiring = FrameworkWiring.make(system);

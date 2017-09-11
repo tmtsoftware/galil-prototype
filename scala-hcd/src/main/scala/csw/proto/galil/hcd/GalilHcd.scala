@@ -65,8 +65,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInf
 
 object GalilHcdApp extends App with GalilHcdLogger.Simple {
   val host = InetAddress.getLocalHost.getHostName
-//  val system = akka.actor.ActorSystem()
-//  val system: ActorSystem = ActorSystemFactory.remote
   val system: ActorSystem = ClusterAwareSettings.system
   LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
   log.debug("Starting Galil HCD")
