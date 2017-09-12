@@ -49,29 +49,42 @@ object GalilSimulator extends App {
     case None => System.exit(1)
   }
 
+  // From the Galil doc:
+  // "The controller will respond to that command with a string. The response of the
+  //command depends on which command was sent. In general, if there is a
+  //response expected such as the "TP" Tell Position command. The response will
+  //be in the form of the expected value(s) followed by a Carriage return (0x0D), Line
+  //Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
+  //just a question mark (?) and nothing else. If the command is not expected to
+  //return a value, the response will be just the Colon (:)."
+  private def formatReply(reply: Option[String], isError: Boolean = false): String = {
+    if (isError) "?" else reply match {
+      case Some(msg) => s"$msg\r\n:"
+      case None => ":"
+    }
+  }
+  private def formatReply(reply: String): String = formatReply(Some(reply))
+
+  // Process the Galil command and return the reply
+  private def processCommand(cmd: String): String = {
+    cmd match {
+      case "badcmd" => formatReply(None, isError = true)
+      case "noreplycmd" => formatReply(None)
+      case _ => formatReply(s"$cmd!!!")
+    }
+  }
+
   private def run(options: Options): Unit = {
     import options._
 
     val connections: Source[IncomingConnection, Future[ServerBinding]] = Tcp().bind(host, port)
 
-    //  connections runForeach { connection =>
-    //    println(s"New connection from: ${connection.remoteAddress}")
-    //
-    //    val echo = Flow[ByteString]
-    //      .via(Framing.delimiter(ByteString("\n"), maximumFrameLength = 256, allowTruncation = true))
-    //      .map(_.utf8String)
-    //      .map(_ + "!!!\n")
-    //      .map(ByteString(_))
-    //
-    //    connection.handleWith(echo)
-    //  }
-
     connections.runForeach { connection =>
       // server logic, parses incoming commands
-      val commandParser = Flow[String].takeWhile(_ != "BYE").map(_ + "!")
+      val commandParser = Flow[String].takeWhile(_ != "BYE").map(processCommand)
 
       import connection._
-      val welcomeMsg = s"Welcome to: $localAddress, you are: $remoteAddress!"
+      val welcomeMsg = s"Welcome to: $localAddress, you are: $remoteAddress!\r\n:"
       val welcome = Source.single(welcomeMsg)
 
       val serverLogic = Flow[ByteString]
@@ -80,7 +93,6 @@ object GalilSimulator extends App {
         .via(commandParser)
         // merge in the initial banner after parser
         .merge(welcome)
-        .map(_ + "\r")
         .map(ByteString(_))
 
       connection.handleWith(serverLogic)

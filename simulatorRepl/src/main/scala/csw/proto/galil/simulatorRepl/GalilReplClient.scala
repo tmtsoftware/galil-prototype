@@ -2,7 +2,7 @@ package csw.proto.galil.simulatorRepl
 
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
+import akka.stream.scaladsl.{Flow, Source, Tcp}
 import akka.util.ByteString
 
 import scala.io.StdIn
@@ -52,14 +52,33 @@ object GalilReplClient extends App {
         .concat(Source.single("BYE"))
         .map(elem => ByteString(s"$elem\r"))
 
+    // From the Galil doc:
+    // "The controller will respond to that command with a string. The response of the
+    //command depends on which command was sent. In general, if there is a
+    //response expected such as the "TP" Tell Position command. The response will
+    //be in the form of the expected value(s) followed by a Carriage return (0x0D), Line
+    //Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
+    //just a question mark (?) and nothing else. If the command is not expected to
+    //return a value, the response will be just the Colon (:)."
+    //
+    // Here, the string "ERROR" is returned for an error ("?"), "OK" for an empty response
+    // and otherwise the response is returned (minus the trailing delimiter).
+    val responseHandler = Flow[ByteString].map { bs =>
+      val s = bs.utf8String
+      s match {
+        case "?" => "ERROR"
+        case ":" => "OK"
+        case resp if resp.endsWith("\r\n:") => resp.dropRight(3)
+        case _ => "INCOMPLETE" // XXX should not happen
+      }
+    }
+
     val repl = Flow[ByteString]
-      .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
-      .map(_.utf8String)
-      .map(text => println("Server: " + text))
+      .via(responseHandler)
+      .map(response => println(s"$response\n"))
       .map(_ => StdIn.readLine("> "))
       .via(replParser)
 
     connection.join(repl).run()
   }
-
 }
