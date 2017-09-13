@@ -47,10 +47,10 @@ object GalilReplClient extends App {
     import options._
     val connection = Tcp().outgoingConnection(host, port)
 
-    val replParser =
-      Flow[String].takeWhile(_ != "q")
-        .concat(Source.single("BYE"))
-        .map(elem => ByteString(s"$elem\r"))
+    val replParser = Flow[String]
+      .takeWhile(_ != "q")
+      .concat(Source.single("BYE"))
+      .map(elem => ByteString(s"$elem\r"))
 
     // From the Galil doc:
     // "The controller will respond to that command with a string. The response of the
@@ -79,6 +79,6 @@ object GalilReplClient extends App {
       .map(_ => StdIn.readLine("> "))
       .via(replParser)
 
-    connection.join(repl).run()
+    connection.join(repl).run
   }
 }

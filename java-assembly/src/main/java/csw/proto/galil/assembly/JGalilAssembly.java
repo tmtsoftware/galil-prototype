@@ -12,9 +12,8 @@ import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.models.*;
 import csw.param.states.CurrentState;
 import csw.services.location.commons.ClusterAwareSettings;
-import csw.services.location.scaladsl.ActorSystemFactory;
+import csw.services.location.javadsl.ILocationService;
 import csw.services.logging.javadsl.ILogger;
-import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
 
@@ -29,14 +28,6 @@ public class JGalilAssembly {
   }
   // Add messages here...
 
-
-  interface JGalilAssemblyLogger extends JComponentLogger {
-    @Override
-    default String componentName() {
-      return "GalilAssembly";
-    }
-  }
-
   @SuppressWarnings("unused")
   public static class JGalilAssemblyBehaviorFactory extends JComponentBehaviorFactory<JGalilAssemblyDomainMessage> {
 
@@ -45,22 +36,25 @@ public class JGalilAssembly {
     }
 
     @Override
-    public JComponentHandlers<JGalilAssemblyDomainMessage> make(ActorContext<ComponentMessage> ctx,
-                                                                ComponentInfo componentInfo,
-                                                                ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef) {
-      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, pubSubRef, JGalilAssemblyDomainMessage.class);
+    public JComponentHandlers<JGalilAssemblyDomainMessage> jHandlers(
+        ActorContext<ComponentMessage> ctx,
+        ComponentInfo componentInfo,
+        ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+        ILocationService locationService) {
+      return new JGalilAssembly.JGalilAssemblyHandlers(ctx, componentInfo, pubSubRef, locationService,
+          JGalilAssemblyDomainMessage.class);
     }
   }
 
-  static class JGalilAssemblyHandlers extends JComponentHandlers<JGalilAssemblyDomainMessage> implements JGalilAssemblyLogger {
-    // XXX Can't this be done in the interface?
+  static class JGalilAssemblyHandlers extends JComponentHandlers<JGalilAssemblyDomainMessage> {
     private ILogger log = getLogger();
 
     JGalilAssemblyHandlers(ActorContext<ComponentMessage> ctx,
                            ComponentInfo componentInfo,
                            ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+                           ILocationService locationService,
                            Class<JGalilAssemblyDomainMessage> klass) {
-      super(ctx, componentInfo, pubSubRef, klass);
+      super(ctx, componentInfo, pubSubRef, locationService, klass);
       log.debug("Starting Galil Assembly");
     }
 

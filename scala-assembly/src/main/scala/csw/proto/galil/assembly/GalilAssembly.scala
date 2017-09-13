@@ -9,13 +9,14 @@ import com.typesafe.config.ConfigFactory
 import csw.common.ccs.{Validation, Validations}
 import csw.common.framework.internal.wiring.{FrameworkWiring, Standalone}
 import csw.common.framework.models.ComponentInfo
+import csw.common.framework.models.PubSub.PublisherMessage
 import csw.common.framework.models.RunningMessage.DomainMessage
 import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
 import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.ActorSystemFactory
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.location.scaladsl.LocationService
+import csw.services.logging.scaladsl.LoggingSystemFactory
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -25,18 +26,21 @@ sealed trait GalilAssemblyDomainMessage extends DomainMessage
 
 // Add messages here...
 
-object GalilAssemblyLogger extends ComponentLogger("GalilAssembly")
-
 private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[GalilAssemblyDomainMessage] {
-  override def handlers(ctx: ActorContext[ComponentMessage],
-                        componentInfo: ComponentInfo,
-                        pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
-                       ): ComponentHandlers[GalilAssemblyDomainMessage] = new GalilAssemblyHandlers(ctx, componentInfo, pubSubRef)
+  override def handlers(
+                ctx: ActorContext[ComponentMessage],
+                componentInfo: ComponentInfo,
+                pubSubRef: ActorRef[PublisherMessage[CurrentState]],
+                locationService: LocationService
+              ): ComponentHandlers[GalilAssemblyDomainMessage] =
+    new GalilAssemblyHandlers(ctx, componentInfo, pubSubRef, locationService)
 }
 
-private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage], componentInfo: ComponentInfo,
-                                    pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]])
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef) with GalilAssemblyLogger.Simple {
+private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
+                                    componentInfo: ComponentInfo,
+                                    pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
+                                    locationService: LocationService)
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef, locationService) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -62,11 +66,10 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage], compone
   }
 }
 
-object GalilAssemblyApp extends App with GalilAssemblyLogger.Simple {
+object GalilAssemblyApp extends App {
   val host = InetAddress.getLocalHost.getHostName
   val system: ActorSystem = ClusterAwareSettings.system
   LoggingSystemFactory.start("GalilAssembly", "0.1", host, system)
-  log.debug("Starting Galil Assembly")
   val wiring  = FrameworkWiring.make(system)
   Standalone.spawn(ConfigFactory.load("GalilAssembly.conf"), wiring)
 }

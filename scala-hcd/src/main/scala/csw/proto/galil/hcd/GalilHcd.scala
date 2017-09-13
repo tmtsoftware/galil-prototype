@@ -14,8 +14,8 @@ import csw.common.framework.models._
 import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.param.states.CurrentState
 import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.ActorSystemFactory
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.location.scaladsl.LocationService
+import csw.services.logging.scaladsl.LoggingSystemFactory
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -25,19 +25,20 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 
 // Add messages here...
 
-// Temporary logger, until one is provided by the API
-object GalilHcdLogger extends ComponentLogger("GalilHcd")
-
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
-                        pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]]
-                       ): ComponentHandlers[GalilHcdDomainMessage] = new GalilHcdHandlers(ctx, componentInfo, pubSubRef)
+                        pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
+                        locationService: LocationService
+                       ): ComponentHandlers[GalilHcdDomainMessage] =
+    new GalilHcdHandlers(ctx, componentInfo, pubSubRef, locationService)
 }
 
-private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInfo: ComponentInfo,
-                               pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]])
-  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef) with GalilHcdLogger.Simple {
+private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
+                               componentInfo: ComponentInfo,
+                               pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
+                               locationService: LocationService)
+  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -63,11 +64,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage], componentInf
   }
 }
 
-object GalilHcdApp extends App with GalilHcdLogger.Simple {
+object GalilHcdApp extends App {
   val host = InetAddress.getLocalHost.getHostName
   val system: ActorSystem = ClusterAwareSettings.system
   LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
-  log.debug("Starting Galil HCD")
   val wiring = FrameworkWiring.make(system)
   Standalone.spawn(ConfigFactory.load("GalilHcd.conf"), wiring)
 }

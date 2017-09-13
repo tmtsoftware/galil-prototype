@@ -12,8 +12,8 @@ import csw.common.framework.javadsl.JComponentHandlers;
 import csw.common.framework.models.*;
 import csw.param.states.CurrentState;
 import csw.services.location.commons.ClusterAwareSettings;
+import csw.services.location.javadsl.ILocationService;
 import csw.services.logging.javadsl.ILogger;
-import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
 
@@ -29,13 +29,6 @@ public class JGalilHcd {
   // Add messages here...
 
 
-  interface JGalilHcdLogger extends JComponentLogger {
-    @Override
-    default String componentName() {
-      return "GalilHcd";
-    }
-  }
-
   @SuppressWarnings("unused")
   public static class JGalilHcdBehaviorFactory extends JComponentBehaviorFactory<JGalilHcdDomainMessage> {
 
@@ -44,21 +37,25 @@ public class JGalilHcd {
     }
 
     @Override
-    public JComponentHandlers<JGalilHcdDomainMessage> make(ActorContext<ComponentMessage> ctx, ComponentInfo componentInfo,
-                                                           ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef) {
-      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, pubSubRef, JGalilHcd.JGalilHcdDomainMessage.class);
+    public JComponentHandlers<JGalilHcdDomainMessage> jHandlers(
+        ActorContext<ComponentMessage> ctx,
+        ComponentInfo componentInfo,
+        ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+        ILocationService locationService) {
+      return new JGalilHcd.JGalilHcdHandlers(ctx, componentInfo, pubSubRef, locationService, JGalilHcd.JGalilHcdDomainMessage.class);
     }
   }
 
-  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMessage> implements JGalilHcdLogger {
+  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMessage> {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
     JGalilHcdHandlers(ActorContext<ComponentMessage> ctx,
                       ComponentInfo componentInfo,
                       ActorRef<PubSub.PublisherMessage<CurrentState>> pubSubRef,
+                      ILocationService locationService,
                       Class<JGalilHcdDomainMessage> klass) {
-      super(ctx, componentInfo, pubSubRef, klass);
+      super(ctx, componentInfo, pubSubRef, locationService, klass);
       log.debug("Starting Galil HCD");
     }
 
