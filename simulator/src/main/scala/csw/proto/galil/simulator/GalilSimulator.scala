@@ -83,16 +83,10 @@ object GalilSimulator extends App {
       // server logic, parses incoming commands
       val commandParser = Flow[String].takeWhile(_ != "BYE").map(processCommand)
 
-      import connection._
-      val welcomeMsg = s"Welcome to: $localAddress, you are: $remoteAddress!\r\n:"
-      val welcome = Source.single(welcomeMsg)
-
       val serverLogic = Flow[ByteString]
         .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
         .map(_.utf8String)
         .via(commandParser)
-        // merge in the initial banner after parser
-        .merge(welcome)
         .map(ByteString(_))
 
       connection.handleWith(serverLogic)

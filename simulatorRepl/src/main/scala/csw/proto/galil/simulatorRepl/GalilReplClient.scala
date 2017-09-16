@@ -74,6 +74,8 @@ object GalilReplClient extends App {
     }
 
     val repl = Flow[ByteString]
+       // The welcome bit is needed to get the flow started, since the server doesn't send anything at the start
+      .merge(Source.single(ByteString("Welcome\r\n:")))
       .via(responseHandler)
       .map(response => println(s"$response\n"))
       .map(_ => StdIn.readLine("> "))
