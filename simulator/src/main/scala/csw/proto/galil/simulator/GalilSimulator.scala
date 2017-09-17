@@ -69,7 +69,8 @@ object GalilSimulator extends App {
 
   // Process the Galil command and return the reply
   private def processCommand(cmd: String): String = {
-    cmd match {
+    if (cmd.startsWith("'")) formatReply(None) // comment with "'"
+    else cmd match {
       case "badcmd" => formatReply(None, isError = true)
       case "noreplycmd" => formatReply(None)
       case "NO" => formatReply(None)

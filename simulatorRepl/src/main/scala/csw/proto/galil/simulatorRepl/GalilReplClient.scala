@@ -65,8 +65,6 @@ object GalilReplClient extends App {
     val replParser = Flow[String]
       // Need to send an initial message to start off: (NO = No op)
       .merge(Source.single("NO"))
-      // Ignore client side comments
-      .filterNot(_.startsWith("REM"))
       // Type 'q' to quit
       .takeWhile(_ != "q")
       .watchTermination() { (_, f) => quit(f) }
@@ -104,6 +102,8 @@ object GalilReplClient extends App {
       .via(responseHandler)
       .map(response => println(s"$response"))
       .map((_: Unit) => StdIn.readLine(":"))
+      // client side comments with REM? Convert to server format with "'"
+      .map(s => s.replaceFirst("^REM", "'"))
       .via(replParser)
 
     connection.join(repl).run
