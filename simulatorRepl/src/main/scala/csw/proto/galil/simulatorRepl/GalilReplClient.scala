@@ -3,7 +3,7 @@ package csw.proto.galil.simulatorRepl
 import akka.Done
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Flow, Source, Tcp}
+import akka.stream.scaladsl.{Flow, Keep, Source, Tcp}
 import akka.util.ByteString
 
 import scala.concurrent.Future
@@ -85,22 +85,17 @@ object GalilReplClient extends App {
     //
     // Here, the string "ERROR" is returned for an error ("?"), "OK" for an empty response
     // and otherwise the response is returned (minus the trailing delimiter).
-    val responseHandler = Flow[ByteString].map { bs =>
-      val s = bs.utf8String
-      s match {
-        case "?" => "?"
-        case ":" => ""
-        case resp if resp.endsWith("\r\n:") => resp.dropRight(3)
-        case _ => "INCOMPLETE" // XXX should not happen
+    val responseHandler = Flow[ByteString]
+      .map { bs =>
+        val resp = bs.utf8String
+        resp.split("\r\n:").foreach(println(_))
       }
-    }
 
     val version = Option(System.getProperty("VERSION")).getOrElse("")
     println(s"Galil client $version: type 'q' to quit.")
 
     val repl = Flow[ByteString]
       .via(responseHandler)
-      .map(response => println(s"$response"))
       .map((_: Unit) => StdIn.readLine(":"))
       // client side comments with REM? Convert to server format with "'"
       .map(s => s.replaceFirst("^REM", "'"))

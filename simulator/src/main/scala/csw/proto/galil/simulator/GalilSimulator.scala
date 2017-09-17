@@ -68,14 +68,18 @@ object GalilSimulator extends App {
   private def formatReply(reply: String): String = formatReply(Some(reply))
 
   // Process the Galil command and return the reply
-  private def processCommand(cmd: String): String = {
-    if (cmd.startsWith("'")) formatReply(None) // comment with "'"
-    else cmd match {
+  private def processCommand(cmd: ByteString): ByteString = {
+    val cmdString = cmd.utf8String
+//    println(s"XXX cmd = $cmdString")
+    val reply = if (cmdString.startsWith("'")) formatReply(None) // comment with "'"
+    else cmdString match {
       case "badcmd" => formatReply(None, isError = true)
       case "noreplycmd" => formatReply(None)
       case "NO" => formatReply(None)
-      case _ => formatReply(s"$cmd!!!")
+      case _ => formatReply(s"$cmdString!!!")
     }
+//    println(s"XXX reply = $reply")
+    ByteString(reply)
   }
 
   private def run(options: Options): Unit = {
@@ -83,17 +87,13 @@ object GalilSimulator extends App {
 
     val connections: Source[IncomingConnection, Future[ServerBinding]] = Tcp().bind(host, port)
 
-    connections.runForeach { connection =>
-      // server logic, parses incoming commands
-      val commandParser = Flow[String].takeWhile(_ != "BYE").map(processCommand)
+    val serverLogic = Flow[ByteString]
+      // handle lines
+      .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
+      // handle multiple commands on a line separated by ";"
+      .mapConcat(_.utf8String.split(";").map(ByteString(_)).toList)
+      .map(processCommand)
 
-      val serverLogic = Flow[ByteString]
-        .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
-        .map(_.utf8String)
-        .via(commandParser)
-        .map(ByteString(_))
-
-      connection.handleWith(serverLogic)
-    }
+    connections.runForeach(_.handleWith(serverLogic))
   }
 }
