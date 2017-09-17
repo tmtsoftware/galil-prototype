@@ -3,7 +3,7 @@ package csw.proto.galil.simulatorRepl
 import akka.Done
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Flow, Keep, Source, Tcp}
+import akka.stream.scaladsl.{Flow, Source, Tcp}
 import akka.util.ByteString
 
 import scala.concurrent.Future
@@ -70,6 +70,15 @@ object GalilReplClient extends App {
       .watchTermination() { (_, f) => quit(f) }
       .map(elem => ByteString(s"$elem\r"))
 
+    // Handle the response of a single command
+    def handleOneResponse(resp: String): Unit = {
+      val s = resp match {
+        case ":" => ""
+        case x => x
+      }
+      println(s)
+    }
+
     // From the Galil doc:
     // 2) Sending a Command
     // Once a socket is established, the user will need to send a Galil command as a string to
@@ -86,17 +95,14 @@ object GalilReplClient extends App {
     // Here, the string "ERROR" is returned for an error ("?"), "OK" for an empty response
     // and otherwise the response is returned (minus the trailing delimiter).
     val responseHandler = Flow[ByteString]
-      .map { bs =>
-        val resp = bs.utf8String
-        resp.split("\r\n:").foreach(println(_))
-      }
+      .map(_.utf8String.split("\r\n:").foreach(handleOneResponse))
 
     val version = Option(System.getProperty("VERSION")).getOrElse("")
     println(s"Galil client $version: type 'q' to quit.")
 
     val repl = Flow[ByteString]
       .via(responseHandler)
-      .map((_: Unit) => StdIn.readLine(":"))
+      .mapAsync(10)((_: Unit) => Future {StdIn.readLine(":")})
       // client side comments with REM? Convert to server format with "'"
       .map(s => s.replaceFirst("^REM", "'"))
       .via(replParser)
