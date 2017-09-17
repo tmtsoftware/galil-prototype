@@ -48,7 +48,7 @@ object GalilReplClient extends App {
     val connection = Tcp().outgoingConnection(host, port)
 
     val replParser = Flow[String]
-      .merge(Source.single("TH")) // XXX need to send an initial message to start off
+      .merge(Source.single("NO")) // XXX need to send an initial message to start off: NO = No op
       .takeWhile(_ != "q")
       .concat(Source.single("BYE"))
       .map(elem => ByteString(s"$elem\r"))
@@ -81,7 +81,7 @@ object GalilReplClient extends App {
     val repl = Flow[ByteString]
       .via(responseHandler)
       .map(response => println(s"$response\n"))
-      .map(_ => StdIn.readLine("> "))
+      .map((_: Unit) => StdIn.readLine("> "))
       .via(replParser)
 
     connection.join(repl).run
