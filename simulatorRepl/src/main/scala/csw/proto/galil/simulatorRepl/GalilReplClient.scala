@@ -48,11 +48,16 @@ object GalilReplClient extends App {
     val connection = Tcp().outgoingConnection(host, port)
 
     val replParser = Flow[String]
+      .merge(Source.single("TH")) // XXX need to send an initial message to start off
       .takeWhile(_ != "q")
       .concat(Source.single("BYE"))
       .map(elem => ByteString(s"$elem\r"))
 
     // From the Galil doc:
+    // 2) Sending a Command
+    // Once a socket is established, the user will need to send a Galil command as a string to
+    // the controller (via the opened socket) followed by a Carriage return (0x0D).
+    // 3) Receiving a Response
     // "The controller will respond to that command with a string. The response of the
     //command depends on which command was sent. In general, if there is a
     //response expected such as the "TP" Tell Position command. The response will
@@ -74,8 +79,6 @@ object GalilReplClient extends App {
     }
 
     val repl = Flow[ByteString]
-       // The welcome bit is needed to get the flow started, since the server doesn't send anything at the start
-      .merge(Source.single(ByteString("Welcome\r\n:")))
       .via(responseHandler)
       .map(response => println(s"$response\n"))
       .map(_ => StdIn.readLine("> "))

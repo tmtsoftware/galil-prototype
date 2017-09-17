@@ -2,7 +2,7 @@ package csw.proto.galil.simulator
 
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
-import akka.stream.scaladsl.{Flow, Source, Tcp}
+import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
 import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
 import akka.util.ByteString
 
@@ -12,8 +12,6 @@ import scala.concurrent.Future
   * Simulates the protocol used to talk to the Galil hardware.
   */
 object GalilSimulator extends App {
-
-  import akka.stream.scaladsl.Framing
 
   implicit val system: ActorSystem = ActorSystem()
   implicit val mat: ActorMaterializer = ActorMaterializer()
@@ -50,6 +48,10 @@ object GalilSimulator extends App {
   }
 
   // From the Galil doc:
+  // 2) Sending a Command
+  // Once a socket is established, the user will need to send a Galil command as a string to
+  // the controller (via the opened socket) followed by a Carriage return (0x0D).
+  // 3) Receiving a Response
   // "The controller will respond to that command with a string. The response of the
   //command depends on which command was sent. In general, if there is a
   //response expected such as the "TP" Tell Position command. The response will
