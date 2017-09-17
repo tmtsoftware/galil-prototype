@@ -72,11 +72,11 @@ object GalilReplClient extends App {
 
     // Handle the response of a single command
     def handleOneResponse(resp: String): Unit = {
-      val s = resp match {
-        case ":" => ""
-        case x => x
+      resp match {
+        case ":" => print(":")
+        case "?" => print("?")
+        case x => println(x)
       }
-      println(s)
     }
 
     // From the Galil doc:
