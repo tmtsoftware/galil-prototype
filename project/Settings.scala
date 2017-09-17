@@ -15,7 +15,7 @@ object Settings {
     crossPaths := true,
     parallelExecution in Test := false,
     fork := true,
-    bashScriptExtraDefines ++= Seq(s"addJava -DCSW_VERSION=${Dependencies.Version}")
+    bashScriptExtraDefines ++= Seq(s"addJava -DVERSION=${Dependencies.Version}")
   )
 
   lazy val defaultSettings = buildSettings ++ Seq(

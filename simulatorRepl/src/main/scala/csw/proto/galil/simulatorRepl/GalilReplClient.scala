@@ -1,16 +1,21 @@
 package csw.proto.galil.simulatorRepl
 
+import akka.Done
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Flow, Source, Tcp}
 import akka.util.ByteString
 
+import scala.concurrent.Future
 import scala.io.StdIn
+import scala.util.{Failure, Success}
 
 object GalilReplClient extends App {
 
   implicit val system: ActorSystem = ActorSystem()
   implicit val mat: ActorMaterializer = ActorMaterializer()
+
+  import system.dispatcher
 
   case class Options(host: String = "127.0.0.1", port: Int = 8888)
 
@@ -47,10 +52,22 @@ object GalilReplClient extends App {
     import options._
     val connection = Tcp().outgoingConnection(host, port)
 
+    def quit(f: Future[Done]): Unit = {
+      f.onComplete {
+        case Success(_) =>
+          system.terminate()
+        case Failure(ex) =>
+          println(s"Error : $ex")
+          system.terminate()
+      }
+    }
+
     val replParser = Flow[String]
-      .merge(Source.single("NO")) // XXX need to send an initial message to start off: NO = No op
+      // Need to send an initial message to start off: (NO = No op)
+      .merge(Source.single("NO"))
+      // Type 'q' to quit
       .takeWhile(_ != "q")
-      .concat(Source.single("BYE"))
+      .watchTermination() { (_, f) => quit(f) }
       .map(elem => ByteString(s"$elem\r"))
 
     // From the Galil doc:
@@ -71,16 +88,19 @@ object GalilReplClient extends App {
     val responseHandler = Flow[ByteString].map { bs =>
       val s = bs.utf8String
       s match {
-        case "?" => "ERROR"
-        case ":" => "OK"
+        case "?" => "?"
+        case ":" => ""
         case resp if resp.endsWith("\r\n:") => resp.dropRight(3)
         case _ => "INCOMPLETE" // XXX should not happen
       }
     }
 
+    val version = Option(System.getProperty("VERSION")).getOrElse("")
+    println(s"Galil client $version: type 'q' to quit.")
+
     val repl = Flow[ByteString]
       .via(responseHandler)
-      .map(response => println(s"$response\n"))
+      .map(response => println(s"$response"))
       .map((_: Unit) => StdIn.readLine("> "))
       .via(replParser)
 

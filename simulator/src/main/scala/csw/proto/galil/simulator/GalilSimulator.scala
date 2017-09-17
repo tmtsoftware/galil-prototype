@@ -72,6 +72,7 @@ object GalilSimulator extends App {
     cmd match {
       case "badcmd" => formatReply(None, isError = true)
       case "noreplycmd" => formatReply(None)
+      case "NO" => formatReply(None)
       case _ => formatReply(s"$cmd!!!")
     }
   }
