@@ -70,6 +70,12 @@ public class JGalilHcd {
     }
 
     @Override
+    public CompletableFuture<BoxedUnit> jOnRun() {
+      log.debug("jOnRun called");
+      return CompletableFuture.supplyAsync(this::doNothing);
+    }
+
+    @Override
     public void onDomainMsg(JGalilHcdDomainMessage galilHcdDomainMessage) {
       log.debug("onDomainMessage called: " + galilHcdDomainMessage);
     }

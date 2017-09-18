@@ -69,6 +69,12 @@ public class JGalilAssembly {
     }
 
     @Override
+    public CompletableFuture<BoxedUnit> jOnRun() {
+      log.debug("jOnRun called");
+      return CompletableFuture.supplyAsync(this::doNothing);
+    }
+
+    @Override
     public void onDomainMsg(JGalilAssemblyDomainMessage galilAssemblyDomainMessage) {
       log.debug("onDomainMessage called: " + galilAssemblyDomainMessage);
     }

@@ -46,6 +46,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     log.debug("Initialize called")
   }
 
+  override def onRun(): Future[Unit] = async {
+    log.debug("onRun called")
+  }
+
   override def onShutdown(): Future[Unit] = async {
     log.debug("onShutdown called")
   }
