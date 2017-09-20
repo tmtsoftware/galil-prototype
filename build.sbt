@@ -68,11 +68,12 @@ lazy val `simulatorRepl` = project
     `csw-framework`
   ))
 
-//// Supports talking to and simulating a Galil device
-//lazy val `galil-io` = project
-//  .enablePlugins(DeployApp)
-//  .settings(defaultSettings: _*)
-//  .settings(libraryDependencies ++= Seq(
-//    `csw-framework`
-//  ))
+// Supports talking to and simulating a Galil device
+lazy val `galil-io` = project
+  .enablePlugins(DeployApp)
+  .settings(defaultSettings: _*)
+  .settings(libraryDependencies ++= Seq(
+    `csw-framework`,
+    scalaTest % Test
+  )).dependsOn(simulator)
 

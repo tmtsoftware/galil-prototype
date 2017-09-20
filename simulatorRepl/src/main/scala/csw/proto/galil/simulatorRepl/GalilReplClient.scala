@@ -91,9 +91,6 @@ object GalilReplClient extends App {
     //Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
     //just a question mark (?) and nothing else. If the command is not expected to
     //return a value, the response will be just the Colon (:)."
-    //
-    // Here, the string "ERROR" is returned for an error ("?"), "OK" for an empty response
-    // and otherwise the response is returned (minus the trailing delimiter).
     val responseHandler = Flow[ByteString]
       .map(_.utf8String.split("\r\n:").foreach(handleOneResponse))
 
