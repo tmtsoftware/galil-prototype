@@ -70,6 +70,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
   }
 }
 
+// Start assembly from the command line using GalilAssembly.conf resource file
+// (XXX TODO: change to use ContainerCmd when it supports resource files)
 object GalilAssemblyApp extends App {
   val host = InetAddress.getLocalHost.getHostName
   val system: ActorSystem = ClusterAwareSettings.system
@@ -77,3 +79,10 @@ object GalilAssemblyApp extends App {
   val wiring  = FrameworkWiring.make(system)
   Standalone.spawn(ConfigFactory.load("GalilAssembly.conf"), wiring)
 }
+
+
+//// Start assembly from the command line (pass --file $path/resources/GalilAssembly.conf)
+//object GalilAssemblyApp extends App {
+//  import csw.apps.containercmd.ContainerCmd
+//  ContainerCmd.start("GalilAssembly", args)
+//}

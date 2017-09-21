@@ -2,7 +2,7 @@ package csw.proto.galil.client
 
 import java.net.InetAddress
 
-import akka.actor.ActorRefFactory
+import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
@@ -11,18 +11,22 @@ import csw.param.commands.Setup
 import csw.param.generics.KeyType
 import csw.param.models.Prefix
 import csw.services.location.models._
-import csw.services.location.scaladsl.{ActorSystemFactory, LocationServiceFactory}
-import csw.services.logging.scaladsl.{GenericLogger, LoggingSystemFactory}
+import csw.services.location.scaladsl.LocationServiceFactory
+import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import csw.units.Units.degree
 import akka.typed.scaladsl.adapter._
 import csw.common.framework.models.ComponentMessage
+import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.models.ComponentType.Assembly
 import csw.services.location.models.Connection.AkkaConnection
 
-// A client to test locating and communicating with the Galil assembly
-object GalilAssemblyClient extends App with GenericLogger.Simple {
+object GalilAssemblyClientLogger extends ComponentLogger("GalilAssemblyClient")
 
-  private val system = ActorSystemFactory.remote
+// A client to test locating and communicating with the Galil assembly
+object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
+
+//  private val system = ActorSystemFactory.remote
+  private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
   private val locationService = LocationServiceFactory.make()
   private val host = InetAddress.getLocalHost.getHostName
@@ -34,7 +38,9 @@ object GalilAssemblyClient extends App with GenericLogger.Simple {
   private def initialBehavior: Behavior[TrackingEvent] = {
     Actor.immutable[TrackingEvent] { (ctx, msg) =>
       val connection = AkkaConnection(ComponentId("GalilAssembly", Assembly))
-      locationService.subscribe(connection, ctx.self ! _)
+      locationService.subscribe(connection, { loc =>
+        ctx.self ! loc
+      })
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
