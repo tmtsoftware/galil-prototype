@@ -28,19 +28,24 @@ object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
 //  private val system = ActorSystemFactory.remote
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
-  private val locationService = LocationServiceFactory.make()
+  private val locationService = LocationServiceFactory.withSystem(system)
   private val host = InetAddress.getLocalHost.getHostName
   private val loggingSystem = LoggingSystemFactory.start("TestServiceClientApp", "0.1", host, system)
   implicit val mat: ActorMaterializer = ActorMaterializer()
   log.info("Starting GalilAssemblyClient")
   system.spawn(initialBehavior, "GalilAssemblyClient")
 
-  private def initialBehavior: Behavior[TrackingEvent] = {
-    Actor.immutable[TrackingEvent] { (ctx, msg) =>
+  def initialBehavior: Behavior[TrackingEvent] =
+    Actor.deferred { ctx =>
       val connection = AkkaConnection(ComponentId("GalilAssembly", Assembly))
       locationService.subscribe(connection, { loc =>
         ctx.self ! loc
       })
+      subscriberBehavior
+    }
+
+  def subscriberBehavior: Behavior[TrackingEvent] = {
+    Actor.immutable[TrackingEvent] { (ctx, msg) =>
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
