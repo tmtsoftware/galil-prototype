@@ -6,7 +6,6 @@ import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
-import csw.common.framework.models.CommandMessage.Submit
 import csw.param.commands.Setup
 import csw.param.generics.KeyType
 import csw.param.models.Prefix
@@ -15,7 +14,8 @@ import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import csw.units.Units.degree
 import akka.typed.scaladsl.adapter._
-import csw.common.framework.models.ComponentMessage
+import csw.param.messages.CommandMessage.Submit
+import csw.param.messages.ComponentMessage
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.models.ComponentType.Assembly
 import csw.services.location.models.Connection.AkkaConnection
@@ -30,7 +30,7 @@ object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
   implicit def actorRefFactory: ActorRefFactory = system
   private val locationService = LocationServiceFactory.withSystem(system)
   private val host = InetAddress.getLocalHost.getHostName
-  private val loggingSystem = LoggingSystemFactory.start("TestServiceClientApp", "0.1", host, system)
+  LoggingSystemFactory.start("TestServiceClientApp", "0.1", host, system)
   implicit val mat: ActorMaterializer = ActorMaterializer()
   log.info("Starting GalilAssemblyClient")
   system.spawn(initialBehavior, "GalilAssemblyClient")

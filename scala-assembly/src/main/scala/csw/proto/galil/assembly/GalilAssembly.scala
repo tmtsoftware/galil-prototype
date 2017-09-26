@@ -6,17 +6,17 @@ import akka.actor.ActorSystem
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
-import csw.common.ccs.{Validation, Validations}
-import csw.common.framework.internal.wiring.{FrameworkWiring, Standalone}
-import csw.common.framework.models.ComponentInfo
-import csw.common.framework.models.PubSub.PublisherMessage
-import csw.common.framework.models.RunningMessage.DomainMessage
-import csw.common.framework.models._
-import csw.common.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.framework.internal.wiring.{FrameworkWiring, Standalone}
+import csw.framework.models.ComponentInfo
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.param.messages._
+import csw.param.messages.PubSub.PublisherMessage
+import csw.param.messages.RunningMessage.DomainMessage
+import csw.param.models.{Validation, Validations}
 import csw.param.states.CurrentState
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.LoggingSystemFactory
+import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -40,7 +40,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
                                     componentInfo: ComponentInfo,
                                     pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                     locationService: LocationService)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef, locationService) {
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+    with ComponentLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
@@ -68,6 +69,14 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     log.debug(s"onControlCommand called: $commandMessage")
     Validations.Valid
   }
+
+  override def onCommandValidationNotification(validationResponse: CommandValidationResponse): Unit =
+    log.debug(s"onCommandValidationNotification called: $validationResponse")
+
+  override def onCommandExecutionNotification(executionResponse: CommandExecutionResponse): Unit =
+    log.debug(s"onCommandExecutionNotification called: $executionResponse")
+
+  override protected def maybeComponentName(): Option[String] = Some("GalilAssembly")
 }
 
 // Start assembly from the command line using GalilAssembly.conf resource file

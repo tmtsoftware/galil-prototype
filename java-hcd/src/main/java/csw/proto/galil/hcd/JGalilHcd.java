@@ -3,17 +3,19 @@ package csw.proto.galil.hcd;
 import akka.typed.ActorRef;
 import akka.typed.javadsl.ActorContext;
 import com.typesafe.config.ConfigFactory;
-import csw.common.ccs.Validation;
-import csw.common.ccs.Validations;
-import csw.common.framework.internal.wiring.FrameworkWiring;
-import csw.common.framework.internal.wiring.Standalone;
-import csw.common.framework.javadsl.JComponentBehaviorFactory;
-import csw.common.framework.javadsl.JComponentHandlers;
-import csw.common.framework.models.*;
+import csw.framework.internal.wiring.FrameworkWiring;
+import csw.framework.internal.wiring.Standalone;
+import csw.framework.javadsl.JComponentBehaviorFactory;
+import csw.framework.javadsl.JComponentHandlers;
+import csw.framework.models.ComponentInfo;
+import csw.param.messages.*;
+import csw.param.models.Validation;
+import csw.param.models.Validations;
 import csw.param.states.CurrentState;
 import csw.services.location.commons.ClusterAwareSettings;
 import csw.services.location.javadsl.ILocationService;
 import csw.services.logging.javadsl.ILogger;
+import csw.services.logging.javadsl.JComponentLogger;
 import csw.services.logging.scaladsl.LoggingSystemFactory;
 import scala.runtime.BoxedUnit;
 
@@ -46,7 +48,7 @@ public class JGalilHcd {
     }
   }
 
-  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMessage> {
+  static class JGalilHcdHandlers extends JComponentHandlers<JGalilHcdDomainMessage> implements JComponentLogger {
     // XXX Can't this be done in the interface?
     private ILogger log = getLogger();
 
@@ -87,6 +89,16 @@ public class JGalilHcd {
     }
 
     @Override
+    public void onCommandValidationNotification(CommandValidationResponse validationResponse) {
+      log.debug("onCommandValidationNotification called: " + validationResponse);
+    }
+
+    @Override
+    public void onCommandExecutionNotification(CommandExecutionResponse executionResponse) {
+      log.debug("onCommandExecutionNotification called: " + executionResponse);
+    }
+
+    @Override
     public CompletableFuture<BoxedUnit> jOnShutdown() {
       log.debug("onShutdown called");
       return CompletableFuture.supplyAsync(this::doNothing);
@@ -100,6 +112,11 @@ public class JGalilHcd {
     @Override
     public void onGoOnline() {
       log.debug("onGoOnline called");
+    }
+
+    @Override
+    public String componentName() {
+      return "GalilAssembly";
     }
   }
 

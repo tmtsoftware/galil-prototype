@@ -11,7 +11,6 @@ import Tcp._
 import csw.services.logging.scaladsl.ComponentLogger
 
 import scala.concurrent.Future
-import scala.util.{Failure, Success}
 import scala.concurrent.duration._
 
 object GalilIoLogger extends ComponentLogger("GalilIo")
