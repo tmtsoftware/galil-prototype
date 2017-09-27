@@ -5,75 +5,50 @@ import Dependencies._
 import Settings._
 
 // The Galil prototype HCD, implemented in Scala
-lazy val `scala-hcd` = project
+lazy val `galil-hcd` = project
   .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
+  .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
 
 // The Galil prototype assembly, implemented in Scala
-lazy val `scala-assembly` = project
+lazy val `galil-assembly` = project
   .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
-  .settings(libraryDependencies ++= Seq(
-    `csw-framework`
-  ))
-
-// The Galil prototype HCD, implemented in Java
-lazy val `java-hcd` = project
-  .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
-  .settings(libraryDependencies ++= Seq(
-    `csw-framework`
-  ))
-
-// The Galil prototype assembly, implemented in Java
-lazy val `java-assembly` = project
-  .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
+  .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
 
 // A Scala client application that talks to the Galil assembly
-lazy val `scala-client` = project
+lazy val `galil-client` = project
   .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
-  .settings(libraryDependencies ++= Seq(
-    `csw-framework`
-  ))
-
-// A Java client application that talks to the Galil assembly
-lazy val `java-client` = project
-  .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
+  .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
 
 // A Galil hardware simulator
-lazy val `simulator` = project
+lazy val `galil-simulator` = project
   .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
+  .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
 
 // A REPL client to test talking to the Galil hardware or simulator
-lazy val `simulatorRepl` = project
+lazy val `galil-repl` = project
   .enablePlugins(DeployApp)
-  .settings(defaultSettings: _*)
+  .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
-  ))
+  )).dependsOn(`galil-io`)
 
 // Supports talking to and simulating a Galil device
 lazy val `galil-io` = project
-  .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`,
     scalaTest % Test
-  )).dependsOn(simulator)
+  ))
 

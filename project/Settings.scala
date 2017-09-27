@@ -14,8 +14,7 @@ object Settings {
     scalaVersion := Dependencies.ScalaVersion,
     crossPaths := true,
     parallelExecution in Test := false,
-    fork := true,
-    bashScriptExtraDefines ++= Seq(s"addJava -DVERSION=${Dependencies.Version}")
+    fork := true
   )
 
   lazy val defaultSettings = buildSettings ++ Seq(
@@ -26,4 +25,7 @@ object Settings {
     javaOptions in (Test, run) ++= Seq("-Djava.net.preferIPv4Stack=true")  // For location service use
   )
 
+  lazy val appSettings = defaultSettings ++ Seq(
+    bashScriptExtraDefines ++= Seq(s"addJava -DVERSION=${Dependencies.Version}")
+  )
 }

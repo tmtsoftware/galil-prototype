@@ -15,7 +15,13 @@ import scala.concurrent.duration._
 
 object GalilIoLogger extends ComponentLogger("GalilIo")
 
-
+/**
+  * A client for talking to a Galil controller (or the "simulator" application).
+  * @param host the Galil controller host
+  * @param port the Galil controller port
+  * @param system Akka environment used to create worker actor
+  * @param timeout max amount of time to wait for reply from controller (default: 10 secs)
+  */
 case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
                   (implicit system: ActorSystem,
                    timeout: Timeout = Timeout(10.seconds)) extends GalilIoLogger.Simple {
@@ -25,7 +31,6 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   import system.dispatcher
 
   private val workerActor = system.actorOf(GalilWorkerActor.props(host, port))
-
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -40,7 +45,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   //just a question mark (?) and nothing else. If the command is not expected to
   //return a value, the response will be just the Colon (:)."
 
-  def send(cmd: String): Future[List[String]] = {
+  /**
+    * Sends a command to the controller and returns a list of responses
+    * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
+    * @return the list of replies from the controller, which may be ASCII or binary, depending on the command
+    */
+  def send(cmd: String): Future[List[ByteString]] = {
     val f = workerActor ? SendData(ByteString(s"$cmd\r"))
     f.map {
       case ReceivedData(data) =>
@@ -48,7 +58,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
           case ":" => ""
           case "?" => "error"
           case x => x
-        }
+        }.map(ByteString(_))
 
       case _ => Nil
     }
@@ -57,12 +67,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
 
 object GalilIo {
 
-  object GalilWorkerActor {
+  private object GalilWorkerActor {
     def props(host: String, port: Int) =
       Props(new GalilWorkerActor(host, port))
   }
 
-  class GalilWorkerActor(host: String, port: Int) extends GalilIoLogger.Actor {
+  private class GalilWorkerActor(host: String, port: Int) extends GalilIoLogger.Actor {
 
     import GalilClientActor._
 
@@ -75,7 +85,6 @@ object GalilIo {
 
       case Connected(c) =>
         log.info(s"Connected: $c") // Not needed?
-      //        clientActor ! ByteString("NO\r")
 
       case SendData(data) =>
         log.info(s"sending ${data.utf8String}")
@@ -101,14 +110,13 @@ object GalilIo {
         log.info(s"Connection closed")
 
       case r: ReceivedData =>
-        //        log.info(s"Received ${r.data.utf8String}")
         replyTo ! r
         context.become(receive)
     }
   }
 
 
-  object GalilClientActor {
+  private object GalilClientActor {
     def props(remoteSocket: InetSocketAddress, listener: ActorRef) =
       Props(new GalilClientActor(remoteSocket, listener))
 
@@ -128,7 +136,7 @@ object GalilIo {
 
   }
 
-  class GalilClientActor(remoteSocket: InetSocketAddress, listener: ActorRef) extends GalilIoLogger.Actor {
+  private class GalilClientActor(remoteSocket: InetSocketAddress, listener: ActorRef) extends GalilIoLogger.Actor {
 
     import context.system
 
@@ -148,7 +156,7 @@ object GalilIo {
       case x => log.error(s"Unexpected message $x")
     }
 
-    def connected(connection: ActorRef): Receive = {
+    private def connected(connection: ActorRef): Receive = {
       case data: ByteString =>
         connection ! Write(data)
       case CommandFailed(_: Write) =>

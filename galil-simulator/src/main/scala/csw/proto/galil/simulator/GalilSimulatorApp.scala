@@ -15,7 +15,7 @@ object GalilSimulatorApp extends App {
 
   // Parses the command line options
   private val parser = new scopt.OptionParser[Options]("test-akka-service-app") {
-    head("simulator", System.getProperty("CSW_VERSION"))
+    head("simulator", System.getProperty("VERSION"))
 
     opt[String]("host") valueName "<hostname>" action { (x, c) =>
       c.copy(host = x)
