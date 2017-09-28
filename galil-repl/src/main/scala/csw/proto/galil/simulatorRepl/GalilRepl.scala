@@ -69,7 +69,7 @@ object GalilRepl extends App {
     loop()
   }
 
-  def formatResult(cmd: String, result: ByteString): String = {
+  private def formatResult(cmd: String, result: ByteString): String = {
     if (cmd == "QR" || cmd.startsWith("QR "))
       QrCmd.format(result)
     else
