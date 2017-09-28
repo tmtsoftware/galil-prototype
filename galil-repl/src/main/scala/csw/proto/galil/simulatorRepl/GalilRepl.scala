@@ -70,9 +70,9 @@ object GalilRepl extends App {
   }
 
   def formatResult(cmd: String, result: ByteString): String = {
-    cmd match {
-      case "QR" => QrCmd.format(result)
-      case _ => result.utf8String
-    }
+    if (cmd == "QR" || cmd.startsWith("QR "))
+      QrCmd.format(result)
+    else
+      result.utf8String
   }
 }
