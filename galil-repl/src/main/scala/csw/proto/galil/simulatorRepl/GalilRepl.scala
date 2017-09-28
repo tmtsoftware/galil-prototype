@@ -71,12 +71,8 @@ object GalilRepl extends App {
 
   def formatResult(cmd: String, result: ByteString): String = {
     cmd match {
-      case "QR" => formatQrResult(result)
+      case "QR" => QrCmd.format(result)
       case _ => result.utf8String
     }
-  }
-
-  def formatQrResult(result: ByteString): String = {
-    "XXX QR Result"
   }
 }

@@ -15,6 +15,7 @@ import csw.param.messages.RunningMessage.DomainMessage
 import csw.param.models.{Validation, Validations}
 import csw.param.states.CurrentState
 import csw.services.location.commons.ClusterAwareSettings
+import csw.services.location.models.TrackingEvent
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -76,7 +77,11 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
   override def onCommandExecutionNotification(executionResponse: CommandExecutionResponse): Unit =
     log.debug(s"onCommandExecutionNotification called: $executionResponse")
 
+  override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
+    log.debug(s"onLocationTrackingEvent called: $trackingEvent")
+
   override protected def maybeComponentName(): Option[String] = Some("GalilAssembly")
+
 }
 
 // Start assembly from the command line using GalilAssembly.conf resource file
