@@ -42,7 +42,7 @@ object QrCmd {
         getBlock(b1, 4, "E"),
         getBlock(b1, 5, "F"),
         getBlock(b1, 6, "G"),
-        getBlock(b1, 7, "H")).mkString(",")
+        getBlock(b1, 7, "H")).mkString(" ")
 
       val recordSize = getUnsignedShort(bs(2),bs(3))
 
