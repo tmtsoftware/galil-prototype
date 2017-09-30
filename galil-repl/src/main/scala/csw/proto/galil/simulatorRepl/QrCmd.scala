@@ -26,12 +26,15 @@ object QrCmd {
     * See DMC-500x0 User Manual: Chapter 4 Software Tools and Communication, p 58.
     */
   def format(bs: ByteString): String = {
+    println(s"XXX bs size = ${bs.size}")
     if (bs.size < 4) {
       "error: missing QR header"
     } else {
       // 4 byte header
       val b0 = bs(0)
       val b1 = bs(1)
+      val testBit = getBit(b0, 7)
+      println(s"XXX test bit set: $testBit")
       val blocksPresent = List(
         getBlock(b0, 0, "S"),
         getBlock(b0, 1, "T"),
