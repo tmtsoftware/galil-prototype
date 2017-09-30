@@ -14,9 +14,10 @@ object QrCmd {
     import java.nio.ByteBuffer
     import java.nio.ByteOrder
     val bb = ByteBuffer.allocate(2)
-    bb.order(ByteOrder.LITTLE_ENDIAN)
+    bb.order(ByteOrder.BIG_ENDIAN)
     bb.put(b1)
     bb.put(b2)
+    bb.order(ByteOrder.LITTLE_ENDIAN)
     bb.flip()
     bb.getShort(0) & 0xFFFF
   }
