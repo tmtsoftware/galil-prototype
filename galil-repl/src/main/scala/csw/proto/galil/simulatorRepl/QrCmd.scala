@@ -17,6 +17,7 @@ object QrCmd {
     bb.order(ByteOrder.LITTLE_ENDIAN)
     bb.put(b1)
     bb.put(b2)
+    bb.flip()
     bb.getShort(0) & 0xFFFF
   }
 
