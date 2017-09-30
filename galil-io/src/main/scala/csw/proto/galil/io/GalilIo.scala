@@ -2,7 +2,7 @@ package csw.proto.galil.io
 
 import akka.actor.ActorSystem
 import akka.actor.{ActorRef, Props}
-import akka.io.{IO, Tcp}
+import akka.io.{IO, Tcp, Udp}
 import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
 
@@ -140,7 +140,7 @@ object GalilIo {
 
     import context.system
 
-    IO(Tcp) ! Connect(remoteSocket)
+    IO(Udp) ! Connect(remoteSocket)
 
     def receive: Receive = {
       case CommandFailed(_: Connect) =>
