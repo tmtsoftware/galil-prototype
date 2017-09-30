@@ -62,7 +62,6 @@ object QrCmd {
       println(s"XXX CHECK: len = $len")
       // XXX
 
-
       s"""
          |Blocks present:   $blocksPresent
          |Data record size: $recordSize
