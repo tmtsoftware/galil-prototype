@@ -2,7 +2,7 @@ package csw.proto.galil.io
 
 import akka.actor.ActorSystem
 import akka.actor.{ActorRef, Props}
-import akka.io.{IO, Tcp, Udp}
+import akka.io.{IO, Tcp, Udp, UdpConnected}
 import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
 
@@ -136,42 +136,80 @@ object GalilIo {
 
   }
 
+  /*
+  class Connected(remote: InetSocketAddress) extends Actor {
+  import context.system
+  IO(UdpConnected) ! UdpConnected.Connect(self, remote)
+
+  def receive = {
+    case UdpConnected.Connected =>
+      context.become(ready(sender()))
+  }
+
+  def ready(connection: ActorRef): Receive = {
+    case UdpConnected.Received(data) =>
+      // process data, send it on, etc.
+    case msg: String =>
+      connection ! UdpConnected.Send(ByteString(msg))
+    case UdpConnected.Disconnect =>
+      connection ! UdpConnected.Disconnect
+    case UdpConnected.Disconnected => context.stop(self)
+  }
+}
+
+   */
   private class GalilClientActor(remoteSocket: InetSocketAddress, listener: ActorRef) extends GalilIoLogger.Actor {
 
     import context.system
 
-    IO(Udp) ! Connect(remoteSocket)
+//    IO(Tcp) ! Connect(remoteSocket)
+    IO(UdpConnected) ! UdpConnected.Connect(self, remoteSocket)
 
-    def receive: Receive = {
-      case CommandFailed(_: Connect) =>
-        listener ! GalilClientActor.ConnectFailed
-        context stop self
-
-      case c@Connected(_, _) =>
-        listener ! GalilClientActor.Connected(c)
-        val connection = sender()
-        connection ! Register(self)
-        context.become(connected(connection))
-
-      case x => log.error(s"Unexpected message $x")
+    def receive = {
+      case UdpConnected.Connected =>
+        context.become(ready(sender()))
     }
 
-    private def connected(connection: ActorRef): Receive = {
-      case data: ByteString =>
-        connection ! Write(data)
-      case CommandFailed(_: Write) =>
-        // O/S buffer was full
-        listener ! GalilClientActor.WriteFailed
-      case Received(data) =>
+    def ready(connection: ActorRef): Receive = {
+      case UdpConnected.Received(data) =>
         listener ! GalilClientActor.ReceivedData(data)
-      case "close" =>
-        connection ! Close
-      case _: ConnectionClosed =>
-        listener ! GalilClientActor.ConnectionClosed
-        context stop self
-      case x => log.error(s"Unexpected message $x")
+      case data: ByteString =>
+        connection ! UdpConnected.Send(data)
+      case UdpConnected.Disconnect =>
+        connection ! UdpConnected.Disconnect
+      case UdpConnected.Disconnected => context.stop(self)
     }
-  }
 
+//    def receive: Receive = {
+//      case CommandFailed(_: Connect) =>
+//        listener ! GalilClientActor.ConnectFailed
+//        context stop self
+//
+//      case c@Connected(_, _) =>
+//        listener ! GalilClientActor.Connected(c)
+//        val connection = sender()
+//        connection ! Register(self)
+//        context.become(connected(connection))
+//
+//      case x => log.error(s"Unexpected message $x")
+//    }
+//
+//    private def connected(connection: ActorRef): Receive = {
+//      case data: ByteString =>
+//        connection ! Write(data)
+//      case CommandFailed(_: Write) =>
+//        // O/S buffer was full
+//        listener ! GalilClientActor.WriteFailed
+//      case Received(data) =>
+//        listener ! GalilClientActor.ReceivedData(data)
+//      case "close" =>
+//        connection ! Close
+//      case _: ConnectionClosed =>
+//        listener ! GalilClientActor.ConnectionClosed
+//        context stop self
+//      case x => log.error(s"Unexpected message $x")
+//    }
+
+  }
 }
 
