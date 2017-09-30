@@ -6,8 +6,8 @@ import java.nio.ByteOrder
 
 object QrCmd {
 
-//  private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
-  private def getBit(num: Byte, i: Int): Boolean = ((num >> i) & 0x01) == 1
+  private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
+//  private def getBit(num: Byte, i: Int): Boolean = ((num >> i) & 0x01) == 1
 
   private def getBlock(num: Byte, i: Int, s: String): String = {
     if (getBit(num, i)) s else ""
@@ -49,16 +49,15 @@ object QrCmd {
       val recordSize = getUnsignedShort(bs(2),bs(3))
 
       // XXX
-      val header = Array(bs(0), bs(1), bs(2), bs(3))
-      val buffer = ByteBuffer.allocate(4)
-      buffer.order(ByteOrder.BIG_ENDIAN).put(header).flip
-      buffer.order(ByteOrder.LITTLE_ENDIAN)
+      val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
       val byte0: Byte = buffer.get
+      if (byte0 != b0) println(s"XXX byte0: $byte0 != $b0")
       if (((byte0 >> 7) & 0x01) != 1) { // The MSB of the first byte must be always 1.
         println("The MSB of the first byte in the Data Record header is not one.")
       }
       val byte1: Byte = buffer.get
+      if (byte1 != b1) println(s"XXX byte1: $byte1 != $b1")
       val len = buffer.getShort() & 0xFFFF
       println(s"XXX CHECK: len = $len")
       // XXX
