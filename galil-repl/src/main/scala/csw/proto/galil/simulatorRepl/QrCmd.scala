@@ -1,6 +1,8 @@
 package csw.proto.galil.simulatorRepl
 
 import akka.util.ByteString
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 object QrCmd {
 
@@ -11,11 +13,7 @@ object QrCmd {
   }
 
   private def getUnsignedShort(b1: Byte, b2: Byte): Int = {
-    import java.nio.ByteBuffer
-    import java.nio.ByteOrder
-    val a = Array(b1, b2)
-//    val bb = ByteBuffer.allocate(2).put(b1).put(b2).order(ByteOrder.LITTLE_ENDIAN)
-    val bb = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).put(a).order(ByteOrder.LITTLE_ENDIAN)
+    val bb = ByteBuffer.allocate(2).put(b1).put(b2).order(ByteOrder.LITTLE_ENDIAN)
     bb.flip()
     bb.getShort(0) & 0xFFFF
   }
@@ -48,6 +46,22 @@ object QrCmd {
         getBlock(b1, 7, "H")).mkString(" ")
 
       val recordSize = getUnsignedShort(bs(2),bs(3))
+
+      // XXX
+      val header = Array(bs(0), bs(1), bs(2), bs(3))
+      val buffer = ByteBuffer.allocate(4)
+      buffer.order(ByteOrder.BIG_ENDIAN).put(header).flip
+      buffer.order(ByteOrder.LITTLE_ENDIAN)
+
+      val byte0: Byte = buffer.get
+      if (((byte0 >> 7) & 0x01) != 1) { // The MSB of the first byte must be always 1.
+        println("The MSB of the first byte in the Data Record header is not one.")
+      }
+      val byte1: Byte = buffer.get
+      val len = buffer.getShort(0) & 0xFFFF
+      println(s"XXX CHECK: len = $len")
+      // XXX
+
 
       s"""
          |Blocks present:   $blocksPresent
