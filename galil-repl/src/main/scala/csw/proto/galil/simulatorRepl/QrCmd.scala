@@ -15,7 +15,7 @@ object QrCmd {
   private def getUnsignedShort(b1: Byte, b2: Byte): Int = {
     val bb = ByteBuffer.allocate(2).put(b1).put(b2).order(ByteOrder.LITTLE_ENDIAN)
     bb.flip()
-    bb.getShort(0) & 0xFFFF
+    bb.getShort() & 0xFFFF
   }
 
   /**
@@ -58,7 +58,7 @@ object QrCmd {
         println("The MSB of the first byte in the Data Record header is not one.")
       }
       val byte1: Byte = buffer.get
-      val len = buffer.getShort(0) & 0xFFFF
+      val len = buffer.getShort() & 0xFFFF
       println(s"XXX CHECK: len = $len")
       // XXX
 
