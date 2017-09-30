@@ -6,7 +6,8 @@ import java.nio.ByteOrder
 
 object QrCmd {
 
-  private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
+//  private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
+  private def getBit(num: Byte, i: Int): Boolean = ((num >> i) & 0x01) == 1
 
   private def getBlock(num: Byte, i: Int, s: String): String = {
     if (getBit(num, i)) s else ""
