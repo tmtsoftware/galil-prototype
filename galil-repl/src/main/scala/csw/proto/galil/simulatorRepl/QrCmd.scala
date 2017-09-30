@@ -10,11 +10,10 @@ object QrCmd {
     if (getBit(num, i)) s else ""
   }
 
-  private def getUnsignedShort(b1: Byte, b2: Byte): Int = {
+  private def getUnsignedShort(b2: Byte, b1: Byte): Int = {
     import java.nio.ByteBuffer
     import java.nio.ByteOrder
     val bb = ByteBuffer.allocate(2)
-    bb.order(ByteOrder.BIG_ENDIAN)
     bb.put(b1)
     bb.put(b2)
     bb.order(ByteOrder.LITTLE_ENDIAN)
