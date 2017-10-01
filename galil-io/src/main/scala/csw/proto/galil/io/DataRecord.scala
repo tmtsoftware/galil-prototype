@@ -1,8 +1,9 @@
-package csw.proto.galil.simulatorRepl
+package csw.proto.galil.io
+
+import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
-import java.nio.{ByteBuffer, ByteOrder}
-import DataRecord._
+import csw.proto.galil.io.DataRecord._
 
 /**
   * The data record returned from the Galil QR command
@@ -11,16 +12,11 @@ import DataRecord._
   * @param generalState data from byte 4 to 55 (sample number to amplifier status)
   */
 case class DataRecord(header: Header, generalState: GeneralState) {
-  override def toString: String =
-    s"""
-       |$header
-       |$generalState
-       """.stripMargin
+  override def toString: String = s"$header\n$generalState"
 }
 
 object DataRecord {
   def apply(bs: ByteString): DataRecord = {
-    println(s"XXX bytes received: ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = readHeader(buffer)
     val generalState = readGeneralState(buffer)

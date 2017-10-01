@@ -2,7 +2,7 @@ package csw.proto.galil.simulatorRepl
 
 import akka.actor.ActorSystem
 import akka.util.ByteString
-import csw.proto.galil.io.GalilIo
+import csw.proto.galil.io.{DataRecord, GalilIo}
 
 import scala.io.StdIn
 import scala.util.{Failure, Success}

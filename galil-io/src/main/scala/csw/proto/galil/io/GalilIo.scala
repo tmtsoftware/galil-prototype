@@ -69,16 +69,15 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
 //      case _ => Nil
 //    }
 
-    val sendBuf = s"$cmd\r".getBytes()
+    val sendBuf = s"$cmd\r\n".getBytes()
     val galilDmcAddress = new InetSocketAddress(host, port)
     val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
     // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
-//    val recvBuf = Array.ofDim[Byte](406)
-    val recvBuf = Array.ofDim[Byte](4029)
+    val recvBuf = Array.ofDim[Byte](406)
     socket.send(sendPacket)
     val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
     socket.receive(recvPacket)
-    println(s"XXX datalen = ${recvPacket.getData.length}, len: ${recvPacket.getLength}, offset: ${recvPacket.getOffset}")
+    println(s"XXX received: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
     val data = ByteString(recvPacket.getData)
     data.utf8String.split(endMarker).toList.map {
       case ":" => ""
