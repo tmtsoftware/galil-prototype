@@ -78,6 +78,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     socket.send(sendPacket)
     val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
     socket.receive(recvPacket)
+    println(s"XXX datalen = ${recvPacket.getData.length}, len: ${recvPacket.getLength}, offset: ${recvPacket.getOffset}")
     val data = ByteString(recvPacket.getData)
     data.utf8String.split(endMarker).toList.map {
       case ":" => ""
