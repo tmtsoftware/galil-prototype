@@ -2,12 +2,11 @@ package csw.proto.galil.io
 
 import akka.actor.ActorSystem
 import akka.actor.{ActorRef, Props}
-import akka.io.{IO, Tcp, Udp, UdpConnected}
+import akka.io.{IO, Tcp, UdpConnected}
 import akka.util.{ByteString, Timeout}
 import java.net.InetSocketAddress
 
 import akka.pattern.ask
-import Tcp._
 import csw.services.logging.scaladsl.ComponentLogger
 
 import scala.concurrent.Future
@@ -59,12 +58,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     f.map {
       case ReceivedData(data) =>
         // XXX
-        if (!data.utf8String.endsWith("\r\n:"))
+        if (!data.utf8String.endsWith(endMarker))
           println(s"XXX missing end marker")
         else
           println(s"XXX Data len: ${data.size}")
 
-        data.utf8String.split("\r\n:").toList.map {
+        data.utf8String.split(endMarker).toList.map {
           case ":" => ""
           case "?" => "error"
           case x => x
@@ -76,6 +75,9 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
 }
 
 object GalilIo {
+
+  // marks end of command or reply (or separator for multiple commands or replies)
+  val endMarker = "\r\n:"
 
   private object GalilWorkerActor {
     def props(host: String, port: Int) =
@@ -102,7 +104,7 @@ object GalilIo {
         context.become(waitForResponse(sender()))
     }
 
-    def waitForResponse(replyTo: ActorRef): Receive = {
+    def waitForResponse(replyTo: ActorRef, bs: ByteString = ByteString.empty): Receive = {
       case ConnectFailed =>
         log.error("Connect failed")
         replyTo ! ConnectFailed
@@ -119,9 +121,13 @@ object GalilIo {
       case ConnectionClosed =>
         log.info(s"Connection closed")
 
-      case r: ReceivedData =>
-        replyTo ! r
-        context.become(receive)
+      case ReceivedData(data) =>
+        if (data.utf8String.endsWith(endMarker)) {
+          replyTo ! ReceivedData(bs ++ data)
+          context.become(receive)
+        } else {
+          context.become(waitForResponse(replyTo, bs ++ data))
+        }
     }
   }
 
@@ -175,7 +181,7 @@ object GalilIo {
 //    IO(Tcp) ! Connect(remoteSocket)
     IO(UdpConnected) ! UdpConnected.Connect(self, remoteSocket)
 
-    def receive = {
+    def receive: Receive = {
       case UdpConnected.Connected =>
         context.become(ready(sender()))
     }
