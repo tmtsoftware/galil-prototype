@@ -5,7 +5,6 @@ import akka.util.ByteString
 import csw.proto.galil.io.{DataRecord, GalilIo}
 
 import scala.io.StdIn
-import scala.util.{Failure, Success}
 
 /**
   * A command line REPL for a Galil controller (or simulator).
@@ -55,14 +54,6 @@ object GalilRepl extends App {
       if (cmd == "q") {
         system.terminate()
       } else {
-//        galilIo.send(cmd).onComplete {
-//          case Success(result) =>
-//            result.foreach(r => println(formatResult(cmd, r)))
-//            loop()
-//          case Failure(ex) =>
-//            println(s"error: $ex")
-//            loop()
-//        }
         try {
           val result = galilIo.send(cmd)
           result.foreach(r => println(formatResult(cmd, r)))
