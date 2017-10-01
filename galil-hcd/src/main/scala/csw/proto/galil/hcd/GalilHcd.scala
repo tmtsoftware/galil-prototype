@@ -7,14 +7,14 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.framework.internal.wiring.{FrameworkWiring, Standalone}
-import csw.framework.models.ComponentInfo
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.param.messages._
-import csw.param.messages.RunningMessage.DomainMessage
-import csw.param.models.{Validation, Validations}
-import csw.param.states.CurrentState
+import csw.messages._
+import csw.messages.RunningMessage.DomainMessage
+import csw.messages.ccs.{Validation, Validations}
+import csw.messages.framework.ComponentInfo
+import csw.messages.location.TrackingEvent
+import csw.messages.params.states.CurrentState
 import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.models.TrackingEvent
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 
@@ -48,10 +48,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     log.debug("Initialize called")
   }
 
-  override def onRun(): Future[Unit] = async {
-    log.debug("onRun called")
-  }
-
   override def onShutdown(): Future[Unit] = async {
     log.debug("onShutdown called")
   }
@@ -68,12 +64,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     log.debug(s"onControlCommand called: $commandMsg")
     Validations.Valid
   }
-
-  override def onCommandValidationNotification(validationResponse: CommandValidationResponse): Unit =
-    log.debug(s"onCommandValidationNotification called: $validationResponse")
-
-  override def onCommandExecutionNotification(executionResponse: CommandExecutionResponse): Unit =
-    log.debug(s"onCommandExecutionNotification called: $executionResponse")
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")

@@ -6,19 +6,19 @@ import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
-import csw.param.commands.Setup
-import csw.param.generics.KeyType
-import csw.param.models.Prefix
-import csw.services.location.models._
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
-import csw.units.Units.degree
 import akka.typed.scaladsl.adapter._
-import csw.param.messages.CommandMessage.Submit
-import csw.param.messages.ComponentMessage
+import csw.messages.CommandMessage.Submit
+import csw.messages.ComponentMessage
+import csw.messages.ccs.commands.Setup
+import csw.messages.location.ComponentType.Assembly
+import csw.messages.location.Connection.AkkaConnection
+import csw.messages.location._
+import csw.messages.params.generics.KeyType
+import csw.messages.params.models.Prefix
+import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.models.ComponentType.Assembly
-import csw.services.location.models.Connection.AkkaConnection
 
 object GalilAssemblyClientLogger extends ComponentLogger("GalilAssemblyClient")
 

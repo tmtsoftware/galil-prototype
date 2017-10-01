@@ -2,12 +2,12 @@ package csw.proto.galil.hcd
 
 import akka.typed.{ActorRef, ActorSystem, Behavior}
 import akka.typed.scaladsl.Actor
-import csw.param.commands.Setup
-import csw.param.generics.KeyType
-import csw.param.messages.CommandMessage.Submit
-import csw.param.messages.SupervisorMessage
-import csw.param.models.Prefix
-import csw.units.Units.degree
+import csw.messages.CommandMessage.Submit
+import csw.messages.SupervisorMessage
+import csw.messages.ccs.commands.Setup
+import csw.messages.params.generics.KeyType
+import csw.messages.params.models.Prefix
+import csw.messages.params.models.Units.degree
 
 // Temporary dummy HCD client to test sending the HCD a Submit message
 object DummyHcdClient {
