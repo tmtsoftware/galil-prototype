@@ -179,6 +179,7 @@ object GalilIo {
 
     def ready(connection: ActorRef): Receive = {
       case UdpConnected.Received(data) =>
+        println(s"XXX received ${data.utf8String}")
         listener ! GalilClientActor.ReceivedData(data)
       case data: ByteString =>
         connection ! UdpConnected.Send(data)
