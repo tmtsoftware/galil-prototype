@@ -36,7 +36,7 @@ object QrCmd {
         getBlock(byte1, 6, "G"),
         getBlock(byte1, 7, "H")).mkString(", ")
 
-      val recordSize = buffer.getShort().toInt & 0xFFFF
+      val recordSize = buffer.getShort() & 0xFFFF
 
       s"""
          |Blocks present:   $blocksPresent

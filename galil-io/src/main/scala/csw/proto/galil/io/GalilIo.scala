@@ -17,6 +17,10 @@ object GalilIoLogger extends ComponentLogger("GalilIo")
 
 /**
   * A client for talking to a Galil controller (or the "simulator" application).
+  *
+  * Note that with the current implementation, it is not possible to send a command
+  * before the previous command completes (Doing so will result in an error).
+  *
   * @param host the Galil controller host
   * @param port the Galil controller port
   * @param system Akka environment used to create worker actor
@@ -54,6 +58,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     val f = workerActor ? SendData(ByteString(s"$cmd\r"))
     f.map {
       case ReceivedData(data) =>
+        // XXX
+        if (!data.utf8String.endsWith("\r\n:"))
+          println(s"XXX missing end marker")
+        else
+          println(s"XXX Data len: ${data.size}")
+
         data.utf8String.split("\r\n:").toList.map {
           case ":" => ""
           case "?" => "error"
