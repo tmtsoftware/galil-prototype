@@ -55,14 +55,22 @@ object GalilRepl extends App {
       if (cmd == "q") {
         system.terminate()
       } else {
-        galilIo.send(cmd).onComplete {
-          case Success(result) =>
-            result.foreach(r => println(formatResult(cmd, r)))
-            loop()
-          case Failure(ex) =>
+//        galilIo.send(cmd).onComplete {
+//          case Success(result) =>
+//            result.foreach(r => println(formatResult(cmd, r)))
+//            loop()
+//          case Failure(ex) =>
+//            println(s"error: $ex")
+//            loop()
+//        }
+        try {
+          val result = galilIo.send(cmd)
+          result.foreach(r => println(formatResult(cmd, r)))
+        } catch {
+          case ex: Exception =>
             println(s"error: $ex")
-            loop()
         }
+        loop()
       }
     }
 

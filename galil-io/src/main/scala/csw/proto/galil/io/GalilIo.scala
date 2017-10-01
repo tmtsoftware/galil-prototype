@@ -56,7 +56,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
     * @return the list of replies from the controller, which may be ASCII or binary, depending on the command
     */
-  def send(cmd: String): Future[List[ByteString]] = {
+  def send(cmd: String): List[ByteString] = {
 //    val f = workerActor ? SendData(ByteString(s"$cmd\r"))
 //    f.map {
 //      case ReceivedData(data) =>
@@ -69,25 +69,21 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
 //      case _ => Nil
 //    }
 
-
-    //        DatagramPacket sendPacket =
-    //            new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress);
-
     val sendBuf = s"$cmd\r".getBytes()
     val galilDmcAddress = new InetSocketAddress(host, port)
     val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
     // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
-    val recvBuf = Array.ofDim[Byte](406)
+//    val recvBuf = Array.ofDim[Byte](406)
+    val recvBuf = Array.ofDim[Byte](4029)
     socket.send(sendPacket)
     val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
     socket.receive(recvPacket)
     val data = ByteString(recvPacket.getData)
-    val result = data.utf8String.split(endMarker).toList.map {
+    data.utf8String.split(endMarker).toList.map {
       case ":" => ""
       case "?" => "error"
       case x => x
     }.map(ByteString(_))
-    Future.successful(result) // XXX FIXME
   }
 }
 
