@@ -9,7 +9,7 @@ import java.net.{DatagramPacket, DatagramSocket, InetSocketAddress}
 import akka.pattern.ask
 import csw.services.logging.scaladsl.ComponentLogger
 
-import scala.concurrent.Future
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 
 object GalilIoLogger extends ComponentLogger("GalilIo")
@@ -30,12 +30,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
                    timeout: Timeout = Timeout(10.seconds)) extends GalilIoLogger.Simple {
 
   import GalilIo._
-//  import GalilClientActor._
+  import GalilClientActor._
   import system.dispatcher
 
   private val socket = new DatagramSocket()
 
-//  private val workerActor = system.actorOf(GalilWorkerActor.props(host, port))
+  private val workerActor = system.actorOf(GalilWorkerActor.props(host, port))
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -57,33 +57,34 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     * @return the list of replies from the controller, which may be ASCII or binary, depending on the command
     */
   def send(cmd: String): List[ByteString] = {
-//    val f = workerActor ? SendData(ByteString(s"$cmd\r"))
-//    f.map {
-//      case ReceivedData(data) =>
-//        data.utf8String.split(endMarker).toList.map {
-//          case ":" => ""
-//          case "?" => "error"
-//          case x => x
-//        }.map(ByteString(_))
-//
-//      case _ => Nil
-//    }
+    val f = workerActor ? SendData(ByteString(s"$cmd\r"))
+    val result = f.map {
+      case ReceivedData(data) =>
+        data.utf8String.split(endMarker).toList.map {
+          case ":" => ""
+          case "?" => "error"
+          case x => x
+        }.map(ByteString(_))
 
-    val sendBuf = s"$cmd\r\n".getBytes()
-    val galilDmcAddress = new InetSocketAddress(host, port)
-    val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
-    // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
-    val recvBuf = Array.ofDim[Byte](406)
-    socket.send(sendPacket)
-    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
-    socket.receive(recvPacket)
-    println(s"XXX received: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
-    val data = ByteString(recvPacket.getData)
-    data.utf8String.split(endMarker).toList.map {
-      case ":" => ""
-      case "?" => "error"
-      case x => x
-    }.map(ByteString(_))
+      case _ => Nil
+    }
+    Await.result(result, 10.seconds) // XXX FIXME
+
+    //    val sendBuf = s"$cmd\r\n".getBytes()
+    //    val galilDmcAddress = new InetSocketAddress(host, port)
+    //    val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
+    //    // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
+    //    val recvBuf = Array.ofDim[Byte](406)
+    //    socket.send(sendPacket)
+    //    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
+    //    socket.receive(recvPacket)
+    //    println(s"XXX received: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
+    //    val data = ByteString(recvPacket.getData)
+    //    data.utf8String.split(endMarker).toList.map {
+    //      case ":" => ""
+    //      case "?" => "error"
+    //      case x => x
+    //    }.map(ByteString(_))
   }
 }
 
@@ -92,151 +93,151 @@ object GalilIo {
   // marks end of command or reply (or separator for multiple commands or replies)
   val endMarker = "\r\n:"
 
-//  private object GalilWorkerActor {
-//    def props(host: String, port: Int) =
-//      Props(new GalilWorkerActor(host, port))
-//  }
-//
-//  private class GalilWorkerActor(host: String, port: Int) extends GalilIoLogger.Actor {
-//
-//    import GalilClientActor._
-//
-//    private val remoteSocket = new InetSocketAddress(host, port)
-//    private val clientActor = context.actorOf(GalilClientActor.props(remoteSocket, self))
-//
-//    def receive: Receive = {
-//      case ConnectFailed =>
-//        log.error("Connect failed")
-//
-//      case Connected(c) =>
-//        log.info(s"Connected: $c") // Not needed?
-//
-//      case SendData(data) =>
-//        log.info(s"sending ${data.utf8String}")
-//        clientActor ! data
-//        context.become(waitForResponse(sender()))
-//    }
-//
-//    def waitForResponse(replyTo: ActorRef): Receive = {
-//      case ConnectFailed =>
-//        log.error("Connect failed")
-//        replyTo ! ConnectFailed
-//        context.become(receive)
-//
-//      case WriteFailed =>
-//        log.error("Write failed")
-//        replyTo ! WriteFailed
-//        context.become(receive)
-//
-//      case Connected(c) =>
-//        log.info(s"Connected: $c") // Not needed?
-//
-//      case ConnectionClosed =>
-//        log.info(s"Connection closed")
-//
-//      case ReceivedData(data) =>
-//        replyTo ! ReceivedData(data)
-//        context.become(receive)
-//    }
-//  }
-//
-//
-//  private object GalilClientActor {
-//    def props(remoteSocket: InetSocketAddress, listener: ActorRef) =
-//      Props(new GalilClientActor(remoteSocket, listener))
-//
-//    trait ResponseMessage
-//
-//    case object ConnectFailed extends ResponseMessage
-//
-//    case object WriteFailed extends ResponseMessage
-//
-//    case class Connected(c: Tcp.Connected) extends ResponseMessage
-//
-//    case object ConnectionClosed extends ResponseMessage
-//
-//    case class ReceivedData(data: ByteString) extends ResponseMessage
-//
-//    case class SendData(data: ByteString) extends ResponseMessage
-//
-//  }
-//
-//  /*
-//  class Connected(remote: InetSocketAddress) extends Actor {
-//  import context.system
-//  IO(UdpConnected) ! UdpConnected.Connect(self, remote)
-//
-//  def receive = {
-//    case UdpConnected.Connected =>
-//      context.become(ready(sender()))
-//  }
-//
-//  def ready(connection: ActorRef): Receive = {
-//    case UdpConnected.Received(data) =>
-//      // process data, send it on, etc.
-//    case msg: String =>
-//      connection ! UdpConnected.Send(ByteString(msg))
-//    case UdpConnected.Disconnect =>
-//      connection ! UdpConnected.Disconnect
-//    case UdpConnected.Disconnected => context.stop(self)
-//  }
-//}
-//
-//   */
-//  private class GalilClientActor(remoteSocket: InetSocketAddress, listener: ActorRef) extends GalilIoLogger.Actor {
-//
-//    import context.system
-//
-//    //    IO(Tcp) ! Connect(remoteSocket)
-//    IO(UdpConnected) ! UdpConnected.Connect(self, remoteSocket)
-//
-//    def receive: Receive = {
-//      case UdpConnected.Connected =>
-//        context.become(ready(sender()))
-//    }
-//
-//    def ready(connection: ActorRef): Receive = {
-//      case UdpConnected.Received(data) =>
-//        println(s"XXX received ${data.utf8String}")
-//        listener ! GalilClientActor.ReceivedData(data)
-//      case data: ByteString =>
-//        connection ! UdpConnected.Send(data)
-//      case UdpConnected.Disconnect =>
-//        connection ! UdpConnected.Disconnect
-//      case UdpConnected.Disconnected => context.stop(self)
-//    }
-//
-//    //    def receive: Receive = {
-//    //      case CommandFailed(_: Connect) =>
-//    //        listener ! GalilClientActor.ConnectFailed
-//    //        context stop self
-//    //
-//    //      case c@Connected(_, _) =>
-//    //        listener ! GalilClientActor.Connected(c)
-//    //        val connection = sender()
-//    //        connection ! Register(self)
-//    //        context.become(connected(connection))
-//    //
-//    //      case x => log.error(s"Unexpected message $x")
-//    //    }
-//    //
-//    //    private def connected(connection: ActorRef): Receive = {
-//    //      case data: ByteString =>
-//    //        connection ! Write(data)
-//    //      case CommandFailed(_: Write) =>
-//    //        // O/S buffer was full
-//    //        listener ! GalilClientActor.WriteFailed
-//    //      case Received(data) =>
-//    //        listener ! GalilClientActor.ReceivedData(data)
-//    //      case "close" =>
-//    //        connection ! Close
-//    //      case _: ConnectionClosed =>
-//    //        listener ! GalilClientActor.ConnectionClosed
-//    //        context stop self
-//    //      case x => log.error(s"Unexpected message $x")
-//    //    }
-//
-//  }
+  private object GalilWorkerActor {
+    def props(host: String, port: Int) =
+      Props(new GalilWorkerActor(host, port))
+  }
+
+  private class GalilWorkerActor(host: String, port: Int) extends GalilIoLogger.Actor {
+
+    import GalilClientActor._
+
+    private val remoteSocket = new InetSocketAddress(host, port)
+    private val clientActor = context.actorOf(GalilClientActor.props(remoteSocket, self))
+
+    def receive: Receive = {
+      case ConnectFailed =>
+        log.error("Connect failed")
+
+      case Connected(c) =>
+        log.info(s"Connected: $c") // Not needed?
+
+      case SendData(data) =>
+        log.info(s"sending ${data.utf8String}")
+        clientActor ! data
+        context.become(waitForResponse(sender()))
+    }
+
+    def waitForResponse(replyTo: ActorRef): Receive = {
+      case ConnectFailed =>
+        log.error("Connect failed")
+        replyTo ! ConnectFailed
+        context.become(receive)
+
+      case WriteFailed =>
+        log.error("Write failed")
+        replyTo ! WriteFailed
+        context.become(receive)
+
+      case Connected(c) =>
+        log.info(s"Connected: $c") // Not needed?
+
+      case ConnectionClosed =>
+        log.info(s"Connection closed")
+
+      case ReceivedData(data) =>
+        replyTo ! ReceivedData(data)
+        context.become(receive)
+    }
+  }
+
+
+  private object GalilClientActor {
+    def props(remoteSocket: InetSocketAddress, listener: ActorRef) =
+      Props(new GalilClientActor(remoteSocket, listener))
+
+    trait ResponseMessage
+
+    case object ConnectFailed extends ResponseMessage
+
+    case object WriteFailed extends ResponseMessage
+
+    case class Connected(c: Tcp.Connected) extends ResponseMessage
+
+    case object ConnectionClosed extends ResponseMessage
+
+    case class ReceivedData(data: ByteString) extends ResponseMessage
+
+    case class SendData(data: ByteString) extends ResponseMessage
+
+  }
+
+  /*
+  class Connected(remote: InetSocketAddress) extends Actor {
+  import context.system
+  IO(UdpConnected) ! UdpConnected.Connect(self, remote)
+
+  def receive = {
+    case UdpConnected.Connected =>
+      context.become(ready(sender()))
+  }
+
+  def ready(connection: ActorRef): Receive = {
+    case UdpConnected.Received(data) =>
+      // process data, send it on, etc.
+    case msg: String =>
+      connection ! UdpConnected.Send(ByteString(msg))
+    case UdpConnected.Disconnect =>
+      connection ! UdpConnected.Disconnect
+    case UdpConnected.Disconnected => context.stop(self)
+  }
+}
+
+   */
+  private class GalilClientActor(remoteSocket: InetSocketAddress, listener: ActorRef) extends GalilIoLogger.Actor {
+
+    import context.system
+
+    //    IO(Tcp) ! Connect(remoteSocket)
+    IO(UdpConnected) ! UdpConnected.Connect(self, remoteSocket)
+
+    def receive: Receive = {
+      case UdpConnected.Connected =>
+        context.become(ready(sender()))
+    }
+
+    def ready(connection: ActorRef): Receive = {
+      case UdpConnected.Received(data) =>
+        println(s"XXX received ${data.size} bytes")
+        listener ! GalilClientActor.ReceivedData(data)
+      case data: ByteString =>
+        connection ! UdpConnected.Send(data)
+      case UdpConnected.Disconnect =>
+        connection ! UdpConnected.Disconnect
+      case UdpConnected.Disconnected => context.stop(self)
+    }
+
+    //    def receive: Receive = {
+    //      case CommandFailed(_: Connect) =>
+    //        listener ! GalilClientActor.ConnectFailed
+    //        context stop self
+    //
+    //      case c@Connected(_, _) =>
+    //        listener ! GalilClientActor.Connected(c)
+    //        val connection = sender()
+    //        connection ! Register(self)
+    //        context.become(connected(connection))
+    //
+    //      case x => log.error(s"Unexpected message $x")
+    //    }
+    //
+    //    private def connected(connection: ActorRef): Receive = {
+    //      case data: ByteString =>
+    //        connection ! Write(data)
+    //      case CommandFailed(_: Write) =>
+    //        // O/S buffer was full
+    //        listener ! GalilClientActor.WriteFailed
+    //      case Received(data) =>
+    //        listener ! GalilClientActor.ReceivedData(data)
+    //      case "close" =>
+    //        connection ! Close
+    //      case _: ConnectionClosed =>
+    //        listener ! GalilClientActor.ConnectionClosed
+    //        context stop self
+    //      case x => log.error(s"Unexpected message $x")
+    //    }
+
+  }
 
 }
 
