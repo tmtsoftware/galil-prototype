@@ -57,16 +57,12 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
     val recvBuf = Array.ofDim[Byte](406)
     socket.send(sendPacket)
-    val result = for(i <- 0 until numCmds) yield {
+    val result = for(_ <- 0 until numCmds) yield {
       val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
       socket.receive(recvPacket)
+      println(s"XXX received udp packet with: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
       val data = ByteString(recvPacket.getData)
-      // XXX TODO: Could make the next bit more efficient (Do bibary results have the end marker?)
-      data.utf8String.split(endMarker).toList.map {
-        case ":" => ""
-        case "?" => "error"
-        case x => x
-      }.map(ByteString(_)).head
+      if (data.utf8String.endsWith(endMarker)) data.dropRight(endMarker.length) else data
     }
     result.toList
   }
