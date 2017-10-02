@@ -47,24 +47,25 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     * Sends a command to the controller and returns a list of responses
     *
     * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
-    * @return the list of replies from the controller, which may be ASCII or binary, depending on the command
+    * @return list of (command, reply) from the controller (one pair for each ";" separated command)
     */
-  def send(cmd: String): List[ByteString] = {
-    val numCmds = cmd.split(';').length
+  def send(cmd: String): List[(String, ByteString)] = {
+    val cmds = cmd.split(';')
     val sendBuf = s"$cmd\r\n".getBytes()
     val galilDmcAddress = new InetSocketAddress(host, port)
     val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
     // 406 bytes is the maximum size of response message from Galil DMC-4020 in one UDP packet.
     val recvBuf = Array.ofDim[Byte](406)
     socket.send(sendPacket)
-    val result = for (_ <- 0 until numCmds) yield {
+    val result = for (i <- cmds.indices) yield {
       val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
       socket.receive(recvPacket)
       println(s"XXX received udp packet with: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
       val data = ByteString(recvPacket.getData)
-      if (data.takeRight(endMarker.length).utf8String == endMarker)
+      val result = if (data.takeRight(endMarker.length).utf8String == endMarker)
         data.dropRight(endMarker.length)
       else data
+      (cmds(i), result)
     }
     result.toList
   }

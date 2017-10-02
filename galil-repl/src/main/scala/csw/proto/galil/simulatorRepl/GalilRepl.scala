@@ -45,7 +45,6 @@ object GalilRepl extends App {
 
   private def run(options: Options): Unit = {
     import options._
-    import system.dispatcher
 
     val galilIo = GalilIo(host, port)
 
@@ -55,8 +54,8 @@ object GalilRepl extends App {
         system.terminate()
       } else {
         try {
-          val result = galilIo.send(cmd)
-          result.foreach(r => println(formatResult(cmd, r)))
+          val resultList = galilIo.send(cmd)
+          resultList.foreach(r => println(formatResult(r._1, r._2)))
         } catch {
           case ex: Exception =>
             println(s"error: $ex")
