@@ -72,6 +72,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     }
 
     val data = receiveReply()
+    println(s"XXX receiveReplies size = : ${data.length}")
     if (data.isEmpty) result
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
