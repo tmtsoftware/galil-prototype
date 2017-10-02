@@ -62,21 +62,23 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   // Receives a replies (up to endMarker) for the given command and returns the result
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
     // Receives a single reply for the given command and returns the result
-    def receiveReply(): ByteString = {
+    def receiveReply(): DatagramPacket = {
       val recvBuf = Array.ofDim[Byte](bufSize)
       val recvPacket = new DatagramPacket(recvBuf, bufSize)
       println(s"XXX wait for reply...")
       socket.receive(recvPacket)
       println(s"XXX received reply: ${recvPacket.getLength}")
-      ByteString(recvPacket.getData)
+      recvPacket
     }
 
-    val data = receiveReply()
-    println(s"XXX receiveReplies size = : ${data.length}")
-    if (data.isEmpty) result
+    val packet = receiveReply()
+    val data = ByteString(packet.getData)
+    val length = packet.getLength
+    println(s"XXX receiveReplies size = : $length")
+    if (length == 0) result
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
-    else if (data.length < bufSize)
+    else if (length < bufSize)
       result ++ data
     else receiveReplies(data)
   }
