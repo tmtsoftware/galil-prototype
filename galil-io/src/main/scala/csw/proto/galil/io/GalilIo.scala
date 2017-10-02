@@ -81,18 +81,6 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
       result ++ data
     else receiveReplies(data)
   }
-
-
-  //  // Receives a reply for the given command and returns the result
-  //  private def receiveReply(): ByteString = {
-  //    val recvBuf = Array.ofDim[Byte](bufSize)
-  //    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
-  //    socket.receive(recvPacket)
-  //    val data = ByteString(recvPacket.getData)
-  //    if (data.takeRight(endMarker.length).utf8String == endMarker)
-  //      data.dropRight(endMarker.length)
-  //    else data
-  //  }
 }
 
 object GalilIo {
