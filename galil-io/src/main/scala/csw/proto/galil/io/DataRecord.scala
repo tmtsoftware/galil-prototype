@@ -42,6 +42,11 @@ object DataRecord {
 
   private def readHeader(buffer: ByteBuffer): Header = {
     val byte0 = buffer.get
+
+    // XXX TODO: Error handling?
+    if (!getBit(byte0, 7))
+      println("Warning: The MSB of the first byte in the Data Record header is not one")
+
     val byte1 = buffer.get
     val blocksPresent = List(
       getBlock(byte0, 0, "S"),
