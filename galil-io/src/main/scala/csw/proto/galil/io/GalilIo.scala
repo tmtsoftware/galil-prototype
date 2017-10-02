@@ -72,7 +72,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     }
 
     val packet = receiveReply()
-    val data = ByteString(packet.getData)
+    val data = ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
     val length = packet.getLength
     if (length == 0) result
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
