@@ -60,21 +60,20 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   }
 
   // Receives a replies (up to endMarker) for the given command and returns the result
+  // Note: It seems that replies that are longer than bufSize (406 bytes) are broken into
+  // multiple responses, so we need to recurse until the whole response has been read.
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
     // Receives a single reply for the given command and returns the result
     def receiveReply(): DatagramPacket = {
       val recvBuf = Array.ofDim[Byte](bufSize)
       val recvPacket = new DatagramPacket(recvBuf, bufSize)
-      println(s"XXX wait for reply...")
       socket.receive(recvPacket)
-      println(s"XXX received reply: ${recvPacket.getLength}")
       recvPacket
     }
 
     val packet = receiveReply()
     val data = ByteString(packet.getData)
     val length = packet.getLength
-    println(s"XXX receiveReplies size = : $length")
     if (length == 0) result
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
