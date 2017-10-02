@@ -55,37 +55,39 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     val galilDmcAddress = new InetSocketAddress(host, port)
     val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
     socket.send(sendPacket)
-    val result = for (c <- cmds) yield (c, receiveReply())
+    val result = for (c <- cmds) yield (c, receiveReplies())
     result.toList
   }
 
-//  // Receives a replies (up to endMarker) for the given command and returns the result
-//  private def receiveReplies(result: ByteString = ByteString()): ByteString = {
-//      println(s"XXX receiveReplies: ${result.length}")
-//      val data = receiveReply()
-//      if (data.takeRight(endMarker.length).utf8String == endMarker)
-//        result ++ data.dropRight(endMarker.length)
-//      else receiveReplies(data)
-//  }
-//
-//  // Receives a single reply for the given command and returns the result
-//  private def receiveReply(): ByteString = {
-//    val recvBuf = Array.ofDim[Byte](bufSize)
-//    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
-//    socket.receive(recvPacket)
-//    ByteString(recvPacket.getData)
-//  }
+  // Receives a replies (up to endMarker) for the given command and returns the result
+  private def receiveReplies(result: ByteString = ByteString()): ByteString = {
+    // Receives a single reply for the given command and returns the result
+    def receiveReply(): ByteString = {
+      val recvBuf = Array.ofDim[Byte](bufSize)
+      val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
+      socket.receive(recvPacket)
+      println(s"XXX receiveReply: ${recvPacket.getLength}")
+      ByteString(recvPacket.getData)
+    }
 
-  // Receives a reply for the given command and returns the result
-  private def receiveReply(): ByteString = {
-    val recvBuf = Array.ofDim[Byte](bufSize)
-    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
-    socket.receive(recvPacket)
-    val data = ByteString(recvPacket.getData)
-    if (data.takeRight(endMarker.length).utf8String == endMarker)
-      data.dropRight(endMarker.length)
-    else data
+    val data = receiveReply()
+    if (data.isEmpty) result
+    else if (data.size > endMarker.length && data.takeRight(endMarker.length).utf8String == endMarker)
+      result ++ data.dropRight(endMarker.length)
+    else receiveReplies(data)
   }
+
+
+  //  // Receives a reply for the given command and returns the result
+  //  private def receiveReply(): ByteString = {
+  //    val recvBuf = Array.ofDim[Byte](bufSize)
+  //    val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
+  //    socket.receive(recvPacket)
+  //    val data = ByteString(recvPacket.getData)
+  //    if (data.takeRight(endMarker.length).utf8String == endMarker)
+  //      data.dropRight(endMarker.length)
+  //    else data
+  //  }
 }
 
 object GalilIo {
