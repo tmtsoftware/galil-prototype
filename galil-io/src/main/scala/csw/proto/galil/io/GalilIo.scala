@@ -64,16 +64,19 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     // Receives a single reply for the given command and returns the result
     def receiveReply(): ByteString = {
       val recvBuf = Array.ofDim[Byte](bufSize)
-      val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
+      val recvPacket = new DatagramPacket(recvBuf, bufSize)
+      println(s"XXX wait for reply...")
       socket.receive(recvPacket)
-      println(s"XXX receiveReply: ${recvPacket.getLength}")
+      println(s"XXX received reply: ${recvPacket.getLength}")
       ByteString(recvPacket.getData)
     }
 
     val data = receiveReply()
     if (data.isEmpty) result
-    else if (data.size > endMarker.length && data.takeRight(endMarker.length).utf8String == endMarker)
+    else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
+    else if (data.length < bufSize)
+      result ++ data
     else receiveReplies(data)
   }
 
@@ -97,6 +100,7 @@ object GalilIo {
 
   // Max packet size:
   // See http://www.galilmc.com/news/software/using-socket-tcpip-or-udp-communication-galil-controllers
-  val bufSize: Int = 450
+  //  val bufSize: Int = 450
+  val bufSize: Int = 406
 }
 
