@@ -62,10 +62,9 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
       socket.receive(recvPacket)
       println(s"XXX received udp packet with: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
       val data = ByteString(recvPacket.getData)
-      if (data.utf8String.endsWith(endMarker)) {
-        println("XXX droping last 3 bytes from packet")
+      if (data.takeRight(endMarker.length).utf8String == endMarker)
         data.dropRight(endMarker.length)
-      } else data
+      else data
     }
     result.toList
   }
