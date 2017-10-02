@@ -17,6 +17,7 @@ case class DataRecord(header: Header, generalState: GeneralState) {
 
 object DataRecord {
   def apply(bs: ByteString): DataRecord = {
+    println(s"XXX received ${bs.size} bytes of data")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = readHeader(buffer)
     val generalState = readGeneralState(buffer)

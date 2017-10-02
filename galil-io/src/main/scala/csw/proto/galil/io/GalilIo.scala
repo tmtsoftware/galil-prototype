@@ -60,7 +60,6 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
     val result = for(i <- 0 until numCmds) yield {
       val recvPacket = new DatagramPacket(recvBuf, recvBuf.length)
       socket.receive(recvPacket)
-      println(s"XXX received: ${recvPacket.getLength} bytes, offset: ${recvPacket.getOffset}")
       val data = ByteString(recvPacket.getData)
       // XXX TODO: Could make the next bit more efficient (Do bibary results have the end marker?)
       data.utf8String.split(endMarker).toList.map {
