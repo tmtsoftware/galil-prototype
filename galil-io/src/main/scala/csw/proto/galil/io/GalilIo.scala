@@ -19,6 +19,12 @@ abstract class GalilIo {
     */
   protected def read(): ByteString
 
+  /**
+    * Closes the socket connection to the Galil controller
+    * (Do not use this object after closing the socket).
+    */
+  def close(): Unit
+
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -103,6 +109,8 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
     socket.receive(packet)
     ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
   }
+
+  override def close(): Unit = socket.close()
 }
 
 /**
@@ -131,5 +139,7 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
     val length = socket.getInputStream.read(buf)
     ByteString.fromArray(buf, 0, length)
   }
+
+  override def close(): Unit = socket.close()
 }
 
