@@ -63,12 +63,11 @@ abstract class GalilIo {
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
     else if (data.takeRight(1).utf8String == ":") {
-      println("XXX data reply ended with ':'")
       result ++ data.dropRight(1)
-    } else if (length < bufSize) {
-      println("XXX data reply ended without ':'")
-      result ++ data
     }
+//    else if (length < bufSize) {
+//      result ++ data
+//    }
     else receiveReplies(data)
   }
 }
