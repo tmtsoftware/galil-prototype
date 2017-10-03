@@ -14,7 +14,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   private val localHost = InetAddress.getLocalHost.getHostName
 
   LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, system)
-  val galilIo = GalilIo() // default params: "127.0.0.1", 8888
+  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
 
   override def beforeAll() {
   }

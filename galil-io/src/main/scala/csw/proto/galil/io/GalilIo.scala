@@ -1,33 +1,23 @@
 package csw.proto.galil.io
 
-import akka.actor.ActorSystem
-import akka.util.{ByteString, Timeout}
-import java.net.{DatagramPacket, DatagramSocket, InetSocketAddress}
+import akka.util.ByteString
 
-import csw.services.logging.scaladsl.ComponentLogger
-
-import scala.concurrent.duration._
-
-object GalilIoLogger extends ComponentLogger("GalilIo")
+import GalilIo._
 
 /**
-  * A client for talking to a Galil controller (or the "simulator" application).
-  *
-  * Note that with the current implementation, it is not possible to send a command
-  * before the previous command completes (Doing so will result in an error).
-  *
-  * @param host    the Galil controller host
-  * @param port    the Galil controller port
-  * @param system  Akka environment used to create worker actor
-  * @param timeout max amount of time to wait for reply from controller (default: 10 secs)
+  * Based class for a TCP/UDP socket client talking to a Galil controller.
   */
-case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
-                  (implicit system: ActorSystem,
-                   timeout: Timeout = Timeout(10.seconds)) extends GalilIoLogger.Simple {
+abstract class GalilIo {
 
-  import GalilIo._
+  /**
+    * Writes the data to the socket
+    */
+  protected def write(sendBuf: Array[Byte]): Unit
 
-  private val socket = new DatagramSocket()
+  /**
+    * Reads the reply from the socket and returns it as a ByteString
+    */
+  protected def read(): ByteString
 
 
   // From the Galil doc:
@@ -52,9 +42,7 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   def send(cmd: String): List[(String, ByteString)] = {
     val cmds = cmd.split(';')
     val sendBuf = s"$cmd\r\n".getBytes()
-    val galilDmcAddress = new InetSocketAddress(host, port)
-    val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
-    socket.send(sendPacket)
+    write(sendBuf)
     val result = for (c <- cmds) yield (c, receiveReplies())
     result.toList
   }
@@ -63,22 +51,18 @@ case class GalilIo(host: String = "127.0.0.1", port: Int = 8888)
   // Note: It seems that replies that are longer than bufSize (406 bytes) are broken into
   // multiple responses, so we need to recurse until the whole response has been read.
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
-    // Receives a single reply for the given command and returns the result
-    def receiveReply(): DatagramPacket = {
-      val recvBuf = Array.ofDim[Byte](bufSize)
-      val recvPacket = new DatagramPacket(recvBuf, bufSize)
-      socket.receive(recvPacket)
-      recvPacket
-    }
-
-    val packet = receiveReply()
-    val data = ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
-    val length = packet.getLength
+    val data = read()
+    val length = data.length
     if (length == 0) result
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
-    else if (length < bufSize)
+    else if (data.takeRight(1).utf8String == ":") {
+      println("XXX data reply ended with ':'")
+      result ++ data.dropRight(1)
+    } else if (length < bufSize) {
+      println("XXX data reply ended without ':'")
       result ++ data
+    }
     else receiveReplies(data)
   }
 }
@@ -92,5 +76,60 @@ object GalilIo {
   // See http://www.galilmc.com/news/software/using-socket-tcpip-or-udp-communication-galil-controllers
   //  val bufSize: Int = 450
   val bufSize: Int = 406
+}
+
+
+/**
+  * A UDP socket based client for talking to a Galil controller.
+  *
+  * @param host    the Galil controller host
+  * @param port    the Galil controller port
+  */
+case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {
+  import java.net.{DatagramPacket, DatagramSocket, InetSocketAddress}
+
+  private val socket = new DatagramSocket()
+
+  override def write(sendBuf: Array[Byte]): Unit = {
+    val galilDmcAddress = new InetSocketAddress(host, port)
+    val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
+    socket.send(sendPacket)
+  }
+
+  // Receives a single reply for the given command and returns the result
+  override def read(): ByteString = {
+    val buf = Array.ofDim[Byte](bufSize)
+    val packet = new DatagramPacket(buf, bufSize)
+    socket.receive(packet)
+    ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
+  }
+}
+
+/**
+  * A TCP socket based client for talking to a Galil controller.
+  *
+  * @param host    the Galil controller host
+  * @param port    the Galil controller port
+  */
+case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {
+  import java.net.InetAddress
+  import java.net.InetSocketAddress
+  import java.net.Socket
+
+  private val socketAddress = new InetSocketAddress(InetAddress.getByName(host), port)
+  private val socket = new Socket()
+  private val timeoutInMs = 10*1000;   // 10 seconds
+  socket.connect(socketAddress, timeoutInMs)
+
+  override def write(sendBuf: Array[Byte]): Unit = {
+    socket.getOutputStream.write(sendBuf)
+  }
+
+  // Receives a single reply for the given command and returns the result
+  override def read(): ByteString = {
+    val buf = Array.ofDim[Byte](bufSize)
+    val length = socket.getInputStream.read(buf)
+    ByteString.fromArray(buf, 0, length)
+  }
 }
 
