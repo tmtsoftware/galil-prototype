@@ -54,8 +54,9 @@ abstract class GalilIo {
   }
 
   // Receives a replies (up to endMarker) for the given command and returns the result
-  // Note: It seems that replies that are longer than bufSize (406 bytes) are broken into
+  // Note: Replies that are longer than bufSize (406 bytes) are broken into
   // multiple responses, so we need to recurse until the whole response has been read.
+  // ASCII responses end with "\r\n:", while binary responses end with ":".
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
     val data = read()
     val length = data.length
@@ -64,11 +65,7 @@ abstract class GalilIo {
       result ++ data.dropRight(endMarker.length)
     else if (data.takeRight(1).utf8String == ":") {
       result ++ data.dropRight(1)
-    }
-//    else if (length < bufSize) {
-//      result ++ data
-//    }
-    else receiveReplies(data)
+    } else receiveReplies(data)
   }
 }
 

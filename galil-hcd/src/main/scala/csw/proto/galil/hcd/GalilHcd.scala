@@ -1,22 +1,20 @@
 package csw.proto.galil.hcd
 
-import java.net.InetAddress
+import java.io.FileWriter
+import java.nio.file.{Files, Path}
 
-import akka.actor.ActorSystem
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
-import com.typesafe.config.ConfigFactory
-import csw.framework.internal.wiring.{FrameworkWiring, Standalone}
+import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
 import csw.messages.RunningMessage.DomainMessage
-import csw.messages.ccs.{Validation, Validations}
+import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
-import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.ComponentLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -60,9 +58,14 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  override def onControlCommand(commandMsg: CommandMessage): Validation = {
-    log.debug(s"onControlCommand called: $commandMsg")
+  override def onSetup(commandMessage: CommandMessage): Validation = {
+    log.debug(s"onSetup called: $commandMessage")
     Validations.Valid
+  }
+
+  override def onObserve(commandMessage: CommandMessage): Validation =  {
+    log.debug(s"onObserve called: $commandMessage")
+    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
@@ -72,9 +75,18 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 }
 
 object GalilHcdApp extends App {
-  val host = InetAddress.getLocalHost.getHostName
-  val system: ActorSystem = ClusterAwareSettings.system
-  LoggingSystemFactory.start("GalilHcd", "0.1", host, system)
-  val wiring = FrameworkWiring.make(system)
-  Standalone.spawn(ConfigFactory.load("GalilHcd.conf"), wiring)
+  // XXX TODO: FIXME
+  def createStandaloneTmpFile(resourceFileName: String): Path = {
+    val hcdConfiguration       = scala.io.Source.fromResource(resourceFileName).mkString
+    val standaloneConfFilePath = Files.createTempFile("csw-temp-resource", ".conf")
+    val fileWriter             = new FileWriter(standaloneConfFilePath.toFile, true)
+    fileWriter.write(hcdConfiguration)
+    fileWriter.close()
+    standaloneConfFilePath
+  }
+
+  // See See DEOPSCSW-171: Starting component from command line.
+  val path = createStandaloneTmpFile("GalilHcd.conf")
+  val defaultArgs = if (args.isEmpty) Array("--local",  "--standalone",  path.toString) else args
+  ContainerCmd.start("GalilHcd", defaultArgs)
 }

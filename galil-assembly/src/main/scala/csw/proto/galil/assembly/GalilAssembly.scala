@@ -1,23 +1,21 @@
 package csw.proto.galil.assembly
 
-import java.net.InetAddress
+import java.io.FileWriter
+import java.nio.file.{Files, Path}
 
-import akka.actor.ActorSystem
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
-import com.typesafe.config.ConfigFactory
-import csw.framework.internal.wiring.{FrameworkWiring, Standalone}
+import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
 import csw.messages.PubSub.PublisherMessage
 import csw.messages.RunningMessage.DomainMessage
-import csw.messages.ccs.{Validation, Validations}
+import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
-import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.ComponentLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -50,6 +48,16 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     log.debug("Initialize called")
   }
 
+  override def onSetup(commandMessage: CommandMessage): Validation = {
+    log.debug(s"onSetup called: $commandMessage")
+    Validations.Valid
+  }
+
+  override def onObserve(commandMessage: CommandMessage): Validation =  {
+    log.debug(s"onObserve called: $commandMessage")
+    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
+  }
+
   override def onShutdown(): Future[Unit] = async {
     log.debug("onShutdown called")
   }
@@ -62,11 +70,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     case x => log.debug(s"onDomainMsg called: $x")
   }
 
-  override def onControlCommand(commandMessage: CommandMessage): Validation = {
-    log.debug(s"onControlCommand called: $commandMessage")
-    Validations.Valid
-  }
-
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
 
@@ -74,19 +77,21 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
 
 }
 
+
 // Start assembly from the command line using GalilAssembly.conf resource file
-// (XXX TODO: change to use ContainerCmd when it supports resource files)
 object GalilAssemblyApp extends App {
-  val host = InetAddress.getLocalHost.getHostName
-  val system: ActorSystem = ClusterAwareSettings.system
-  LoggingSystemFactory.start("GalilAssembly", "0.1", host, system)
-  val wiring  = FrameworkWiring.make(system)
-  Standalone.spawn(ConfigFactory.load("GalilAssembly.conf"), wiring)
+  // XXX TODO: FIXME
+  def createStandaloneTmpFile(resourceFileName: String): Path = {
+    val hcdConfiguration       = scala.io.Source.fromResource(resourceFileName).mkString
+    val standaloneConfFilePath = Files.createTempFile("csw-temp-resource", ".conf")
+    val fileWriter             = new FileWriter(standaloneConfFilePath.toFile, true)
+    fileWriter.write(hcdConfiguration)
+    fileWriter.close()
+    standaloneConfFilePath
+  }
+
+  // See See DEOPSCSW-171: Starting component from command line.
+  val path = createStandaloneTmpFile("GalilAssembly.conf")
+  val defaultArgs = if (args.isEmpty) Array("--local",  "--standalone",  path.toString) else args
+  ContainerCmd.start("GalilAssembly", defaultArgs)
 }
-
-
-//// Start assembly from the command line (pass --file $path/resources/GalilAssembly.conf)
-//object GalilAssemblyApp extends App {
-//  import csw.apps.containercmd.ContainerCmd
-//  ContainerCmd.start("GalilAssembly", args)
-//}
