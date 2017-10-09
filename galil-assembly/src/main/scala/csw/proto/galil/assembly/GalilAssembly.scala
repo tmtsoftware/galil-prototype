@@ -44,6 +44,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
+  override def componentName(): String = "GalilAssembly"
+
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
   }

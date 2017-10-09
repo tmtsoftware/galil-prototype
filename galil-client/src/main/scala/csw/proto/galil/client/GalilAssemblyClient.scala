@@ -7,7 +7,7 @@ import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{LoggingSystemFactory, ServiceLogger}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
 import csw.messages.ComponentMessage
@@ -20,7 +20,7 @@ import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 
-object GalilAssemblyClientLogger extends ComponentLogger("GalilAssemblyClient")
+object GalilAssemblyClientLogger extends ServiceLogger("GalilAssemblyClient")
 
 // A client to test locating and communicating with the Galil assembly
 object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
