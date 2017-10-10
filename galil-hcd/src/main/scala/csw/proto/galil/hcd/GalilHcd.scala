@@ -5,6 +5,7 @@ import java.nio.file.{Files, Path}
 
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
+import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
@@ -37,7 +38,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
                                pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                locationService: LocationService)
-  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService)
     with ComponentLogger.Simple{
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -77,18 +78,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 }
 
 object GalilHcdApp extends App {
-  // XXX TODO: FIXME
-  def createStandaloneTmpFile(resourceFileName: String): Path = {
-    val hcdConfiguration       = scala.io.Source.fromResource(resourceFileName).mkString
-    val standaloneConfFilePath = Files.createTempFile("csw-temp-resource", ".conf")
-    val fileWriter             = new FileWriter(standaloneConfFilePath.toFile, true)
-    fileWriter.write(hcdConfiguration)
-    fileWriter.close()
-    standaloneConfFilePath
-  }
-
-  // See See DEOPSCSW-171: Starting component from command line.
-  val path = createStandaloneTmpFile("GalilHcd.conf")
-  val defaultArgs = if (args.isEmpty) Array("--local",  "--standalone",  path.toString) else args
-  ContainerCmd.start("GalilHcd", defaultArgs)
+  val defaultConfig = ConfigFactory.load("GalilHcd.conf")
+  ContainerCmd.start("GalilHcd", args, Some(defaultConfig))
 }

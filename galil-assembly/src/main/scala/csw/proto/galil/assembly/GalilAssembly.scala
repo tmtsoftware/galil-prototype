@@ -5,6 +5,7 @@ import java.nio.file.{Files, Path}
 
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
+import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
@@ -82,18 +83,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
 
 // Start assembly from the command line using GalilAssembly.conf resource file
 object GalilAssemblyApp extends App {
-  // XXX TODO: FIXME
-  def createStandaloneTmpFile(resourceFileName: String): Path = {
-    val hcdConfiguration       = scala.io.Source.fromResource(resourceFileName).mkString
-    val standaloneConfFilePath = Files.createTempFile("csw-temp-resource", ".conf")
-    val fileWriter             = new FileWriter(standaloneConfFilePath.toFile, true)
-    fileWriter.write(hcdConfiguration)
-    fileWriter.close()
-    standaloneConfFilePath
-  }
-
-  // See See DEOPSCSW-171: Starting component from command line.
-  val path = createStandaloneTmpFile("GalilAssembly.conf")
-  val defaultArgs = if (args.isEmpty) Array("--local",  "--standalone",  path.toString) else args
-  ContainerCmd.start("GalilAssembly", defaultArgs)
+  val defaultConfig = ConfigFactory.load("GalilAssembly.conf")
+  ContainerCmd.start("GalilAssembly", args, Some(defaultConfig))
 }

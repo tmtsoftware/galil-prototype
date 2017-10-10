@@ -7,12 +7,12 @@ import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{CommonComponentLogger, ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
 import csw.messages.ComponentMessage
 import csw.messages.ccs.commands.Setup
-import csw.messages.location.ComponentType.Assembly
+import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.KeyType
@@ -20,23 +20,22 @@ import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 
-// A client to test locating and communicating with the Galil assembly
-object GalilAssemblyClient extends App with ComponentLogger.Simple {
+// A client to test locating and communicating with the Galil HCD
+object GalilHcdClient extends App with ComponentLogger.Simple {
 
-  override def componentName(): String = "GalilAssemblyClient"
-
+  override def componentName(): String = "GalilHcdClient"
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
   private val locationService = LocationServiceFactory.withSystem(system)
   private val host = InetAddress.getLocalHost.getHostName
-  LoggingSystemFactory.start("GalilAssemblyClientApp", "0.1", host, system)
+  LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
   implicit val mat: ActorMaterializer = ActorMaterializer()
-  log.info("Starting GalilAssemblyClient")
-  system.spawn(initialBehavior, "GalilAssemblyClient")
+  log.info("Starting GalilHcdClient")
+  system.spawn(initialBehavior, "GalilHcdClient")
 
   def initialBehavior: Behavior[TrackingEvent] =
     Actor.deferred { ctx =>
-      val connection = AkkaConnection(ComponentId("GalilAssembly", Assembly))
+      val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
       locationService.subscribe(connection, { loc =>
         ctx.self ! loc
       })
@@ -60,13 +59,13 @@ object GalilAssemblyClient extends App with ComponentLogger.Simple {
     }
   }
 
-  private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[ComponentMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[ComponentMessage]): Unit = {
     val k1 = KeyType.IntKey.make("encoder")
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)
     val i2 = k2.set("a", "b", "c").withUnits(degree)
     val setup = Setup("Obs001", Prefix("wfos.blue.filter")).add(i1).add(i2)
-    assembly ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
+    hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }
 
