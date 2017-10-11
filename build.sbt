@@ -11,6 +11,7 @@ lazy val `galil-hcd` = project
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
+  .dependsOn(`galil-io`)
 
 // The Galil prototype assembly, implemented in Scala
 lazy val `galil-assembly` = project
@@ -42,7 +43,8 @@ lazy val `galil-repl` = project
   .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
-  )).dependsOn(`galil-io`)
+  ))
+  .dependsOn(`galil-io`)
 
 // Supports talking to and simulating a Galil device
 lazy val `galil-io` = project
@@ -51,4 +53,13 @@ lazy val `galil-io` = project
     `csw-framework`,
     scalaTest % Test
   ))
+
+// Supports Galil commands and responses as described in a config file
+lazy val `galil-commands` = project
+  .settings(defaultSettings: _*)
+  .settings(libraryDependencies ++= Seq(
+    `csw-framework`,
+    scalaTest % Test
+  ))
+  .dependsOn(`galil-io`)
 
