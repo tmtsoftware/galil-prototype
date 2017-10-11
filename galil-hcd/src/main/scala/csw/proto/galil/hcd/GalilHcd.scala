@@ -14,6 +14,7 @@ import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
+import csw.proto.galil.hcd.GalilCommandMessage.GalilRequest
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.ComponentLogger
 
@@ -24,6 +25,17 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 sealed trait GalilHcdDomainMessage extends DomainMessage
 
 // Add messages here...
+sealed trait GalilCommandMessage extends GalilHcdDomainMessage
+object GalilCommandMessage {
+  case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
+  case class GalilRequest(commandString: String, replyTo: ActorRef[GalilResponseMessage]) extends GalilCommandMessage
+}
+
+sealed trait GalilResponseMessage extends GalilHcdDomainMessage
+object GalilResponseMessage {
+  case class GalilResponse(response: String) extends GalilResponseMessage
+}
+
 
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
@@ -43,10 +55,13 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
+  var galilHardwareActor: ActorRef[GalilCommandMessage] = _
+
   override def componentName(): String = "GalilHcd"
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
+    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self)))
   }
 
   override def onShutdown(): Future[Unit] = async {
@@ -63,6 +78,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def onSetup(commandMessage: CommandMessage): Validation = {
     log.debug(s"onSetup called: $commandMessage")
+    galilHardwareActor ! GalilRequest("testCommand arg1 arg2", ctx.self)
     Validations.Valid
   }
 
@@ -75,6 +91,9 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
 
   override protected def maybeComponentName(): Option[String] = Some("GalilHcd")
+
+  def getGalilConfig: GalilConfig = new GalilConfig();
+
 }
 
 object GalilHcdApp extends App {
