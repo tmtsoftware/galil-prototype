@@ -12,6 +12,7 @@ lazy val `galil-hcd` = project
     `csw-framework`
   ))
   .dependsOn(`galil-io`)
+  .dependsOn(`galil-commands`)
 
 // The Galil prototype assembly, implemented in Scala
 lazy val `galil-assembly` = project

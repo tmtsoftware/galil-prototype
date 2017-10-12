@@ -1,20 +1,19 @@
 package csw.proto.galil.hcd
 
-import java.io.FileWriter
-import java.nio.file.{Files, Path}
-
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.messages._
 import csw.messages.RunningMessage.DomainMessage
+import csw.messages._
+import csw.messages.ccs.commands.CommandInfo
 import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.GalilCommandMessage.GalilRequest
+import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.ComponentLogger
 
@@ -28,12 +27,12 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 sealed trait GalilCommandMessage extends GalilHcdDomainMessage
 object GalilCommandMessage {
   case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
-  case class GalilRequest(commandString: String, replyTo: ActorRef[GalilResponseMessage]) extends GalilCommandMessage
+  case class GalilRequest(commandString: String, prefix: String, cmdInfo: CommandInfo, commandKey: String, client: ActorRef[CommandResponse]) extends GalilCommandMessage
 }
 
 sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 object GalilResponseMessage {
-  case class GalilResponse(response: String) extends GalilResponseMessage
+  case class GalilResponse(response: String, prefix: String, cmdInfo: CommandInfo, commandKey: String, client: ActorRef[CommandResponse]) extends GalilResponseMessage
 }
 
 
@@ -73,7 +72,15 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
   override def onDomainMsg(galilMsg: GalilHcdDomainMessage): Unit = galilMsg match {
+    case (x: GalilResponseMessage) => handleGalilReponse(x)
+
     case x => log.debug(s"onDomainMessage called: $x")
+  }
+
+  def handleGalilReponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
+    case GalilResponse(response, prefix, cmdInfo, commandKey, client) =>
+
+
   }
 
   override def onSetup(commandMessage: CommandMessage): Validation = {
