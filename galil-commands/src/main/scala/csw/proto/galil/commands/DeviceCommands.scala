@@ -4,7 +4,7 @@ import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
 import DeviceCommands._
-import csw.messages.{CommandResponse, CompletedWithResult, Error}
+import csw.messages.{CommandResponse, Completed, CompletedWithResult, Error}
 import csw.messages.ccs.commands.{Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 
@@ -119,7 +119,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
-      CompletedWithResult(Result(setup.info, setup.prefix, Set.empty[Parameter[_]]))
+      Completed
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
