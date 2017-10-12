@@ -20,6 +20,7 @@ import scala.util.{Failure, Success, Try}
   */
 case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
                          (implicit system: ActorSystem, mat: ActorMaterializer) {
+
   import system.dispatcher
 
   // Keep track of current connections, needed to simulate TH command
@@ -34,7 +35,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
   private def serverLogic(conn: IncomingConnection) = Flow[ByteString]
     // handle lines
-    .via(Framing.delimiter(ByteString("\r"), maximumFrameLength = 256, allowTruncation = true))
+    .via(Framing.delimiter(ByteString("\r\n"), maximumFrameLength = 256, allowTruncation = true))
     // handle multiple commands on a line separated by ";"
     .mapConcat(_.utf8String.split(";").map(ByteString(_)).toList)
     .map(processCommand(_, conn))
@@ -58,22 +59,27 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
       case None => ":"
     }
   }
+
   private def formatReply(reply: String): String = formatReply(Some(reply))
 
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString, conn: IncomingConnection): ByteString = {
     val cmdString = cmd.utf8String
     val reply = if (cmdString.startsWith("'")) formatReply(None) // comment with "'"
-    else cmdString match {
-      case "badcmd" => formatReply(None, isError = true)
-      case "noreplycmd" => formatReply(None)
+    else if (cmdString.startsWith("PR")) {
+      formatReply(prCmd(cmdString.charAt(2), cmdString.substring(4,5)))
+    } else
+      cmdString match {
+        // dummy commands for testing
+        case "badcmd" => formatReply(None, isError = true)
+        case "noreplycmd" => formatReply(None)
 
-      case "NO" => formatReply(None) // no-op
+        case "NO" => formatReply(None) // no-op
 
-      case "TH" => formatReply(thCmd(conn))
+        case "TH" => formatReply(thCmd(conn))
 
-      case _ => formatReply(s"$cmdString!!!")
-    }
+        case _ => formatReply(s"$cmdString!!!")
+      }
     ByteString(reply)
   }
 
@@ -117,5 +123,27 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
     s"$controllerIp\n$connInfo"
     // TODO: add the "IHH AVAILABLE..." parts...
+  }
+
+  // Simulates the PR command:
+  //
+  // PR[A-z]=?
+  //  setRelTarget: {
+  //    command: "PR(axis)=(counts)"
+  //    responseFormat: ""
+  //  }
+  //  getRelTarget: {
+  //    command: "PR(axis)=?"
+  //    responseFormat: ".*?(counts)"
+  //  }
+  private var prMap = Map[Char, Double]()
+  private def prCmd(axis: Char, value: String): String = {
+    value match {
+      case "?" =>
+        prMap(axis).toString
+      case _ =>
+        prMap = prMap + (axis -> value.toDouble)
+        ""
+    }
   }
 }
