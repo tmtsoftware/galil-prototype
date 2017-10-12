@@ -3,9 +3,8 @@ package csw.proto.galil.commands
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.{CommandResponse, CompletedWithResult}
+import csw.messages.CompletedWithResult
 import csw.messages.ccs.commands.{CommandInfo, Setup}
-import csw.messages.params.generics.Parameter
 import csw.messages.params.models.{ObsId, Prefix, RunId}
 import csw.proto.galil.io.GalilIoTcp
 import csw.services.location.scaladsl.ActorSystemFactory
