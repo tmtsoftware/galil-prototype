@@ -3,7 +3,9 @@ package csw.proto.galil.commands
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
+import csw.messages.{CommandResponse, CompletedWithResult}
 import csw.messages.ccs.commands.{CommandInfo, Setup}
+import csw.messages.params.generics.Parameter
 import csw.messages.params.models.{ObsId, Prefix, RunId}
 import csw.proto.galil.io.GalilIoTcp
 import csw.services.location.scaladsl.ActorSystemFactory
@@ -28,13 +30,19 @@ class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
         .add(DeviceCommands.axisKey.set('A'))
         .add(DeviceCommands.countsKey.set(2)))
 
-    println(s"XXX response1 = $response1")
-
     val response2 = cmds.sendCommand(
       Setup(cmdInfo, prefix)
         .add(DeviceCommands.commandKey.set("getRelTarget"))
         .add(DeviceCommands.axisKey.set('A')))
 
-    println(s"XXX response2 = $response2")
+    response2 match {
+      case CompletedWithResult(result) =>
+        val setup = Setup(cmdInfo, prefix, result.paramSet)
+        val x = setup.get(DeviceCommands.countsKey).get.head
+        assert(x == 2)
+        println("Test passed")
+
+      case x => fail("Test failed")
+    }
   }
 }
