@@ -10,7 +10,7 @@ import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
-import csw.messages.SupervisorExternalMessage
+import csw.messages.{ComponentMessage, SupervisorExternalMessage}
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
@@ -47,7 +47,7 @@ object GalilHcdClient extends App with ComponentLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef[SupervisorExternalMessage])
+          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef)
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -60,11 +60,9 @@ object GalilHcdClient extends App with ComponentLogger.Simple {
   }
 
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
-    val k1 = KeyType.IntKey.make("encoder")
-    val k2 = KeyType.StringKey.make("filter")
-    val i1 = k1.set(22, 33, 44)
-    val i2 = k2.set("a", "b", "c").withUnits(degree)
-    val setup = Setup("Obs001", Prefix("wfos.blue.filter")).add(i1).add(i2)
+    val axis = KeyType.CharKey.make("axis")
+    val axisItem = axis.set('A')
+    val setup = Setup("Obs001", Prefix("galil.command.getRelTarget")).add(axisItem)
     hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }
