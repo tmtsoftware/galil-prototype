@@ -1,21 +1,23 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
-import scala.collection.JavaConverters._
 
-import csw.messages.{CommandResponse, Completed, CompletedWithResult}
-import csw.messages.ccs.commands.{Result, Setup}
+import scala.collection.JavaConverters._
+import csw.messages.{CommandResponse, Completed, CompletedWithResult, Error}
+import csw.messages.ccs.commands.{CommandInfo, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
+import csw.messages.params.models.Prefix
+import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandKey, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
 import scala.util.{Failure, Success, Try}
 
 object CSWDeviceAdapter {
-  private case class CommandMapEntry(name: String, command: String, responseFormat: String)
+  case class CommandMapEntry(name: String, command: String, responseFormat: String)
   private type CommandMap = Map[String, CommandMapEntry]
   private case class ParamDefEntry(name: String, typeStr: String, range: String, dataRegex: String)
   private type ParamDefMap = Map[String, ParamDefEntry]
+
   val commandKey: Key[String] = KeyType.StringKey.make("command")
 
   //  // --- command parameter keys ---
@@ -62,6 +64,13 @@ class CSWDeviceAdapter(config: Config) {
       config.getString("dataRegex"))
   }.toMap
 
+  def getCommandMapEntry(setup: Setup): Try[CommandMapEntry] = {
+    setup.get(commandKey) match {
+      case Some(cmd) => Success(cmdMap(cmd.head))
+      case None => Failure(new RuntimeException(s"Missing ${commandKey.keyName} parameter"))
+    }
+  }
+
   def validateSetup(setup: Setup, cmdEntry: CommandMapEntry): Try[String] = {
     // Look up the paramDef entries defined in the command string
     val paramDefs = paramRegex.
@@ -96,7 +105,7 @@ class CSWDeviceAdapter(config: Config) {
   }
 
   // Parses and returns the command's response
-  def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
+  def makeResponse(prefix: Prefix, info: CommandInfo, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
       Completed
@@ -111,7 +120,7 @@ class CSWDeviceAdapter(config: Config) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(Result(setup.info, setup.prefix, resultParamSet))
+      CompletedWithResult(Result(info, prefix, resultParamSet))
     }
   }
 

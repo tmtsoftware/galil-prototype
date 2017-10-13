@@ -7,11 +7,13 @@ import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.commands.CommandInfo
+import csw.messages.ccs.commands.{CommandInfo, Setup}
 import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
+import csw.messages.params.models.Prefix
 import csw.messages.params.states.CurrentState
+import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.GalilRequest
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
@@ -27,15 +29,16 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 sealed trait GalilCommandMessage extends GalilHcdDomainMessage
 object GalilCommandMessage {
   case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
-  case class GalilRequest(commandString: String, prefix: String, cmdInfo: CommandInfo, commandKey: String, client: ActorRef[CommandResponse]) extends GalilCommandMessage
+  case class GalilRequest(commandString: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
 }
 
 sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 object GalilResponseMessage {
-  case class GalilResponse(response: String, prefix: String, cmdInfo: CommandInfo, commandKey: String, client: ActorRef[CommandResponse]) extends GalilResponseMessage
+  case class GalilResponse(response: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
 }
 
 
+case class GalilCommandInfo()
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
@@ -53,6 +56,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     with ComponentLogger.Simple{
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
+  val config = ConfigFactory.load("GalilCommands.conf")
+  val adapter = new CSWDeviceAdapter(config)
 
   var galilHardwareActor: ActorRef[GalilCommandMessage] = _
 
@@ -78,15 +83,32 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   }
 
   def handleGalilReponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
-    case GalilResponse(response, prefix, cmdInfo, commandKey, client) =>
-
-
+    case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
+      val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
+      client ! returnResponse
   }
 
   override def onSetup(commandMessage: CommandMessage): Validation = {
     log.debug(s"onSetup called: $commandMessage")
-    galilHardwareActor ! GalilRequest("testCommand arg1 arg2", ctx.self)
-    Validations.Valid
+    commandMessage match {
+      case x: Setup => {
+        val cmdMapEntry = adapter.getCommandMapEntry(x)
+        if (cmdMapEntry.isSuccess) {
+          val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
+          if (cmdString.isSuccess) {
+            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, x.replyTo)
+            Validations.Valid
+          }
+          Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+        }
+        Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+
+      }
+      case _ => log.error("Invalid commandMessage in onSetup.  Not a Setup type")
+        Validations.Invalid(ValidationIssue.OtherIssue("Not a Setup"))
+    }
+
+    Validations.Invalid(ValidationIssue.OtherIssue("Unknown Error"))
   }
 
   override def onObserve(commandMessage: CommandMessage): Validation =  {
