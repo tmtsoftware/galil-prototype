@@ -74,9 +74,10 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
       formatReply(None) // comment with "'"
     else try {
       cmdString.take(2) match { // basic commands are two upper case chars
+        case "DP" => formatReply(dpCmd(cmdString))
+        case "NO" => formatReply(None) // no-op
         case "PR" => formatReply(prCmd(cmdString))
         case "TC" => formatReply(tcCmd(cmdString))
-        case "NO" => formatReply(None) // no-op
         case "TH" => formatReply(thCmd(conn))
         case _ => formatReply(None, isError = true)
       }
@@ -152,6 +153,27 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
           prMap(axis).toString
         case _ =>
           prMap = prMap + (axis -> value.toDouble)
+          ""
+      }
+    }
+  }
+
+  // Simulates the DP command:
+  //
+  //  setMotorPosition: {
+  //    command: "DP(axis)=(counts)"
+  //    responseFormat: ""
+  //  }
+  private var dpMap = Map[String, Double]()
+  private def dpCmd(cmdString: String): String = {
+    val axis = cmdString.drop(2).dropRight(2)
+    if (axis.length != 1) "" else {
+      val value = cmdString.drop(4)
+      value match {
+        case "?" =>
+          dpMap(axis).toString
+        case _ =>
+          dpMap = dpMap + (axis -> value.toDouble)
           ""
       }
     }
