@@ -61,6 +61,8 @@ abstract class GalilIo {
     val data = read()
     val length = data.length
     if (length == 0) result
+    else if (length == 1 && data.utf8String == "?")
+      result ++ data
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
     else if (data.takeRight(1).utf8String == ":") {

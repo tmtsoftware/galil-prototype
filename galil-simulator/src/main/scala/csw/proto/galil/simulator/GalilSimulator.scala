@@ -77,6 +77,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
         case "NO" => formatReply(None) // no-op
 
         case "TH" => formatReply(thCmd(conn))
+        case "TC0" => formatReply(" 1")
 
         case _ => formatReply(s"$cmdString!!!")
       }
