@@ -32,6 +32,15 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   private var errorStatus = 0
   private val errorMessage = "Unrecognized command"
 
+  // Saves current axis values for commands as Map of command -> (map of axis -> value)
+  private var cmdMap: Map[String, Map[Char, Double]] = Map(
+    "DP" -> Map.empty,
+    "JG" -> Map.empty,
+    "PR" -> Map.empty,
+    "RP" -> Map.empty,
+    "SP" -> Map.empty,
+  )
+
   connections.runForeach { conn =>
     activeConnections += conn
     conn.handleWith(serverLogic(conn))
@@ -74,9 +83,14 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
       formatReply(None) // comment with "'"
     else try {
       cmdString.take(2) match { // basic commands are two upper case chars
-        case "DP" => formatReply(dpCmd(cmdString))
+        // TODO: Replace duplicate code with single method and map of command -> (map of axis -> value)?
+        case "DP" => formatReply(genericCmd(cmdString))
+        case "JG" => formatReply(genericCmd(cmdString))
+        case "MO" => formatReply(None)
         case "NO" => formatReply(None) // no-op
-        case "PR" => formatReply(prCmd(cmdString))
+        case "PR" => formatReply(genericCmd(cmdString))
+        case "SP" => formatReply(genericCmd(cmdString))
+        case "RP" => formatReply(genericCmd(cmdString))
         case "TC" => formatReply(tcCmd(cmdString))
         case "TH" => formatReply(thCmd(conn))
         case _ => formatReply(None, isError = true)
@@ -131,7 +145,8 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
     // TODO: add the "IHH AVAILABLE..." parts...
   }
 
-  // Simulates the PR command:
+
+  // Simulates commands that let you set and get values, for example:
   //
   // PR[A-z]=?
   //  setRelTarget: {
@@ -142,41 +157,23 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   //    command: "PR(axis)=?"
   //    responseFormat: ".*?(counts)"
   //  }
-  private var prMap = Map[String, Double]()
-
-  private def prCmd(cmdString: String): String = {
-    val axis = cmdString.drop(2).dropRight(2)
-    if (axis.length != 1) "" else {
-      val value = cmdString.drop(4)
-      value match {
-        case "?" =>
-          prMap(axis).toString
-        case _ =>
-          prMap = prMap + (axis -> value.toDouble)
-          ""
-      }
-    }
-  }
-
-  // Simulates the DP command:
   //
-  //  setMotorPosition: {
-  //    command: "DP(axis)=(counts)"
-  //    responseFormat: ""
-  //  }
-  private var dpMap = Map[String, Double]()
-  private def dpCmd(cmdString: String): String = {
-    val axis = cmdString.drop(2).dropRight(2)
-    if (axis.length != 1) "" else {
+  // TODO: Support other variations of the syntax, such as where counts is ",,n,n,...".
+  //
+  // Command is the first two chars, axis should be the third.
+  private def genericCmd(cmdString: String): String = {
+    val cmd = cmdString.take(2)
+    val map = cmdMap(cmd)
+    val axis = cmdString.drop(2).head
       val value = cmdString.drop(4)
       value match {
         case "?" =>
-          dpMap(axis).toString
+          map(axis).toString
         case _ =>
-          dpMap = dpMap + (axis -> value.toDouble)
+          val newMap = map + (axis -> value.toDouble)
+          cmdMap = cmdMap + (cmd -> newMap)
           ""
       }
-    }
   }
 
   // Simulates the TC command:
