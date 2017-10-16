@@ -36,6 +36,10 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   private var cmdMap: Map[String, Map[Char, Double]] = Map(
     "DP" -> Map.empty,
     "JG" -> Map.empty,
+    "KS" -> Map.empty,
+    "LC" -> Map.empty,
+    "MT" -> Map.empty,
+    "PA" -> Map.empty,
     "PR" -> Map.empty,
     "RP" -> Map.empty,
     "SP" -> Map.empty,
@@ -82,17 +86,17 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
     val reply = if (cmdString.startsWith("'"))
       formatReply(None) // comment with "'"
     else try {
-      cmdString.take(2) match { // basic commands are two upper case chars
-        // TODO: Replace duplicate code with single method and map of command -> (map of axis -> value)?
-        case "DP" => formatReply(genericCmd(cmdString))
-        case "JG" => formatReply(genericCmd(cmdString))
+      val cmd = cmdString.take(2)
+      if (cmdMap.contains(cmd)) genericCmd(cmdString)
+      else cmd match { // basic commands are two upper case chars
+        case "BG" => formatReply(None)
         case "MO" => formatReply(None)
         case "NO" => formatReply(None) // no-op
-        case "PR" => formatReply(genericCmd(cmdString))
-        case "SP" => formatReply(genericCmd(cmdString))
-        case "RP" => formatReply(genericCmd(cmdString))
+        case "SH" => formatReply(None)
+        case "ST" => formatReply(None)
         case "TC" => formatReply(tcCmd(cmdString))
         case "TH" => formatReply(thCmd(conn))
+        case "TS" => formatReply(None)
         case _ => formatReply(None, isError = true)
       }
     } catch {
@@ -165,15 +169,15 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
     val cmd = cmdString.take(2)
     val map = cmdMap(cmd)
     val axis = cmdString.drop(2).head
-      val value = cmdString.drop(4)
-      value match {
-        case "?" =>
-          map(axis).toString
-        case _ =>
-          val newMap = map + (axis -> value.toDouble)
-          cmdMap = cmdMap + (cmd -> newMap)
-          ""
-      }
+    val value = cmdString.drop(4)
+    value match {
+      case "?" =>
+        map(axis).toString
+      case _ =>
+        val newMap = map + (axis -> value.toDouble)
+        cmdMap = cmdMap + (cmd -> newMap)
+        ""
+    }
   }
 
   // Simulates the TC command:
