@@ -25,20 +25,49 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   test("Test Galil commands") {
 
     // send two commands separated by ";" (should get two replies)
+    val r0 = galilIo.send("TH")
+    r0.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r0.head._1 == "TH")
+    assert(r0.size == 1)
+
     val r1 = galilIo.send("TH;TH")
     r1.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r1.head._1 == "TH")
+    assert(r1.tail.head._1 == "TH")
     assert(r1.size == 2)
 
     // Should get empty reply
-    val r2 = galilIo.send("noreplycmd")
+    val r2 = galilIo.send("NO")
     r2.foreach(r => println(s"Response: ${r._2.utf8String}"))
     assert(r2.size == 1)
-    assert(r2.head._2.utf8String == ":")
+    assert(r2.head._2.utf8String == "")
 
-    // Should get "error" reply
-    val r3 = galilIo.send("badcmd")
+    // Check error (should be none)
+    val r3 = galilIo.send("TC0")
     r3.foreach(r => println(s"Response: ${r._2.utf8String}"))
     assert(r3.size == 1)
-    assert(r3.head._2.utf8String == "?")
+    assert(r3.head._1 == "TC0")
+    assert(r3.head._2.utf8String == "0")
+
+    // Should get "error" reply
+    val r4 = galilIo.send("XX")
+    r4.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r4.size == 1)
+    assert(r4.head._2.utf8String == "?")
+
+    // Check error (should be unknown command)
+    val r5 = galilIo.send("TC1")
+    r5.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r5.size == 1)
+    assert(r5.head._1 == "TC1")
+    assert(r5.head._2.utf8String == "1 Unrecognized command")
+
+    // Check error (should be 0)
+    val r6 = galilIo.send("TC1")
+    r6.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r6.size == 1)
+    assert(r6.head._1 == "TC1")
+    assert(r6.head._2.utf8String == "0")
+
   }
 }

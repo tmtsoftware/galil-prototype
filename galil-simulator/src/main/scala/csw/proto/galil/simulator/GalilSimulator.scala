@@ -26,7 +26,11 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   // Keep track of current connections, needed to simulate TH command
   private var activeConnections: Set[IncomingConnection] = Set.empty
 
-  val connections: Source[IncomingConnection, Future[ServerBinding]] = Tcp().bind(host, port)
+  private val connections: Source[IncomingConnection, Future[ServerBinding]] = Tcp().bind(host, port)
+
+  // For TC command
+  private var errorStatus = 0
+  private val errorMessage = "Unrecognized command"
 
   connections.runForeach { conn =>
     activeConnections += conn
@@ -54,6 +58,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   //just a question mark (?) and nothing else. If the command is not expected to
   //return a value, the response will be just the Colon (:)."
   private def formatReply(reply: Option[String], isError: Boolean = false): String = {
+    errorStatus = if (isError) 1 else 0
     if (isError) "?" else reply match {
       case Some(msg) => s"$msg\r\n:"
       case None => ":"
@@ -65,22 +70,21 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString, conn: IncomingConnection): ByteString = {
     val cmdString = cmd.utf8String
-    val reply = if (cmdString.startsWith("'")) formatReply(None) // comment with "'"
-    else if (cmdString.startsWith("PR")) {
-      formatReply(prCmd(cmdString.charAt(2), cmdString.substring(4,5)))
-    } else
-      cmdString match {
-        // dummy commands for testing
-        case "badcmd" => formatReply(None, isError = true)
-        case "noreplycmd" => formatReply(None)
-
+    val reply = if (cmdString.startsWith("'"))
+      formatReply(None) // comment with "'"
+    else try {
+      cmdString.take(2) match { // basic commands are two upper case chars
+        case "PR" => formatReply(prCmd(cmdString))
+        case "TC" => formatReply(tcCmd(cmdString))
         case "NO" => formatReply(None) // no-op
-
         case "TH" => formatReply(thCmd(conn))
-        case "TC0" => formatReply(" 1")
-
-        case _ => formatReply(s"$cmdString!!!")
+        case _ => formatReply(None, isError = true)
       }
+    } catch {
+      case ex: Throwable =>
+        ex.printStackTrace()
+        formatReply(None)
+    }
     ByteString(reply)
   }
 
@@ -137,14 +141,29 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   //    command: "PR(axis)=?"
   //    responseFormat: ".*?(counts)"
   //  }
-  private var prMap = Map[Char, Double]()
-  private def prCmd(axis: Char, value: String): String = {
-    value match {
-      case "?" =>
-        prMap(axis).toString
-      case _ =>
-        prMap = prMap + (axis -> value.toDouble)
-        ""
+  private var prMap = Map[String, Double]()
+
+  private def prCmd(cmdString: String): String = {
+    val axis = cmdString.drop(2).dropRight(2)
+    if (axis.length != 1) "" else {
+      val value = cmdString.drop(4)
+      value match {
+        case "?" =>
+          prMap(axis).toString
+        case _ =>
+          prMap = prMap + (axis -> value.toDouble)
+          ""
+      }
     }
+  }
+
+  // Simulates the TC command:
+  private def tcCmd(cmdString: String): String = {
+    val n = cmdString.drop(2)
+    if (n == "0")
+      s"$errorStatus"
+    else if (errorStatus == 0)
+      s"$errorStatus"
+    else s"$errorStatus $errorMessage"
   }
 }
