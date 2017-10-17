@@ -98,17 +98,16 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, x.replyTo)
             Validations.Valid
+          } else {
+            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
-          Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+        } else {
+          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
-        Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
-
       }
       case _ => log.error("Invalid commandMessage in onSetup.  Not a Setup type")
         Validations.Invalid(ValidationIssue.OtherIssue("Not a Setup"))
     }
-
-    Validations.Invalid(ValidationIssue.OtherIssue("Unknown Error"))
   }
 
   override def onObserve(commandMessage: CommandMessage): Validation =  {
