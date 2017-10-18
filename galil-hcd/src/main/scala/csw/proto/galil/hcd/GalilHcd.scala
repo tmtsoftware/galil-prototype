@@ -90,7 +90,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def onSetup(commandMessage: CommandMessage): Validation = {
     log.debug(s"onSetup called: $commandMessage")
-    commandMessage match {
+    commandMessage.command match {
       case x: Setup => {
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
