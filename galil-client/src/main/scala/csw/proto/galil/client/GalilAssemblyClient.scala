@@ -7,10 +7,10 @@ import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{CommonComponentLogger, ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
-import csw.messages.ComponentMessage
+import csw.messages.SupervisorExternalMessage
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.Assembly
 import csw.messages.location.Connection.AkkaConnection
@@ -48,7 +48,7 @@ object GalilAssemblyClient extends App with ComponentLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef)
+          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef[SupervisorExternalMessage])
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -60,7 +60,7 @@ object GalilAssemblyClient extends App with ComponentLogger.Simple {
     }
   }
 
-  private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[ComponentMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[SupervisorExternalMessage]): Unit = {
     val k1 = KeyType.IntKey.make("encoder")
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)

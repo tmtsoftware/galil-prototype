@@ -10,7 +10,7 @@ import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
-import csw.messages.ComponentMessage
+import csw.messages.SupervisorExternalMessage
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
@@ -47,7 +47,7 @@ object GalilHcdClient extends App with ComponentLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef)
+          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef[SupervisorExternalMessage])
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -59,7 +59,7 @@ object GalilHcdClient extends App with ComponentLogger.Simple {
     }
   }
 
-  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[ComponentMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
     val k1 = KeyType.IntKey.make("encoder")
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)
