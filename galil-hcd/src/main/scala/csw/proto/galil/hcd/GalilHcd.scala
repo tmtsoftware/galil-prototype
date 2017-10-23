@@ -1,8 +1,5 @@
 package csw.proto.galil.hcd
 
-import java.io.FileWriter
-import java.nio.file.{Files, Path}
-
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -10,11 +7,11 @@ import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
 import csw.messages.RunningMessage.DomainMessage
-import csw.messages.ccs.{Validation, ValidationIssue, Validations}
+import csw.messages.ccs.commands.ControlCommand
+import csw.messages.ccs.{Validation, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
-import csw.proto.galil.hcd.GalilCommandMessage.GalilRequest
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.ComponentLogger
 
@@ -76,15 +73,14 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  override def onSetup(commandMessage: CommandMessage): Validation = {
-    log.debug(s"onSetup called: $commandMessage")
-    galilHardwareActor ! GalilRequest("testCommand arg1 arg2", ctx.self)
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+    log.debug("onSubmit called")
     Validations.Valid
   }
 
-  override def onObserve(commandMessage: CommandMessage): Validation =  {
-    log.debug(s"onObserve called: $commandMessage")
-    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
+  override def onOneway(controlCommand: ControlCommand): Validation = {
+    log.debug("onOneway called")
+    Validations.Valid
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =

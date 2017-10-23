@@ -1,8 +1,5 @@
 package csw.proto.galil.assembly
 
-import java.io.FileWriter
-import java.nio.file.{Files, Path}
-
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -11,7 +8,8 @@ import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages._
 import csw.messages.PubSub.PublisherMessage
 import csw.messages.RunningMessage.DomainMessage
-import csw.messages.ccs.{Validation, ValidationIssue, Validations}
+import csw.messages.ccs.commands.ControlCommand
+import csw.messages.ccs.{Validation, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
@@ -51,14 +49,14 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     log.debug("Initialize called")
   }
 
-  override def onSetup(commandMessage: CommandMessage): Validation = {
-    log.debug(s"onSetup called: $commandMessage")
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+    log.debug("onSubmit called")
     Validations.Valid
   }
 
-  override def onObserve(commandMessage: CommandMessage): Validation =  {
-    log.debug(s"onObserve called: $commandMessage")
-    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
+  override def onOneway(controlCommand: ControlCommand): Validation = {
+    log.debug("onOneway called")
+    Validations.Valid
   }
 
   override def onShutdown(): Future[Unit] = async {
