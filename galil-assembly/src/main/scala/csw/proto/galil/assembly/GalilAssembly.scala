@@ -51,13 +51,13 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
   }
 
   override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
-    log.debug(s"onSetup called: $controlCommand")
+    log.debug(s"onSubmit called: $controlCommand")
     Validations.Valid
   }
 
   override def onOneway(controlCommand: ControlCommand): Validation = {
-    log.debug(s"onObserve called: $controlCommand")
-    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
+    log.debug(s"onOneway called: $controlCommand")
+    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
   }
 
   override def onShutdown(): Future[Unit] = async {
