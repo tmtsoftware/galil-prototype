@@ -17,7 +17,7 @@ import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.ComponentLogger
+import csw.services.logging.scaladsl.CommonComponentLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -48,20 +48,21 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
     new GalilHcdHandlers(ctx, componentInfo, pubSubRef, locationService)
 }
 
+
+object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
+
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
                                pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                locationService: LocationService)
     extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService)
-    with ComponentLogger.Simple{
+    with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
-  val config = ConfigFactory.load("GalilCommands.conf")
+  private[this] val config = ConfigFactory.load("GalilCommands.conf")
   val adapter = new CSWDeviceAdapter(config)
 
   var galilHardwareActor: ActorRef[GalilCommandMessage] = _
-
-  override def componentName(): String = "GalilHcd"
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -91,7 +92,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
-      case x: Setup => {
+      case x: Setup =>
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
@@ -104,18 +105,15 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         } else {
           Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
-
-      }
-      case x: Observe => {
+      case x: Observe =>
         Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
-      }
     }
   }
 
   override def onOneway(controlCommand: ControlCommand): Validation = {
     log.debug(s"onOneway called: $controlCommand")
     controlCommand match {
-      case x: Setup => {
+      case x: Setup =>
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
@@ -128,10 +126,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         } else {
           Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
-      }
-      case x: Observe => {
+      case x: Observe =>
         Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
-      }
     }
   }
 
@@ -140,7 +136,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override protected def maybeComponentName(): Option[String] = Some("GalilHcd")
 
-  def getGalilConfig: GalilConfig = new GalilConfig();
+  def getGalilConfig: GalilConfig = new GalilConfig()
 
 }
 
