@@ -20,10 +20,10 @@ import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 
-// A client to test locating and communicating with the Galil assembly
-object GalilAssemblyClient extends App with ComponentLogger.Simple {
+object GalilAssemblyClientLogger extends CommonComponentLogger("GalilAssemblyClient")
 
-  override def componentName(): String = "GalilAssemblyClient"
+// A client to test locating and communicating with the Galil assembly
+object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
 
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system

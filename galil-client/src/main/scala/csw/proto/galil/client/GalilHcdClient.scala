@@ -7,7 +7,7 @@ import akka.stream.ActorMaterializer
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{CommonComponentLogger, ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
 import csw.messages.CommandMessage.Submit
 import csw.messages.{ComponentMessage, SupervisorExternalMessage}
@@ -20,10 +20,11 @@ import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 
-// A client to test locating and communicating with the Galil HCD
-object GalilHcdClient extends App with ComponentLogger.Simple {
+object GalilHcdClientLogger extends CommonComponentLogger("GalilHcdClient")
 
-  override def componentName(): String = "GalilHcdClient"
+// A client to test locating and communicating with the Galil HCD
+object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
+
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
   private val locationService = LocationServiceFactory.withSystem(system)
