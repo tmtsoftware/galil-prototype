@@ -7,14 +7,14 @@ import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.commands.{CommandInfo, Setup}
+import csw.messages.ccs.commands.{CommandInfo, ControlCommand, Observe, Setup}
 import csw.messages.ccs.{Validation, ValidationIssue, Validations}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.models.Prefix
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
-import csw.proto.galil.hcd.GalilCommandMessage.GalilRequest
+import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.ComponentLogger
@@ -88,15 +88,39 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
       client ! returnResponse
   }
 
-  override def onSetup(commandMessage: CommandMessage): Validation = {
-    log.debug(s"onSetup called: $commandMessage")
-    commandMessage.command match {
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+    log.debug(s"onSubmit called: $controlCommand")
+    controlCommand match {
       case x: Setup => {
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, commandMessage.replyTo)
+            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, replyTo)
+            Validations.Valid
+          } else {
+            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+          }
+        } else {
+          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+        }
+
+      }
+      case x: Observe => {
+        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+      }
+    }
+  }
+
+  override def onOneway(controlCommand: ControlCommand): Validation = {
+    log.debug(s"onOneway called: $controlCommand")
+    controlCommand match {
+      case x: Setup => {
+        val cmdMapEntry = adapter.getCommandMapEntry(x)
+        if (cmdMapEntry.isSuccess) {
+          val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
+          if (cmdString.isSuccess) {
+            galilHardwareActor ! GalilCommand(cmdString.get)
             Validations.Valid
           } else {
             Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
@@ -105,14 +129,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       }
-      case _ => log.error("Invalid commandMessage in onSetup.  Not a Setup type")
-        Validations.Invalid(ValidationIssue.OtherIssue("Not a Setup"))
+      case x: Observe => {
+        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+      }
     }
-  }
-
-  override def onObserve(commandMessage: CommandMessage): Validation =  {
-    log.debug(s"onObserve called: $commandMessage")
-    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe  not supported"))
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
