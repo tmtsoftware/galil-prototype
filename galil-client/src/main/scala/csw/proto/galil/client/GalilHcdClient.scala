@@ -4,21 +4,20 @@ import java.net.InetAddress
 
 import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.stream.ActorMaterializer
-import akka.typed.{ActorRef, Behavior}
-import akka.typed.scaladsl.{Actor, ActorContext}
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{CommonComponentLogger, ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
+import akka.typed.scaladsl.{Actor, ActorContext}
+import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
-import csw.messages.{ComponentMessage, SupervisorExternalMessage}
+import csw.messages.SupervisorExternalMessage
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.KeyType
 import csw.messages.params.models.Prefix
-import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
+import csw.services.location.scaladsl.LocationServiceFactory
+import csw.services.logging.scaladsl.{CommonComponentLogger, LoggingSystemFactory}
 
 object GalilHcdClientLogger extends CommonComponentLogger("GalilHcdClient")
 
