@@ -4,11 +4,9 @@ import java.net.InetAddress
 
 import akka.actor.{ActorRefFactory, ActorSystem}
 import akka.stream.ActorMaterializer
-import akka.typed.{ActorRef, Behavior}
-import akka.typed.scaladsl.{Actor, ActorContext}
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{ComponentLogger, LoggingSystemFactory}
 import akka.typed.scaladsl.adapter._
+import akka.typed.scaladsl.{Actor, ActorContext}
+import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
 import csw.messages.SupervisorExternalMessage
 import csw.messages.ccs.commands.Setup
@@ -19,11 +17,13 @@ import csw.messages.params.generics.KeyType
 import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
+import csw.services.location.scaladsl.LocationServiceFactory
+import csw.services.logging.scaladsl.{CommonComponentLogger, LoggingSystemFactory}
+
+object GalilAssemblyClientLogger extends CommonComponentLogger("GalilAssemblyClient")
 
 // A client to test locating and communicating with the Galil assembly
-object GalilAssemblyClient extends App with ComponentLogger.Simple {
-
-  override def componentName(): String = "GalilAssemblyClient"
+object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
 
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
