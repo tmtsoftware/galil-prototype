@@ -66,7 +66,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
-    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self)))
+    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self), componentInfo.name))
   }
 
   override def onShutdown(): Future[Unit] = async {
