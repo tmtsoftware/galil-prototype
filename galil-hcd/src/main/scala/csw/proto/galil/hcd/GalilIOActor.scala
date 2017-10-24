@@ -5,7 +5,7 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.logging.scaladsl.ComponentLogger
+import csw.services.logging.scaladsl.CommonComponentLogger
 
 object GalilIOActor {
   def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]]): Behavior[GalilCommandMessage] =
@@ -14,14 +14,15 @@ object GalilIOActor {
 
 }
 
+object GalilIOActorLogger extends CommonComponentLogger("GalilIOActor")
+
 class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                    galilConfig: GalilConfig,
                    replyTo: Option[ActorRef[GalilResponseMessage]]
                   ) extends Actor.MutableBehavior[GalilCommandMessage]
-  with ComponentLogger.Simple {
-  override def componentName(): String = "GalilIOActor"
+  with GalilIOActorLogger.Simple {
 
-  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
+  val galilIo = GalilIoTcp() // TODO: Add configuration: Otherwise using default params: "127.0.0.1", 8888
 
   override def onMessage(msg: GalilCommandMessage): Behavior[GalilCommandMessage] = {
     msg match {
@@ -40,7 +41,7 @@ class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       log.debug(s"doing command: $commandString")
       val response = galilSend(commandString)
       // TODO handle error
-      replyTo ! GalilResponse(response, prefix, cmdInfo, commandKey, client)
+      replyTo.foreach(_ ! GalilResponse(response, prefix, cmdInfo, commandKey, client))
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }
