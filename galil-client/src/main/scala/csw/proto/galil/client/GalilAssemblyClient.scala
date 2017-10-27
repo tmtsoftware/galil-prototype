@@ -48,7 +48,7 @@ object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef[SupervisorExternalMessage])
+          interact(ctx, loc.asInstanceOf[AkkaLocation].componentRef())
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
