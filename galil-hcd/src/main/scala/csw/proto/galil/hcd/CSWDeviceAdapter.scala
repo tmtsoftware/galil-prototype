@@ -3,7 +3,7 @@ package csw.proto.galil.hcd
 import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
-import csw.messages.{CommandResponse, Completed, CompletedWithResult, Error}
+import csw.messages.{CommandResponse, Completed, CompletedWithResult}
 import csw.messages.ccs.commands.{CommandInfo, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 import csw.messages.params.models.Prefix
@@ -87,8 +87,8 @@ class CSWDeviceAdapter(config: Config) {
 
     if (missing.nonEmpty)
       Failure(missing.head)
-
-    Success(insertParams(setup, cmdEntry.command, paramDefs))
+    else
+      Success(insertParams(setup, cmdEntry.command, paramDefs))
   }
 
   // Replaces the placeholders for the parameters with the parameter values
