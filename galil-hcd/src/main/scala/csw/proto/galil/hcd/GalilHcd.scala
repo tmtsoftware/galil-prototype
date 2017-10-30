@@ -97,7 +97,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, replyTo)
+            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix,
+              CommandInfo(x.obsId, x.runId), cmdMapEntry.get, replyTo)
             Validations.Valid
           } else {
             Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
