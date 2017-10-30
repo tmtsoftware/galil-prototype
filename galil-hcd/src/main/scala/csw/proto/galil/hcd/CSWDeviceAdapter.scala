@@ -106,7 +106,6 @@ class CSWDeviceAdapter(config: Config) {
 
   // Parses and returns the command's response
   def makeResponse(prefix: Prefix, info: CommandInfo, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
-    println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
       Completed
     } else {
