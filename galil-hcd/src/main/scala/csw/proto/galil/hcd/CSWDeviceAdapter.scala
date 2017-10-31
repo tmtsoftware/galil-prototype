@@ -1,10 +1,10 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
+import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult}
 
 import scala.collection.JavaConverters._
-import csw.messages.{CommandResponse, Completed, CompletedWithResult}
-import csw.messages.ccs.commands.{CommandInfo, Result, Setup}
+import csw.messages.ccs.commands.{CommandInfo, CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 import csw.messages.params.models.Prefix
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandKey, commandParamKeyMap, paramRegex}
@@ -107,7 +107,7 @@ class CSWDeviceAdapter(config: Config) {
   // Parses and returns the command's response
   def makeResponse(prefix: Prefix, info: CommandInfo, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
-      Completed
+      Completed(info.runId)
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
@@ -119,7 +119,7 @@ class CSWDeviceAdapter(config: Config) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(Result(info.runId, info.obsId, prefix, resultParamSet))
+      CompletedWithResult(info.runId, Result(info.runId, info.obsId, prefix, resultParamSet))
     }
   }
 

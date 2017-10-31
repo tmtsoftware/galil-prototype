@@ -3,12 +3,12 @@ package csw.proto.galil.hcd
 import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
-import csw.apps.containercmd.ContainerCmd
+import csw.apps.deployment.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.commands.{CommandInfo, ControlCommand, Observe, Setup}
-import csw.messages.ccs.{Validation, ValidationIssue, Validations}
+import csw.messages.ccs.CommandIssue
+import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.models.Prefix
@@ -89,7 +89,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
       client ! returnResponse
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -99,19 +99,19 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilRequest(cmdString.get, x.prefix,
               CommandInfo(x.obsId, x.runId), cmdMapEntry.get, replyTo)
-            Validations.Valid
+            CommandValidationResponse.Accepted(controlCommand.runId)
           } else {
-            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 
-  override def onOneway(controlCommand: ControlCommand): Validation = {
+  override def onOneway(controlCommand: ControlCommand): CommandValidationResponse = {
     log.debug(s"onOneway called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -120,15 +120,15 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilCommand(cmdString.get)
-            Validations.Valid
+            CommandValidationResponse.Accepted(controlCommand.runId)
           } else {
-            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 

@@ -4,8 +4,8 @@ import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
 import DeviceCommands._
-import csw.messages.{CommandResponse, Completed, CompletedWithResult, Error}
-import csw.messages.ccs.commands.{Result, Setup}
+import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult, Error}
+import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 
 import scala.annotation.tailrec
@@ -78,7 +78,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   def sendCommand(setup: Setup): CommandResponse = {
     setup.get(commandKey) match {
       case Some(cmd) => handleCmd(setup, cmdMap(cmd.head))
-      case None => Error(s"Missing ${commandKey.keyName} parameter")
+      case None => Error(setup.runId, s"Missing ${commandKey.keyName} parameter")
     }
   }
 
@@ -93,7 +93,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
     // Check missing params
     val missing = paramDefs.flatMap { p =>
       val key = commandParamKeyMap(p.name)
-      if (setup.contains(key)) None else Some(Error(s"Missing ${key.keyName} parameter"))
+      if (setup.contains(key)) None else Some(Error(setup.runId, s"Missing ${key.keyName} parameter"))
     }
     if (missing.nonEmpty) missing.head else {
       val cmdString = insertParams(setup, cmdEntry.command, paramDefs)
@@ -119,7 +119,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
-      Completed
+      Completed(setup.runId)
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
@@ -131,7 +131,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(Result(setup.runId, setup.obsId, setup.prefix, resultParamSet))
+      CompletedWithResult(setup.runId, Result(setup.runId, setup.obsId, setup.prefix, resultParamSet))
     }
   }
 
