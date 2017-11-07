@@ -1,7 +1,7 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
-import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult}
+import csw.messages.ccs.commands.CommandFinalExecutionResponse.{Completed, CompletedWithResult}
 
 import scala.collection.JavaConverters._
 import csw.messages.ccs.commands.{CommandInfo, CommandResponse, Result, Setup}
