@@ -4,7 +4,7 @@ import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
 import DeviceCommands._
-import csw.messages.ccs.commands.CommandFinalExecutionResponse.{Completed, CompletedWithResult, Error}
+import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult, Error}
 import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 
