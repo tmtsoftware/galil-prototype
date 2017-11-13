@@ -42,10 +42,11 @@ case class GalilCommandInfo()
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
+                        commandResponseManager: ActorRef[CommandResponseManagerMessage],
                         pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                         locationService: LocationService
                        ): ComponentHandlers[GalilHcdDomainMessage] =
-    new GalilHcdHandlers(ctx, componentInfo, pubSubRef, locationService)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
 }
 
 
@@ -53,9 +54,10 @@ object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
 
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
+                               commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                locationService: LocationService)
-    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext

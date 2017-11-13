@@ -28,10 +28,11 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[Gali
   override def handlers(
                 ctx: ActorContext[ComponentMessage],
                 componentInfo: ComponentInfo,
+                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                 pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                 locationService: LocationService
               ): ComponentHandlers[GalilAssemblyDomainMessage] =
-    new GalilAssemblyHandlers(ctx, componentInfo, pubSubRef, locationService)
+    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
 }
 
 
@@ -39,9 +40,10 @@ object GalilAssemblyLogger extends CommonComponentLogger("GalilAssembly")
 
 private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
                                     componentInfo: ComponentInfo,
+                                    commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                     pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                     locationService: LocationService)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilAssemblyLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
