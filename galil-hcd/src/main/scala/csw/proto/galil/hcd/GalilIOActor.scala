@@ -5,11 +5,22 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.logging.scaladsl.CommonComponentLogger
+import csw.services.logging.scaladsl.{CommonComponentLogger, ComponentLogger}
+
+//object TromboneMutableActor {
+//  def beh(componentName: String): Behavior[LogCommand] =
+//    Actor.mutable(ctx ⇒ new TromboneMutableActor(ctx, componentName))
+//}
+//
+//class TromboneMutableActor(
+//    ctx: ActorContext[LogCommand],
+//    componentName: String
+//) extends ComponentLogger.MutableActor[LogCommand](ctx, componentName) {
+
 
 object GalilIOActor {
-  def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]]): Behavior[GalilCommandMessage] =
-    Actor.mutable[GalilCommandMessage](ctx ⇒ new GalilIOActor(ctx, galilConfig: GalilConfig, replyTo)).narrow
+  def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]], componentName: String): Behavior[GalilCommandMessage] =
+    Actor.mutable(ctx ⇒ new GalilIOActor(ctx, galilConfig, replyTo, componentName))
 
 
 }
@@ -18,9 +29,9 @@ object GalilIOActorLogger extends CommonComponentLogger("GalilIOActor")
 
 class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                    galilConfig: GalilConfig,
-                   replyTo: Option[ActorRef[GalilResponseMessage]]
-                  ) extends Actor.MutableBehavior[GalilCommandMessage]
-  with GalilIOActorLogger.Simple {
+                   replyTo: Option[ActorRef[GalilResponseMessage]],
+                   componentName: String
+                  ) extends GalilIOActorLogger.MutableActor[GalilCommandMessage](ctx) {
 
   val galilIo = GalilIoTcp() // TODO: Add configuration: Otherwise using default params: "127.0.0.1", 8888
 
@@ -37,11 +48,11 @@ class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       // TODO
       log.debug(s"doing command: $commandString")
 
-    case GalilRequest(commandString, prefix, cmdInfo, commandKey, client) =>
+    case GalilRequest(commandString, prefix, runId, obsId, commandKey, client) =>
       log.debug(s"doing command: $commandString")
       val response = galilSend(commandString)
       // TODO handle error
-      replyTo.foreach(_ ! GalilResponse(response, prefix, cmdInfo, commandKey, client))
+      replyTo.foreach(_ ! GalilResponse(response, prefix, runId, obsId, commandKey, client))
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }

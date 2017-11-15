@@ -7,11 +7,11 @@ import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.commands.{CommandInfo, ControlCommand, Observe, Setup}
-import csw.messages.ccs.{Validation, ValidationIssue, Validations}
+import csw.messages.ccs.CommandIssue
+import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
-import csw.messages.params.models.Prefix
+import csw.messages.params.models.{ObsId, Prefix, RunId}
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
@@ -29,33 +29,34 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 sealed trait GalilCommandMessage extends GalilHcdDomainMessage
 object GalilCommandMessage {
   case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
-  case class GalilRequest(commandString: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
+  case class GalilRequest(commandString: String, prefix: Prefix, runId: RunId, obsId: ObsId, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
 }
 
 sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 object GalilResponseMessage {
-  case class GalilResponse(response: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
+  case class GalilResponse(response: String, prefix: Prefix, runId: RunId, obsId: ObsId, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
 }
 
 
-case class GalilCommandInfo()
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
+                        commandResponseManager: ActorRef[CommandResponseManagerMessage],
                         pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                         locationService: LocationService
                        ): ComponentHandlers[GalilHcdDomainMessage] =
-    new GalilHcdHandlers(ctx, componentInfo, pubSubRef, locationService)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
 }
 
 
-object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
+object GalilHcdLogger extends CommonComponentLogger("GalilHCD")
 
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
+                               commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                locationService: LocationService)
-    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -66,7 +67,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
-    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self)))
+    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self), componentInfo.name))
   }
 
   override def onShutdown(): Future[Unit] = async {
@@ -78,18 +79,18 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
   override def onDomainMsg(galilMsg: GalilHcdDomainMessage): Unit = galilMsg match {
-    case (x: GalilResponseMessage) => handleGalilReponse(x)
+    case (x: GalilResponseMessage) => handleGalilResponse(x)
 
     case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  def handleGalilReponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
-    case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
-      val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
+  def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
+    case GalilResponse(response, prefix, runId, obsId, cmdMapEntry, client) =>
+      val returnResponse = adapter.makeResponse(prefix, runId, obsId, cmdMapEntry, response)
       client ! returnResponse
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -97,20 +98,20 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.info, cmdMapEntry.get, replyTo)
-            Validations.Valid
+            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.runId, x.obsId, cmdMapEntry.get, replyTo)
+            CommandValidationResponse.Accepted(x.runId)
           } else {
-            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(x.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(x.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(x.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 
-  override def onOneway(controlCommand: ControlCommand): Validation = {
+  override def onOneway(controlCommand: ControlCommand): CommandValidationResponse = {
     log.debug(s"onOneway called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -119,15 +120,15 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilCommand(cmdString.get)
-            Validations.Valid
+            CommandValidationResponse.Accepted(x.runId)
           } else {
-            Validations.Invalid(ValidationIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(x.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          Validations.Invalid(ValidationIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(x.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(x.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 

@@ -8,8 +8,8 @@ import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.PubSub.PublisherMessage
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.commands.ControlCommand
-import csw.messages.ccs.{Validation, ValidationIssue, Validations}
+import csw.messages.ccs.CommandIssue.UnsupportedCommandIssue
+import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
@@ -28,10 +28,11 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[Gali
   override def handlers(
                 ctx: ActorContext[ComponentMessage],
                 componentInfo: ComponentInfo,
+                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                 pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                 locationService: LocationService
               ): ComponentHandlers[GalilAssemblyDomainMessage] =
-    new GalilAssemblyHandlers(ctx, componentInfo, pubSubRef, locationService)
+    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
 }
 
 
@@ -39,9 +40,10 @@ object GalilAssemblyLogger extends CommonComponentLogger("GalilAssembly")
 
 private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
                                     componentInfo: ComponentInfo,
+                                    commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                     pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                     locationService: LocationService)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, pubSubRef, locationService)
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilAssemblyLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -50,14 +52,24 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     log.debug("Initialize called")
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Validation = {
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
     log.debug(s"onSubmit called: $controlCommand")
-    Validations.Valid
+    controlCommand match {
+      case x: Setup =>
+        CommandValidationResponse.Accepted(x.runId)
+      case x: Observe =>
+        CommandValidationResponse.Accepted(x.runId)
+    }
   }
 
-  override def onOneway(controlCommand: ControlCommand): Validation = {
+  override def onOneway(controlCommand: ControlCommand): CommandValidationResponse = {
     log.debug(s"onOneway called: $controlCommand")
-    Validations.Invalid(ValidationIssue.UnsupportedCommandIssue("Observe not supported"))
+    controlCommand match {
+      case x: Setup =>
+        CommandValidationResponse.Invalid(x.runId, UnsupportedCommandIssue("Observe not supported"))
+      case x: Observe =>
+        CommandValidationResponse.Invalid(x.runId, UnsupportedCommandIssue("Observe not supported"))
+    }
   }
 
   override def onShutdown(): Future[Unit] = async {

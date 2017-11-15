@@ -14,7 +14,7 @@ import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.KeyType
-import csw.messages.params.models.Prefix
+import csw.messages.params.models.{ObsId, Prefix}
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{CommonComponentLogger, LoggingSystemFactory}
@@ -47,7 +47,7 @@ object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].typedRef[SupervisorExternalMessage])
+          interact(ctx, loc.asInstanceOf[AkkaLocation].componentRef)
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -62,7 +62,7 @@ object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
     val axis = KeyType.CharKey.make("axis")
     val axisItem = axis.set('A')
-    val setup = Setup("Obs001", Prefix("galil.command.getRelTarget")).add(axisItem)
+    val setup = Setup( ObsId("Obs001"), Prefix("galil.command.getRelTarget")).add(axisItem)
     hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }
