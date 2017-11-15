@@ -3,11 +3,11 @@ package csw.proto.galil.commands
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.{Completed, CompletedWithResult}
-import csw.messages.ccs.commands.{CommandInfo, Setup}
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult}
+import csw.messages.ccs.commands.Setup
+import csw.messages.params.models.{ObsId, Prefix}
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.location.scaladsl.ActorSystemFactory
+import csw.services.location.commons.ActorSystemFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
@@ -20,30 +20,30 @@ class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
 
   test("Test basic usage") {
     val cmds = GalilCommands(galilIo)
-    val cmdInfo = CommandInfo(ObsId("Obs001"), RunId())
+    val obsId = ObsId("2023-Q22-4-33")
     val prefix = Prefix("wfos.blue.filter")
 
     val response1 = cmds.sendCommand(
-      Setup(cmdInfo, prefix)
+      Setup(obsId, prefix)
         .add(DeviceCommands.commandKey.set("setRelTarget"))
         .add(DeviceCommands.axisKey.set('A'))
         .add(DeviceCommands.countsKey.set(2)))
 
-    assert(response1 == Completed)
+    assert(response1.isInstanceOf[Completed])
 
     val response2 = cmds.sendCommand(
-      Setup(cmdInfo, prefix)
+      Setup(obsId, prefix)
         .add(DeviceCommands.commandKey.set("getRelTarget"))
         .add(DeviceCommands.axisKey.set('A')))
 
     response2 match {
-      case CompletedWithResult(result) =>
-        val setup = Setup(cmdInfo, prefix, result.paramSet)
+      case CompletedWithResult(_, result) =>
+        val setup = Setup(obsId, prefix, result.paramSet)
         val x = setup.get(DeviceCommands.countsKey).get.head
         assert(x == 2)
         println("Test passed")
 
-      case x => fail("Test failed")
+      case _ => fail("Test failed")
     }
   }
 }

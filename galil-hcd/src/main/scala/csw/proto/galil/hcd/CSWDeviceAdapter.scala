@@ -1,11 +1,12 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
+import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult}
 
 import scala.collection.JavaConverters._
-import csw.messages.ccs.commands.{CommandExecutionResponse, Result, Setup}
+import csw.messages.ccs.commands.{CommandInfo, CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.params.models.Prefix
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandKey, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
@@ -86,8 +87,8 @@ class CSWDeviceAdapter(config: Config) {
 
     if (missing.nonEmpty)
       Failure(missing.head)
-
-    Success(insertParams(setup, cmdEntry.command, paramDefs))
+    else
+      Success(insertParams(setup, cmdEntry.command, paramDefs))
   }
 
   // Replaces the placeholders for the parameters with the parameter values
@@ -104,10 +105,9 @@ class CSWDeviceAdapter(config: Config) {
   }
 
   // Parses and returns the command's response
-  def makeResponse(prefix: Prefix, runId: RunId, obsId: ObsId, cmdEntry: CommandMapEntry, responseStr: String): CommandExecutionResponse = {
-    println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
+  def makeResponse(prefix: Prefix, info: CommandInfo, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
-      CommandExecutionResponse.Completed(runId)
+      Completed(info.runId)
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
@@ -119,7 +119,7 @@ class CSWDeviceAdapter(config: Config) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CommandExecutionResponse.CompletedWithResult(runId, Result(runId, obsId, prefix, resultParamSet))
+      CompletedWithResult(info.runId, Result(info.runId, info.obsId, prefix, resultParamSet))
     }
   }
 

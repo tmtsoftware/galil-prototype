@@ -8,8 +8,8 @@ import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.PubSub.PublisherMessage
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
-import csw.messages.ccs.CommandIssue.UnsupportedCommandIssue
-import csw.messages.ccs.commands._
+import csw.messages.ccs.CommandIssue
+import csw.messages.ccs.commands.{CommandResponse, CommandValidationResponse, ControlCommand}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.states.CurrentState
@@ -54,22 +54,12 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
 
   override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
     log.debug(s"onSubmit called: $controlCommand")
-    controlCommand match {
-      case x: Setup =>
-        CommandValidationResponse.Accepted(x.runId)
-      case x: Observe =>
-        CommandValidationResponse.Accepted(x.runId)
-    }
+    CommandValidationResponse.Accepted(controlCommand.runId)
   }
 
   override def onOneway(controlCommand: ControlCommand): CommandValidationResponse = {
     log.debug(s"onOneway called: $controlCommand")
-    controlCommand match {
-      case x: Setup =>
-        CommandValidationResponse.Invalid(x.runId, UnsupportedCommandIssue("Observe not supported"))
-      case x: Observe =>
-        CommandValidationResponse.Invalid(x.runId, UnsupportedCommandIssue("Observe not supported"))
-    }
+    CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
   }
 
   override def onShutdown(): Future[Unit] = async {

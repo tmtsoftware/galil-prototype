@@ -29,12 +29,12 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 sealed trait GalilCommandMessage extends GalilHcdDomainMessage
 object GalilCommandMessage {
   case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
-  case class GalilRequest(commandString: String, prefix: Prefix, runId: RunId, obsId: ObsId, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
+  case class GalilRequest(commandString: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
 }
 
 sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 object GalilResponseMessage {
-  case class GalilResponse(response: String, prefix: Prefix, runId: RunId, obsId: ObsId, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
+  case class GalilResponse(response: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
 }
 
 
@@ -49,7 +49,7 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
 }
 
 
-object GalilHcdLogger extends CommonComponentLogger("GalilHCD")
+object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
 
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
@@ -85,8 +85,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   }
 
   def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
-    case GalilResponse(response, prefix, runId, obsId, cmdMapEntry, client) =>
-      val returnResponse = adapter.makeResponse(prefix, runId, obsId, cmdMapEntry, response)
+    case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
+      val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
       client ! returnResponse
   }
 
@@ -98,16 +98,17 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix, x.runId, x.obsId, cmdMapEntry.get, replyTo)
-            CommandValidationResponse.Accepted(x.runId)
+            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix,
+              CommandInfo(x.obsId, x.runId), cmdMapEntry.get, replyTo)
+            CommandValidationResponse.Accepted(controlCommand.runId)
           } else {
-            CommandValidationResponse.Invalid(x.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          CommandValidationResponse.Invalid(x.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        CommandValidationResponse.Invalid(x.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 
@@ -120,15 +121,15 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilCommand(cmdString.get)
-            CommandValidationResponse.Accepted(x.runId)
+            CommandValidationResponse.Accepted(controlCommand.runId)
           } else {
-            CommandValidationResponse.Invalid(x.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          CommandValidationResponse.Invalid(x.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case x: Observe =>
-        CommandValidationResponse.Invalid(x.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 

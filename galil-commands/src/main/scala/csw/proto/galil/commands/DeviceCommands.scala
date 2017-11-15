@@ -5,7 +5,7 @@ import com.typesafe.config.Config
 import scala.collection.JavaConverters._
 import DeviceCommands._
 import csw.messages.ccs.commands.CommandExecutionResponse.{Completed, CompletedWithResult, Error}
-import csw.messages.ccs.commands.{CommandExecutionResponse, Result, Setup}
+import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 
 import scala.annotation.tailrec
@@ -75,14 +75,14 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   }.toMap
 
 
-  def sendCommand(setup: Setup): CommandExecutionResponse = {
+  def sendCommand(setup: Setup): CommandResponse = {
     setup.get(commandKey) match {
       case Some(cmd) => handleCmd(setup, cmdMap(cmd.head))
       case None => Error(setup.runId, s"Missing ${commandKey.keyName} parameter")
     }
   }
 
-  private def handleCmd(setup: Setup, cmdEntry: CommandMapEntry): CommandExecutionResponse = {
+  private def handleCmd(setup: Setup, cmdEntry: CommandMapEntry): CommandResponse = {
     // Look up the paramDef entries defined in the command string
     val paramDefs = paramRegex.
       findAllMatchIn(cmdEntry.command)
@@ -116,7 +116,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   }
 
   // Parses and returns the command's response
-  private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandExecutionResponse = {
+  private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
       Completed(setup.runId)
