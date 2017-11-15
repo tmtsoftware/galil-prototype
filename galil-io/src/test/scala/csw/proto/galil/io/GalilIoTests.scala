@@ -3,7 +3,7 @@ package csw.proto.galil.io
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.services.location.scaladsl.ActorSystemFactory
+import csw.services.location.commons.ActorSystemFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 

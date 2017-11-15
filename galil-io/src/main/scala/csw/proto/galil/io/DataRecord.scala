@@ -76,7 +76,7 @@ object DataRecord {
     val generalState = readGeneralState(buffer)
     val axisStatuses = new Array[GalilAxisStatus](8)
     for ((axis, ii) <- ('A' to 'H').zipWithIndex) {
-      if (header.blocksPresent.contains(axis)) {
+      if (header.blocksPresent.contains(axis.toString)) {
         axisStatuses.update(ii, readGalilAxisStatus(buffer))
       }
     }
@@ -188,7 +188,7 @@ object DataRecord {
   private def getHeaderBytes(h :Header) = {
     var blockPresentShort: Short = 0x8000.toShort
     for ((item, bit) <- h.blocksPresent.zipWithIndex if !item.isEmpty) {
-      blockPresentShort |= (1 << bit)
+      blockPresentShort = (blockPresentShort | (1 << bit)).toShort
     }
     (h.recordSize << 16 | blockPresentShort) & 0xFFFFFFFF
 

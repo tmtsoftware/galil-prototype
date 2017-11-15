@@ -119,7 +119,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandExecutionResponse = {
     println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
-      Completed
+      Completed(setup.runId)
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
