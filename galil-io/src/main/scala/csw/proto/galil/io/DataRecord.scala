@@ -1,6 +1,6 @@
 package csw.proto.galil.io
 
-import java.nio._
+import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
 import csw.proto.galil.io.DataRecord._
