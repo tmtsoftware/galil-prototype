@@ -11,7 +11,7 @@ import csw.messages.ccs.CommandIssue
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.params.models.Prefix
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
