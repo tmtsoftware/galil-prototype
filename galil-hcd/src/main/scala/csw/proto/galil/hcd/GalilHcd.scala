@@ -156,10 +156,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onOneway(controlCommand: ControlCommand): Unit = {
     log.debug(s"onOneway called: $controlCommand")
     controlCommand match {
-      case x: Setup =>
-        val cmdMapEntry = adapter.getCommandMapEntry(x)
+      case setup: Setup =>
+        val cmdMapEntry = adapter.getCommandMapEntry(setup)
         if (cmdMapEntry.isSuccess) {
-          val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
+          val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilCommand(cmdString.get)
           }

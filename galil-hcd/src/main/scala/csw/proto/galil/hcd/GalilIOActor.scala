@@ -5,17 +5,21 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.logging.scaladsl.ComponentLogger
+import csw.services.logging.scaladsl.CommonComponentLogger
+
+object GalilIoLogger extends CommonComponentLogger("GalilHcd")
 
 object GalilIOActor {
-  def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]], logName: String): Behavior[GalilCommandMessage] =
-    Actor.mutable(ctx ⇒ new GalilIOActor(ctx, galilConfig: GalilConfig, replyTo, logName))
+  def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]],
+               componentName: String): Behavior[GalilCommandMessage] =
+    Actor.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, replyTo, componentName))
 }
 
-class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
+case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                    galilConfig: GalilConfig,
                    replyTo: Option[ActorRef[GalilResponseMessage]],
-                   logName: String) extends ComponentLogger.MutableActor[GalilCommandMessage](ctx, "GalilHcd") {
+                   componentName: String)
+  extends GalilIoLogger.MutableActor[GalilCommandMessage](ctx) {
 
   val galilIo = GalilIoTcp() // TODO: Add configuration: Otherwise using default params: "127.0.0.1", 8888
 
