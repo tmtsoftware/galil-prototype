@@ -5,6 +5,7 @@ import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.messages.CommandResponseManagerMessage.AddOrUpdateCommand
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
 import csw.messages.ccs.CommandIssue
@@ -86,7 +87,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
   override def onDomainMsg(galilMsg: GalilHcdDomainMessage): Unit = galilMsg match {
-    case (x: GalilResponseMessage) => handleGalilResponse(x)
+    case x: GalilResponseMessage => handleGalilResponse(x)
 
     case x => log.debug(s"onDomainMessage called: $x")
   }
@@ -94,6 +95,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
     case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
       val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
+      // XXX TODO: FIXME: send to commandResponseManager! Do we still need Submit.replyTo? How to handle OneWay?
+       commandResponseManager ! AddOrUpdateCommand(returnResponse.runId, returnResponse)
       client ! returnResponse
   }
 
