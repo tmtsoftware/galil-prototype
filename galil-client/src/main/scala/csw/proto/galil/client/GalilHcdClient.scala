@@ -47,7 +47,7 @@ object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].componentRef())
+          interact(ctx, loc.asInstanceOf[AkkaLocation].componentRef)
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }

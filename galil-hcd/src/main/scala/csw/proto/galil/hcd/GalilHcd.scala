@@ -38,7 +38,6 @@ object GalilResponseMessage {
 }
 
 
-case class GalilCommandInfo()
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
@@ -80,12 +79,12 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
   override def onDomainMsg(galilMsg: GalilHcdDomainMessage): Unit = galilMsg match {
-    case (x: GalilResponseMessage) => handleGalilReponse(x)
+    case (x: GalilResponseMessage) => handleGalilResponse(x)
 
     case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  def handleGalilReponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
+  def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
     case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
       val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
       client ! returnResponse
