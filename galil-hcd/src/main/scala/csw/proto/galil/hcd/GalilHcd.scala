@@ -27,14 +27,21 @@ sealed trait GalilHcdDomainMessage extends DomainMessage
 
 // Add messages here...
 sealed trait GalilCommandMessage extends GalilHcdDomainMessage
+
 object GalilCommandMessage {
-  case class GalilCommand(commandString: String)                                          extends GalilCommandMessage
+
+  case class GalilCommand(commandString: String) extends GalilCommandMessage
+
   case class GalilRequest(commandString: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
+
 }
 
 sealed trait GalilResponseMessage extends GalilHcdDomainMessage
+
 object GalilResponseMessage {
+
   case class GalilResponse(response: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
+
 }
 
 
@@ -56,14 +63,14 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
                                locationService: LocationService)
-    extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
+  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilHcdLogger.Simple {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private[this] val config = ConfigFactory.load("GalilCommands.conf")
-  val adapter = new CSWDeviceAdapter(config)
+  private val adapter = new CSWDeviceAdapter(config)
 
-  var galilHardwareActor: ActorRef[GalilCommandMessage] = _
+  private var galilHardwareActor: ActorRef[GalilCommandMessage] = _
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -90,29 +97,63 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
       client ! returnResponse
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
-    log.debug(s"onSubmit called: $controlCommand")
+  override def validateSubmit(controlCommand: ControlCommand): CommandResponse = {
+    log.debug(s"validateSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, x.prefix,
-              CommandInfo(x.obsId, x.runId), cmdMapEntry.get, replyTo)
-            CommandValidationResponse.Accepted(controlCommand.runId)
+            CommandResponse.Accepted(controlCommand.runId)
           } else {
-            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
         } else {
-          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
-      case x: Observe =>
-        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+      case _: Observe =>
+        CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 
-  override def onOneway(controlCommand: ControlCommand): CommandValidationResponse = {
+  override def validateOneway(controlCommand: ControlCommand): CommandResponse = {
+    log.debug(s"validateOneway called: $controlCommand")
+    controlCommand match {
+      case setup: Setup =>
+        val cmdMapEntry = adapter.getCommandMapEntry(setup)
+        if (cmdMapEntry.isSuccess) {
+          val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
+          if (cmdString.isSuccess) {
+            CommandResponse.Accepted(controlCommand.runId)
+          } else {
+            CommandResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+          }
+        } else {
+          CommandResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+        }
+      case _: Observe =>
+        CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+    }
+  }
+
+  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Unit = {
+    log.debug(s"onSubmit called: $controlCommand")
+    controlCommand match {
+      case setup: Setup =>
+        val cmdMapEntry = adapter.getCommandMapEntry(setup)
+        if (cmdMapEntry.isSuccess) {
+          val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
+          if (cmdString.isSuccess) {
+            galilHardwareActor ! GalilRequest(cmdString.get, setup.prefix,
+              CommandInfo(setup.obsId, setup.runId), cmdMapEntry.get, replyTo)
+          }
+        }
+      case _ =>
+    }
+  }
+
+  override def onOneway(controlCommand: ControlCommand): Unit = {
     log.debug(s"onOneway called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -121,15 +162,9 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             galilHardwareActor ! GalilCommand(cmdString.get)
-            CommandValidationResponse.Accepted(controlCommand.runId)
-          } else {
-            CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
           }
-        } else {
-          CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
-      case x: Observe =>
-        CommandValidationResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+      case _ =>
     }
   }
 
