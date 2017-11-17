@@ -11,12 +11,14 @@ import csw.messages._
 import csw.messages.ccs.CommandIssue
 import csw.messages.ccs.commands.{CommandResponse, CommandValidationResponse, ControlCommand}
 import csw.messages.framework.ComponentInfo
-import csw.messages.location.TrackingEvent
+import csw.messages.location.ConnectionType.AkkaType
+import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.params.states.CurrentState
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.CommonComponentLogger
 
 import scala.async.Async._
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Base trait for Galil Assembly domain messages
@@ -48,12 +50,16 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
 
+  val connectionsMap = mutable.HashMap[String, ActorRef[SupervisorExternalMessage]]() // TODO correct type?  Synchronization needed?
+
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
   }
 
   override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): CommandValidationResponse = {
     log.debug(s"onSubmit called: $controlCommand")
+    // construct command
+
     CommandValidationResponse.Accepted(controlCommand.runId)
   }
 
@@ -74,8 +80,25 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     case x => log.debug(s"onDomainMsg called: $x")
   }
 
-  override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
+  override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
+    // dependencies are tracked via a locations service subscription to when TLA starts up
+    // if there is an event, this is called.
+    trackingEvent match {
+      case LocationUpdated(loc) => {
+        if (loc.connection.connectionType == AkkaType) {
+          connectionsMap + (trackingEvent.connection.name -> loc.asInstanceOf[AkkaLocation].componentRef)
+          // TODO other types?
+        }
+      }
+      case LocationRemoved(connection) => {
+        if (connection.connectionType == AkkaType) {
+          connectionsMap + (trackingEvent.connection.name -> None)
+          // TODO other types?
+        }
+      }
+    }
+  }
 
   override protected def maybeComponentName(): Option[String] = Some("GalilAssembly")
 
