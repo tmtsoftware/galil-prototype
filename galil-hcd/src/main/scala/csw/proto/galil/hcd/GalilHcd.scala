@@ -10,7 +10,8 @@ import csw.messages._
 import csw.messages.ccs.CommandIssue
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
-import csw.messages.location.TrackingEvent
+import csw.messages.location.ConnectionType.AkkaType
+import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.params.models.Prefix
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
@@ -20,6 +21,7 @@ import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.CommonComponentLogger
 
 import scala.async.Async._
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Base trait for Galil HCD domain messages
@@ -64,6 +66,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   val adapter = new CSWDeviceAdapter(config)
 
   var galilHardwareActor: ActorRef[GalilCommandMessage] = _
+
+  val connectionsMap = mutable.HashMap[String, ActorRef[SupervisorExternalMessage]]() // TODO correct type?  Synchronization needed?
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -133,8 +137,23 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     }
   }
 
-  override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
+  override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
+    trackingEvent match {
+      case LocationUpdated(loc) => {
+        if (loc.connection.connectionType == AkkaType) {
+          connectionsMap + (trackingEvent.connection.name -> loc.asInstanceOf[AkkaLocation].componentRef)
+          // TODO other types?
+        }
+      }
+      case LocationRemoved(connection) => {
+        if (connection.connectionType == AkkaType) {
+          connectionsMap + (trackingEvent.connection.name -> None)
+          // TODO other types?
+        }
+      }
+    }
+  }
 
   override protected def maybeComponentName(): Option[String] = Some("GalilHcd")
 
