@@ -9,7 +9,7 @@ import csw.messages.{CommandMessage, ComponentMessage, SupervisorExternalMessage
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future}
 
-abstract class Command(ctx: ActorContext[ComponentMessage], setup: Setup, component: ActorRef[SupervisorExternalMessage]) {
+case class Command(ctx: ActorContext[ComponentMessage], setup: Setup, component: ActorRef[SupervisorExternalMessage]) {
 
   val commandRunnerActor =  Actor.immutable[CommandResponse] { (_, msg) =>
     msg match {
