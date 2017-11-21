@@ -12,6 +12,7 @@ import csw.messages.ccs.CommandIssue
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
+import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.models.Prefix
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
@@ -50,7 +51,7 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
   override def handlers(ctx: ActorContext[ComponentMessage],
                         componentInfo: ComponentInfo,
                         commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                        pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
+                        pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                         locationService: LocationService
                        ): ComponentHandlers[GalilHcdDomainMessage] =
     new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
@@ -62,7 +63,7 @@ object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                               pubSubRef: ActorRef[PubSub.PublisherMessage[CurrentState]],
+                               pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                                locationService: LocationService)
   extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
     with GalilHcdLogger.Simple {
@@ -100,33 +101,13 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
       client ! returnResponse
   }
 
-  override def validateSubmit(controlCommand: ControlCommand): CommandResponse = {
+  override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
     log.debug(s"validateSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
         val cmdMapEntry = adapter.getCommandMapEntry(x)
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(x, cmdMapEntry.get)
-          if (cmdString.isSuccess) {
-            CommandResponse.Accepted(controlCommand.runId)
-          } else {
-            CommandResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
-          }
-        } else {
-          CommandResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
-        }
-      case _: Observe =>
-        CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
-    }
-  }
-
-  override def validateOneway(controlCommand: ControlCommand): CommandResponse = {
-    log.debug(s"validateOneway called: $controlCommand")
-    controlCommand match {
-      case setup: Setup =>
-        val cmdMapEntry = adapter.getCommandMapEntry(setup)
-        if (cmdMapEntry.isSuccess) {
-          val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
             CommandResponse.Accepted(controlCommand.runId)
           } else {
