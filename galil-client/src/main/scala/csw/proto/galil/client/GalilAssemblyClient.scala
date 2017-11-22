@@ -18,9 +18,9 @@ import csw.messages.params.models.{ObsId, Prefix}
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{CommonComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{LibraryLogger, LoggingSystemFactory}
 
-object GalilAssemblyClientLogger extends CommonComponentLogger("GalilAssemblyClient")
+object GalilAssemblyClientLogger extends LibraryLogger("GalilAssemblyClient")
 
 // A client to test locating and communicating with the Galil assembly
 object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {

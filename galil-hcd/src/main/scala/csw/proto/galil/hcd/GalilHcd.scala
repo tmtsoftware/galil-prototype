@@ -19,7 +19,7 @@ import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.CommonComponentLogger
+import csw.services.logging.scaladsl.LibraryLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -58,7 +58,7 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
 }
 
 
-object GalilHcdLogger extends CommonComponentLogger("GalilHcd")
+object GalilHcdLogger extends LibraryLogger("GalilHcd")
 
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
@@ -154,8 +154,6 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
-
-  override protected def maybeComponentName(): Option[String] = Some("GalilHcd")
 
   def getGalilConfig: GalilConfig = new GalilConfig()
 

@@ -5,9 +5,9 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.logging.scaladsl.CommonComponentLogger
+import csw.services.logging.scaladsl.LibraryLogger
 
-object GalilIoLogger extends CommonComponentLogger("GalilHcd")
+object GalilIoLogger extends LibraryLogger("GalilHcd")
 
 object GalilIOActor {
   def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]],

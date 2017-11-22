@@ -17,9 +17,9 @@ import csw.messages.params.generics.KeyType
 import csw.messages.params.models.{ObsId, Prefix}
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{CommonComponentLogger, LoggingSystemFactory}
+import csw.services.logging.scaladsl.{LibraryLogger, LoggingSystemFactory}
 
-object GalilHcdClientLogger extends CommonComponentLogger("GalilHcdClient")
+object GalilHcdClientLogger extends LibraryLogger("GalilHcdClient")
 
 // A client to test locating and communicating with the Galil HCD
 object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
