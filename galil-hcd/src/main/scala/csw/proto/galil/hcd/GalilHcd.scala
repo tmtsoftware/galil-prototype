@@ -19,7 +19,6 @@ import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.LibraryLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -58,16 +57,14 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
 }
 
 
-object GalilHcdLogger extends LibraryLogger("GalilHcd")
-
 private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                                locationService: LocationService)
-  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
-    with GalilHcdLogger.Simple {
+  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService) {
 
+  private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private[this] val config = ConfigFactory.load("GalilCommands.conf")
   private val adapter = new CSWDeviceAdapter(config)
@@ -76,7 +73,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
-    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self), componentInfo.name))
+    galilHardwareActor = ctx.spawnAnonymous(GalilIOActor.behavior(getGalilConfig, Some(ctx.self), loggerFactory))
   }
 
   override def onShutdown(): Future[Unit] = async {

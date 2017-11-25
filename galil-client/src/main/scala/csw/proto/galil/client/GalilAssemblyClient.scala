@@ -18,12 +18,10 @@ import csw.messages.params.models.{ObsId, Prefix}
 import csw.messages.params.models.Units.degree
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{LibraryLogger, LoggingSystemFactory}
-
-object GalilAssemblyClientLogger extends LibraryLogger("GalilAssemblyClient")
+import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 
 // A client to test locating and communicating with the Galil assembly
-object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
+object GalilAssemblyClient extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
@@ -31,6 +29,7 @@ object GalilAssemblyClient extends App with GalilAssemblyClientLogger.Simple {
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilAssemblyClientApp", "0.1", host, system)
   implicit val mat: ActorMaterializer = ActorMaterializer()
+  private val log = GenericLoggerFactory.getLogger
   log.info("Starting GalilAssemblyClient")
   system.spawn(initialBehavior, "GalilAssemblyClient")
 

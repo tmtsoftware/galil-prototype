@@ -13,7 +13,6 @@ import csw.messages.location.TrackingEvent
 import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.states.CurrentState
 import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.LibraryLogger
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -34,18 +33,15 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[Gali
     new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
 }
 
-
-object GalilAssemblyLogger extends LibraryLogger("GalilAssembly")
-
 private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
                                     componentInfo: ComponentInfo,
                                     commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                     pubSubRef: ActorRef[PublisherMessage[CurrentState]],
                                     locationService: LocationService)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
-    with GalilAssemblyLogger.Simple {
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
+  private val log = loggerFactory.getLogger
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")

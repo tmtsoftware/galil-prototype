@@ -17,12 +17,10 @@ import csw.messages.params.generics.KeyType
 import csw.messages.params.models.{ObsId, Prefix}
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{LibraryLogger, LoggingSystemFactory}
-
-object GalilHcdClientLogger extends LibraryLogger("GalilHcdClient")
+import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 
 // A client to test locating and communicating with the Galil HCD
-object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
+object GalilHcdClient extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
   implicit def actorRefFactory: ActorRefFactory = system
@@ -30,6 +28,7 @@ object GalilHcdClient extends App with GalilHcdClientLogger.Simple {
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
   implicit val mat: ActorMaterializer = ActorMaterializer()
+  private val log = GenericLoggerFactory.getLogger
   log.info("Starting GalilHcdClient")
   system.spawn(initialBehavior, "GalilHcdClient")
 
