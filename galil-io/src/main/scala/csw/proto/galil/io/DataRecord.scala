@@ -5,21 +5,19 @@ import java.nio.{ByteBuffer, ByteOrder}
 import akka.util.ByteString
 import csw.proto.galil.io.DataRecord._
 
-case class GalilAxisStatus(status: Short = 0,  // unsigned
-   switches: Byte = 0,  //unsigned
-   stopCode: Byte = 0,  // unsigned
-   referencePosition: Int = 0,
-   motorPosition: Int = 0,
-   positionError: Int = 0,
-   auxiliaryPosition: Int = 0,
-   velocity: Int = 0,
-   torque: Int = 0,
-   analogInput: Short = 0,
-   hallInputStatus: Byte = 0, // unsigned
-   reservedByte: Byte = 0,   //unsigned
-   userDefinedVariable: Int = 0
-)
-
+case class GalilAxisStatus(status: Short, // unsigned
+                           switches: Byte, //unsigned
+                           stopCode: Byte, // unsigned
+                           referencePosition: Int,
+                           motorPosition: Int,
+                           positionError: Int,
+                           auxiliaryPosition: Int,
+                           velocity: Int,
+                           torque: Int,
+                           analogInput: Short,
+                           hallInputStatus: Byte, // unsigned
+                           reservedByte: Byte, //unsigned
+                           userDefinedVariable: Int)
 
 object AxisStatusBits {
   val MotorOff = 0
@@ -38,10 +36,7 @@ object AxisStatusBits {
   val ModeOfMotionPAOnly = 13
   val ModeOfMotionPAorPR = 14
   val MoveInProgress = 15
-
 }
-
-
 
 object AxisSwitchesBits {
   val StepperMode = 0
@@ -50,7 +45,6 @@ object AxisSwitchesBits {
   val StateOfLatchInput = 5
   val LatchOccurred = 6
 }
-
 
 object CoordinatedMotionStatus {
   val MotionIsMakingFinalDeceleration = 3
@@ -123,7 +117,7 @@ object DataRecord {
       .putInt(dr.generalState.tPlaneDistanceTraveledInCoordinatedMove)
       .putShort(dr.generalState.tPlaneBufferSpaceRemaining)
     dr.axisStatuses.foreach { axis =>
-      buffer.putShort( axis.status )
+      buffer.putShort(axis.status)
         .put(axis.switches)
         .put(axis.stopCode)
         .putInt(axis.referencePosition)
@@ -134,7 +128,7 @@ object DataRecord {
         .putInt(axis.torque)
         .putShort(axis.analogInput)
         .put(axis.hallInputStatus)
-        .position(buffer.position+1)
+        .position(buffer.position + 1)
     }
     buffer
   }
@@ -147,11 +141,12 @@ object DataRecord {
 
   private def toBinaryString(a: Array[Boolean]) = a.map(i => if (i) 1 else 0).mkString("")
 
-  private def toBytes(a : Array[Boolean]) = {
+  private def toBytes(a: Array[Boolean]) = {
     a.grouped(8)
-      .map(_.foldLeft(0)((i,b) => (i<<1) + (if(b) 1 else 0)).toByte)
+      .map(_.foldLeft(0)((i, b) => (i << 1) + (if (b) 1 else 0)).toByte)
       .toArray
   }
+
   // 4 byte header
   case class Header(blocksPresent: List[String], recordSize: Int) {
     override def toString: String =
@@ -185,7 +180,7 @@ object DataRecord {
     Header(blocksPresent, recordSize)
   }
 
-  private def getHeaderBytes(h :Header) = {
+  private def getHeaderBytes(h: Header) = {
     var blockPresentShort: Short = 0x8000.toShort
     for ((item, bit) <- h.blocksPresent.zipWithIndex if !item.isEmpty) {
       blockPresentShort = (blockPresentShort | (1 << bit)).toShort
@@ -193,8 +188,6 @@ object DataRecord {
     (h.recordSize << 16 | blockPresentShort) & 0xFFFFFFFF
 
   }
-
-
 
   case class GeneralState(sampleNumber: Short,
                           inputs: Array[Boolean],
@@ -299,7 +292,5 @@ object DataRecord {
       tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining,
     )
   }
-
-
 }
 

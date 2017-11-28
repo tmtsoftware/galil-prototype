@@ -3,6 +3,7 @@ package csw.proto.galil.io
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
+import akka.util.ByteString
 import csw.services.location.commons.ActorSystemFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
@@ -14,7 +15,8 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   private val localHost = InetAddress.getLocalHost.getHostName
 
   LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, system)
-  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
+//  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
+  val galilIo = GalilIoTcp("192.168.2.2", 23) // temp: galil device
 
   override def beforeAll() {
   }
@@ -68,6 +70,14 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     assert(r6.size == 1)
     assert(r6.head._1 == "TC1")
     assert(r6.head._2.utf8String == "0")
+  }
 
+  test("Test DataRecord generation and parsing") {
+    val r = galilIo.send("QR")
+    val dr = DataRecord(r.head._2)
+    println(s"Data Record: $dr")
+    val bs = ByteString(DataRecord.generateByteBuffer(dr))
+    val dr2 = DataRecord(bs)
+    println(s"Generated Data Record: $dr2")
   }
 }
