@@ -73,12 +73,15 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
 
   test("Test DataRecord generation and parsing") {
     val r = galilIo.send("QR")
-    val bs1 = r.head._2 // XXX size 226?
-    val dr = DataRecord(bs1)
-    println(s"\nData Record (size: ${bs1.size}): $dr")
-    val bs2 = ByteString(DataRecord.toByteBuffer(dr)) // XXX siz 81!
+    val bs1 = r.head._2
+    val dr1 = DataRecord(bs1)
+    println(s"\nData Record (size: ${bs1.size}): $dr1")
+    val bs2 = ByteString(DataRecord.toByteBuffer(dr1))
     println(s"\nGenerated Data Record Size: ${bs2.size}")
     val dr2 = DataRecord(bs2)
     println(s"\nGenerated Data Record: $dr2")
+//    assert(bs1 == bs2)
+//    assert(dr1.toString == dr2.toString)
+
   }
 }
