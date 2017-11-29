@@ -14,7 +14,7 @@ import csw.proto.galil.io.DataRecord._
   */
 case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: Array[GalilAxisStatus]) {
   override def toString: String = {
-    val status = ('A' to 'H').zip(axisStatuses).flatMap { p =>
+    val status = axes.zip(axisStatuses).flatMap { p =>
       if (header.blocksPresent.contains(p._1.toString))
         Some((p._1, p._2))
       else None
@@ -25,7 +25,16 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 
 object DataRecord {
 
-  // 4 byte header
+  /**
+    * Possible Galil Axis (may not all be present)
+    */
+  val axes: List[Char] = ('A' to 'H').toList
+
+  /**
+    * The 4 byte Galil header
+    * @param blocksPresent Contains the char name of the block for each block present, or empty string if block not present
+    * @param recordSize size of the data record, including the header
+    */
   case class Header(blocksPresent: List[String], recordSize: Int) {
 
     /**
@@ -182,7 +191,7 @@ object DataRecord {
       buffer.position(buffer.position() + 16)
 
       // ADDR 42 - 49
-      val ethernetHandleStatus = ('A' to 'H').map(_ => buffer.get).toArray
+      val ethernetHandleStatus = axes.map(_ => buffer.get).toArray
 
       // ADDR 50
       val errorCode = buffer.get()
@@ -355,7 +364,7 @@ object DataRecord {
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
     val generalState = GeneralState(buffer)
-    val axisStatuses = ('A' to 'H').map { axis =>
+    val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
     }
     DataRecord(header, generalState, axisStatuses.toArray)
@@ -371,7 +380,7 @@ object DataRecord {
     dr.header.write(buffer)
     dr.generalState.write(buffer)
 
-    ('A' to 'H').zip(dr.axisStatuses).foreach { p =>
+    axes.zip(dr.axisStatuses).foreach { p =>
       if (dr.header.blocksPresent.contains(p._1.toString))
         p._2.write(buffer)
     }
