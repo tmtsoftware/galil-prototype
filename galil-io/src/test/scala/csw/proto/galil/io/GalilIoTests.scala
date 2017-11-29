@@ -15,8 +15,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   private val localHost = InetAddress.getLocalHost.getHostName
 
   LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, system)
-//  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
-  val galilIo = GalilIoTcp("192.168.2.2", 23) // temp: galil device
+  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888, can also use ssh tunnel to test on device
 
   override def beforeAll() {
   }
@@ -32,11 +31,11 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     assert(r0.head._1 == "TH")
     assert(r0.size == 1)
 
-//    val r1 = galilIo.send("TH;TH")
-//    r1.foreach(r => println(s"Response: ${r._2.utf8String}"))
-//    assert(r1.head._1 == "TH")
-//    assert(r1.tail.head._1 == "TH")
-//    assert(r1.size == 2)
+    val r1 = galilIo.send("TH;TH")
+    r1.foreach(r => println(s"Response: ${r._2.utf8String}"))
+    assert(r1.head._1 == "TH")
+    assert(r1.tail.head._1 == "TH")
+    assert(r1.size == 2)
 
     // Should get empty reply
     val r2 = galilIo.send("NO")
@@ -49,7 +48,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     r3.foreach(r => println(s"Response: ${r._2.utf8String}"))
     assert(r3.size == 1)
     assert(r3.head._1 == "TC0")
-    assert(r3.head._2.utf8String == "0")
+    assert(r3.head._2.utf8String.trim == "0")
 
     // Should get "error" reply
     val r4 = galilIo.send("XX")
@@ -69,15 +68,17 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     r6.foreach(r => println(s"Response: ${r._2.utf8String}"))
     assert(r6.size == 1)
     assert(r6.head._1 == "TC1")
-    assert(r6.head._2.utf8String == "0")
+    assert(r6.head._2.utf8String.trim == "0")
   }
 
   test("Test DataRecord generation and parsing") {
     val r = galilIo.send("QR")
-    val dr = DataRecord(r.head._2)
-    println(s"Data Record: $dr")
-    val bs = ByteString(DataRecord.generateByteBuffer(dr))
-    val dr2 = DataRecord(bs)
-    println(s"Generated Data Record: $dr2")
+    val bs1 = r.head._2 // XXX size 226?
+    val dr = DataRecord(bs1)
+    println(s"\nData Record (size: ${bs1.size}): $dr")
+    val bs2 = ByteString(DataRecord.toByteBuffer(dr)) // XXX siz 81!
+    println(s"\nGenerated Data Record Size: ${bs2.size}")
+    val dr2 = DataRecord(bs2)
+    println(s"\nGenerated Data Record: $dr2")
   }
 }

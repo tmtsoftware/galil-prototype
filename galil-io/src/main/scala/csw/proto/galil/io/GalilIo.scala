@@ -65,15 +65,21 @@ abstract class GalilIo {
       result ++ data
     else if (data.takeRight(endMarker.length).utf8String == endMarker)
       result ++ data.dropRight(endMarker.length)
+    else if (data.takeRight(separator.length).utf8String == separator)
+      result ++ data.dropRight(separator.length)
     else if (data.takeRight(1).utf8String == ":") {
       result ++ data.dropRight(1)
-    } else receiveReplies(data)
+    } else
+      result ++ data // Should not happen?
   }
 }
 
 object GalilIo {
 
-  // marks end of command or reply (or separator for multiple commands or replies)
+  // separator for multiple commands or replies
+  val separator = "\r\n"
+
+  // marks end of command or reply
   val endMarker = "\r\n:"
 
   // Max packet size:
