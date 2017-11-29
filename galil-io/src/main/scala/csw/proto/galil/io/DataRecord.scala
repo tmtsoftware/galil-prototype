@@ -80,23 +80,14 @@ object DataRecord {
       val recordSize = buffer.getShort() & 0xFFFF
       Header(blocksPresent, recordSize)
     }
-
-    // XXX TODO: Need to calculate a new recordSize if the blocksPresent value is changed: Where does this come from?
-    //    private def getHeaderBytes(h: Header): Int = {
-    //      var blockPresentShort: Short = 0x8000.toShort
-    //      for ((item, bit) <- h.blocksPresent.zipWithIndex if !item.isEmpty) {
-    //        blockPresentShort = (blockPresentShort | (1 << bit)).toShort
-    //      }
-    //      (h.recordSize << 16 | blockPresentShort) & 0xFFFFFFFF
-    //    }
   }
 
   case class GeneralState(sampleNumber: Int,
-                          inputs: Array[Boolean],
-                          outputs: Array[Boolean],
+                          inputs: Array[Byte],
+                          outputs: Array[Byte],
                           ethernetHandleStatus: Array[Byte],
                           errorCode: Byte,
-                          threadStatus: Array[Boolean],
+                          threadStatus: Byte,
                           amplifierStatus: Int,
                           contourModeSegmentCount: Int,
                           contourModeBufferSpaceRemaining: Int,
@@ -113,22 +104,16 @@ object DataRecord {
       * Appends the GeneralState to the given ByteBuffer in the documented Galil format
       */
     def write(buffer: ByteBuffer): Unit = {
-      // converts boolean array to binary bytes
-      def toBytes(a: Array[Boolean]) = {
-        a.grouped(8)
-          .map(_.foldLeft(0)((i, b) => (i << 1) + (if (b) 1 else 0)).toByte)
-          .toArray
-      }
 
       buffer.putShort(sampleNumber.asInstanceOf[Short])
-        .put(toBytes(inputs))
-        .put(toBytes(outputs))
+        .put(inputs)
+        .put(outputs)
 
       buffer.position(buffer.position() + 16)
 
       buffer.put(ethernetHandleStatus)
         .put(errorCode)
-        .put(toBytes(threadStatus).head)
+        .put(threadStatus)
         .putInt(amplifierStatus)
         .putInt(contourModeSegmentCount)
         .putShort(contourModeBufferSpaceRemaining.asInstanceOf[Short])
@@ -142,16 +127,16 @@ object DataRecord {
         .putShort(tPlaneBufferSpaceRemaining.asInstanceOf[Short])
     }
 
-    private def toBinaryString(a: Array[Boolean]) = a.map(i => if (i) 1 else 0).mkString("")
+    private def toBinaryString(a: Array[Byte]) = a.map(i => i.toBinaryString).mkString(" ")
 
     override def toString: String =
       s"""
          |Sample number:                  $sampleNumber
          |Inputs:                         ${toBinaryString(inputs)}
          |Outputs:                        ${toBinaryString(outputs)}
-         |Ethernet handle status:         ${ethernetHandleStatus.mkString(", ")}
+         |Ethernet handle status:         ${ethernetHandleStatus.map(_ & 0xFF).mkString(", ")}
          |Error code:                     $errorCode
-         |Thread status:                  ${toBinaryString(threadStatus)}
+         |Thread status:                  ${threadStatus.toBinaryString}
          |Amplifier status:               $amplifierStatus
          |Contour mode segment count:                     $contourModeSegmentCount,
          |contour mode buffer space remaining:            $contourModeBufferSpaceRemaining,
@@ -171,21 +156,19 @@ object DataRecord {
       * Initializes from the given ByteBuffer in the documented Galil data record format
       */
     def apply(buffer: ByteBuffer): GeneralState = {
-      // Reads numBytes bytes and returns 8 booleans for each byte corresponding to the bits
-      def getBits(numBytes: Int): Array[Boolean] =
-        (for (_ <- 0 until numBytes) yield {
-          val b = buffer.get()
-          for (j <- 0 until 8) yield {
-            getBit(b, j)
-          }
-        }).flatten.toArray
+
+      def getBytes(numBytes: Int): Array[Byte] = {
+        val ar = Array.fill(numBytes)(0.toByte)
+        buffer.get(ar)
+        ar
+      }
 
       // ADDR 04 - 05
       val sampleNumber = buffer.getShort() & 0xFFFF
       // ADDR 06 - 15
-      val inputs = getBits(10)
+      val inputs = getBytes(10)
       // ADDR 16 - 25
-      val outputs = getBits(10)
+      val outputs = getBytes(10)
 
       // ADDR 26 - 41 (reserved)
       buffer.position(buffer.position() + 16)
@@ -197,7 +180,7 @@ object DataRecord {
       val errorCode = buffer.get()
 
       // ADDR 51
-      val threadStatus = getBits(1)
+      val threadStatus = buffer.get()
 
       // ADDR 52 - 55
       val amplifierStatus = buffer.getInt()

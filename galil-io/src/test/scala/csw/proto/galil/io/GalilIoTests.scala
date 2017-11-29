@@ -80,8 +80,6 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     println(s"\nGenerated Data Record Size: ${bs2.size}")
     val dr2 = DataRecord(bs2)
     println(s"\nGenerated Data Record: $dr2")
-//    assert(bs1 == bs2)
-//    assert(dr1.toString == dr2.toString)
-
+    assert(dr1.toString == dr2.toString)
   }
 }
