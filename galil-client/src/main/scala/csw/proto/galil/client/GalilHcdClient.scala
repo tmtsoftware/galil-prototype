@@ -32,7 +32,8 @@ object GalilHcdClient extends App {
   log.info("Starting GalilHcdClient")
   system.spawn(initialBehavior, "GalilHcdClient")
 
-  def initialBehavior: Behavior[TrackingEvent] =
+  // The initial behavior is to look up the HCD with the location service
+  private def initialBehavior: Behavior[TrackingEvent] =
     Actor.deferred { ctx =>
       val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
       locationService.subscribe(connection, { loc =>
@@ -41,7 +42,8 @@ object GalilHcdClient extends App {
       subscriberBehavior
     }
 
-  def subscriberBehavior: Behavior[TrackingEvent] = {
+  // Behavior while waiting for the HCD location
+  private def subscriberBehavior: Behavior[TrackingEvent] = {
     Actor.immutable[TrackingEvent] { (ctx, msg) =>
       msg match {
         case LocationUpdated(loc) =>
@@ -58,8 +60,8 @@ object GalilHcdClient extends App {
     }
   }
 
+  // Sends a message to the HCD (and ignores any reply, for now)
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
-
     // XXX FIXME Dummy value
     val prefix = Prefix("wfos.blue.filter")
     val maybeObsId = None
