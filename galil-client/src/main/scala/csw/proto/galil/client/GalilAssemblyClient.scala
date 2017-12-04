@@ -60,6 +60,7 @@ object GalilAssemblyClient extends App {
   }
 
   private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[SupervisorExternalMessage]): Unit = {
+    // XXX TODO: Replace with real message
     val k1 = KeyType.IntKey.make("encoder")
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)

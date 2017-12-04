@@ -13,8 +13,8 @@ import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
-import csw.messages.params.generics.KeyType
-import csw.messages.params.models.{ObsId, Prefix}
+import csw.messages.params.generics.{Key, KeyType}
+import csw.messages.params.models.Prefix
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
@@ -59,9 +59,20 @@ object GalilHcdClient extends App {
   }
 
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
-    val axis = KeyType.CharKey.make("axis")
-    val axisItem = axis.set('A')
-    val setup = Setup(Prefix("galil.command.getRelTarget"), Some(ObsId("2023-Q22-4-33"))).add(axisItem)
+
+    // XXX FIXME Dummy value
+    val prefix = Prefix("wfos.blue.filter")
+    val maybeObsId = None
+
+    val commandKey: Key[String] = KeyType.StringKey.make("command")
+    val axisKey: Key[Char] = KeyType.CharKey.make("axis")
+    val countsKey: Key[Int] = KeyType.IntKey.make("counts")
+
+    val setup = Setup(prefix, maybeObsId)
+      .add(commandKey.set("setRelTarget"))
+      .add(axisKey.set('A'))
+      .add(countsKey.set(2))
+
     hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }

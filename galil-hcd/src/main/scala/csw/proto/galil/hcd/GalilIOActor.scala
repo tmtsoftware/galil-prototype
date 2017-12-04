@@ -20,7 +20,7 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
   extends Actor.MutableBehavior[GalilCommandMessage] {
 
   private val log = loggerFactory.getLogger
-  val galilIo = GalilIoTcp() // TODO: Add configuration: Otherwise using default params: "127.0.0.1", 8888
+  val galilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
 
   override def onMessage(msg: GalilCommandMessage): Behavior[GalilCommandMessage] = {
     msg match {
@@ -35,7 +35,7 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       // TODO
       log.debug(s"doing command: $commandString")
 
-    case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey, client) =>
+    case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey) =>
       log.debug(s"doing command: $commandString")
       val response = galilSend(commandString)
       // TODO handle error

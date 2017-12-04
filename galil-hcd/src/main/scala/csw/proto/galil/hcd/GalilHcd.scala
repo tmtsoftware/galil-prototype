@@ -35,7 +35,7 @@ object GalilCommandMessage {
   case class GalilCommand(commandString: String) extends GalilCommandMessage
 
   case class GalilRequest(commandString: String, prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId],
-                          cmdMapEntry: CommandMapEntry, client: ActorRef[GalilResponse]) extends GalilCommandMessage
+                           cmdMapEntry: CommandMapEntry) extends GalilCommandMessage
 
 }
 
@@ -130,8 +130,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, setup.prefix, setup.runId,
-              setup.maybeObsId, cmdMapEntry.get, ctx.self)
+            galilHardwareActor ! GalilRequest(cmdString.get, setup.prefix, setup.runId, setup.maybeObsId, cmdMapEntry.get)
           }
         }
       case _ =>
@@ -156,7 +155,12 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
 
-  def getGalilConfig: GalilConfig = new GalilConfig()
+  def getGalilConfig: GalilConfig = {
+    val config = ctx.system.settings.config
+    val host = if (config.hasPath("galil.host")) config.getString("galil.host") else "127.0.0.1"
+    val port = if (config.hasPath("galil.port")) config.getInt("galil.port") else 8888
+    GalilConfig(host, port)
+  }
 
 }
 
