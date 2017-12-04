@@ -64,7 +64,7 @@ object GalilAssemblyClient extends App {
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)
     val i2 = k2.set("a", "b", "c").withUnits(degree)
-    val setup = Setup(ObsId("2023-Q22-4-33"), Prefix("wfos.blue.filter")).add(i1).add(i2)
+    val setup = Setup(Prefix("wfos.blue.filter"), Some(ObsId("2023-Q22-4-33"))).add(i1).add(i2)
     assembly ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }

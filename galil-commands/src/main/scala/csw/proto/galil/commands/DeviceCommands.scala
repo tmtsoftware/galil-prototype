@@ -131,7 +131,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(setup.runId, Result(setup.runId, setup.obsId, setup.prefix, resultParamSet))
+      CompletedWithResult(setup.runId, Result(setup.runId, setup.prefix, setup.maybeObsId, resultParamSet))
     }
   }
 

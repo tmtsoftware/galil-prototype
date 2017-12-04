@@ -61,7 +61,7 @@ object GalilHcdClient extends App {
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
     val axis = KeyType.CharKey.make("axis")
     val axisItem = axis.set('A')
-    val setup = Setup(ObsId("2023-Q22-4-33"), Prefix("galil.command.getRelTarget")).add(axisItem)
+    val setup = Setup(Prefix("galil.command.getRelTarget"), Some(ObsId("2023-Q22-4-33"))).add(axisItem)
     hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }

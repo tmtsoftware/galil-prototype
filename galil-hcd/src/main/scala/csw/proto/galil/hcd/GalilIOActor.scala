@@ -35,18 +35,18 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       // TODO
       log.debug(s"doing command: $commandString")
 
-    case GalilRequest(commandString, prefix, cmdInfo, commandKey, client) =>
+    case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey, client) =>
       log.debug(s"doing command: $commandString")
       val response = galilSend(commandString)
       // TODO handle error
-      replyTo.foreach(_ ! GalilResponse(response, prefix, cmdInfo, commandKey, client))
+      replyTo.foreach(_ ! GalilResponse(response, prefix, runId, maybeObsId, commandKey))
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }
 
   def galilSend(cmd: String): String = {
     val responses = galilIo.send(cmd)
-    if (responses.size != 1)
+    if (responses.lengthCompare(1) != 0)
       throw new RuntimeException(s"Received ${responses.size} responses to Galil $cmd")
     responses.head._2.utf8String
   }

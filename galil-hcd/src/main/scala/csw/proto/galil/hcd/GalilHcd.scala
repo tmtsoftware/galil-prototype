@@ -13,12 +13,13 @@ import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.models.PubSub.PublisherMessage
-import csw.messages.params.models.Prefix
+import csw.messages.params.models.{ObsId, Prefix, RunId}
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.services.location.scaladsl.LocationService
+import csw.services.logging.scaladsl.LoggerFactory
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -33,7 +34,8 @@ object GalilCommandMessage {
 
   case class GalilCommand(commandString: String) extends GalilCommandMessage
 
-  case class GalilRequest(commandString: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilCommandMessage
+  case class GalilRequest(commandString: String, prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId],
+                          cmdMapEntry: CommandMapEntry, client: ActorRef[GalilResponse]) extends GalilCommandMessage
 
 }
 
@@ -41,7 +43,8 @@ sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 
 object GalilResponseMessage {
 
-  case class GalilResponse(response: String, prefix: Prefix, cmdInfo: CommandInfo, cmdMapEntry: CommandMapEntry, client: ActorRef[CommandResponse]) extends GalilResponseMessage
+  case class GalilResponse(response: String, prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId],
+                           cmdMapEntry: CommandMapEntry) extends GalilResponseMessage
 
 }
 
@@ -51,9 +54,10 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
                         componentInfo: ComponentInfo,
                         commandResponseManager: ActorRef[CommandResponseManagerMessage],
                         pubSubRef: ActorRef[PublisherMessage[CurrentState]],
-                        locationService: LocationService
+                        locationService: LocationService,
+                        loggerFactory: LoggerFactory
                        ): ComponentHandlers[GalilHcdDomainMessage] =
-    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService, loggerFactory)
 }
 
 
@@ -61,8 +65,10 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
                                componentInfo: ComponentInfo,
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PublisherMessage[CurrentState]],
-                               locationService: LocationService)
-  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService) {
+                               locationService: LocationService,
+                               loggerFactory: LoggerFactory)
+  extends ComponentHandlers[GalilHcdDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef,
+    locationService, loggerFactory) {
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -91,11 +97,9 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
   }
 
   def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
-    case GalilResponse(response, prefix, cmdInfo, cmdMapEntry, client) =>
-      val returnResponse = adapter.makeResponse(prefix, cmdInfo, cmdMapEntry, response)
-      // XXX TODO: FIXME: send to commandResponseManager! Do we still need Submit.replyTo? How to handle OneWay?
+    case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
+      val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
        commandResponseManager ! AddOrUpdateCommand(returnResponse.runId, returnResponse)
-      client ! returnResponse
   }
 
   override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
@@ -118,7 +122,7 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
     }
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Unit = {
+  override def onSubmit(controlCommand: ControlCommand): Unit = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
       case setup: Setup =>
@@ -126,8 +130,8 @@ private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, setup.prefix,
-              CommandInfo(setup.obsId, setup.runId), cmdMapEntry.get, replyTo)
+            galilHardwareActor ! GalilRequest(cmdString.get, setup.prefix, setup.runId,
+              setup.maybeObsId, cmdMapEntry.get, ctx.self)
           }
         }
       case _ =>

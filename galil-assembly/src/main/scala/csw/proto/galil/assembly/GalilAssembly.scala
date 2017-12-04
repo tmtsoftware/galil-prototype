@@ -15,6 +15,7 @@ import csw.messages.location.TrackingEvent
 import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.states.CurrentState
 import csw.services.location.scaladsl.LocationService
+import csw.services.logging.scaladsl.LoggerFactory
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -30,17 +31,20 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[Gali
                 componentInfo: ComponentInfo,
                 commandResponseManager: ActorRef[CommandResponseManagerMessage],
                 pubSubRef: ActorRef[PublisherMessage[CurrentState]],
-                locationService: LocationService
+                locationService: LocationService,
+                loggerFactory: LoggerFactory
               ): ComponentHandlers[GalilAssemblyDomainMessage] =
-    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService)
+    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService, loggerFactory)
 }
 
 private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
                                     componentInfo: ComponentInfo,
                                     commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                     pubSubRef: ActorRef[PublisherMessage[CurrentState]],
-                                    locationService: LocationService)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef, locationService) {
+                                    locationService: LocationService,
+                                    loggerFactory: LoggerFactory)
+  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef,
+    locationService, loggerFactory) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
@@ -53,7 +57,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
     CommandResponse.Accepted(controlCommand.runId)
   }
 
-  override def onSubmit(controlCommand: ControlCommand, replyTo: ActorRef[CommandResponse]): Unit = {
+  override def onSubmit(controlCommand: ControlCommand): Unit = {
     log.debug(s"onSubmit called: $controlCommand")
     commandResponseManager ! AddOrUpdateCommand(controlCommand.runId, Completed(controlCommand.runId))
   }
