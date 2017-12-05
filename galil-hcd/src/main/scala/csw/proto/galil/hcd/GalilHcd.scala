@@ -50,7 +50,7 @@ object GalilResponseMessage {
 
 
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdDomainMessage] {
-  override def handlers(ctx: ActorContext[ComponentMessage],
+  override def handlers(ctx: ActorContext[TopLevelActorMessage],
                         componentInfo: ComponentInfo,
                         commandResponseManager: ActorRef[CommandResponseManagerMessage],
                         pubSubRef: ActorRef[PublisherMessage[CurrentState]],
@@ -61,7 +61,7 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory[GalilHcdD
 }
 
 
-private class GalilHcdHandlers(ctx: ActorContext[ComponentMessage],
+private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                componentInfo: ComponentInfo,
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                pubSubRef: ActorRef[PublisherMessage[CurrentState]],

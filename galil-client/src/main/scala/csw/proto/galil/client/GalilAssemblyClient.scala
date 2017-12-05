@@ -8,7 +8,7 @@ import akka.typed.scaladsl.adapter._
 import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
-import csw.messages.SupervisorExternalMessage
+import csw.messages.ComponentMessage
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.Assembly
 import csw.messages.location.Connection.AkkaConnection
@@ -59,7 +59,7 @@ object GalilAssemblyClient extends App {
     }
   }
 
-  private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[SupervisorExternalMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], assembly: ActorRef[ComponentMessage]): Unit = {
     // XXX TODO: Replace with real message
     val k1 = KeyType.IntKey.make("encoder")
     val k2 = KeyType.StringKey.make("filter")

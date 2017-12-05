@@ -8,7 +8,7 @@ import akka.typed.scaladsl.adapter._
 import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
-import csw.messages.SupervisorExternalMessage
+import csw.messages.ComponentMessage
 import csw.messages.ccs.commands.Setup
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
@@ -61,7 +61,7 @@ object GalilHcdClient extends App {
   }
 
   // Sends a message to the HCD (and ignores any reply, for now)
-  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[SupervisorExternalMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[ComponentMessage]): Unit = {
     // XXX FIXME Dummy value
     val prefix = Prefix("wfos.blue.filter")
     val maybeObsId = None

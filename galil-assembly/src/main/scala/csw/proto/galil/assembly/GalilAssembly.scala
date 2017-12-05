@@ -27,7 +27,7 @@ sealed trait GalilAssemblyDomainMessage extends DomainMessage
 
 private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[GalilAssemblyDomainMessage] {
   override def handlers(
-                ctx: ActorContext[ComponentMessage],
+                ctx: ActorContext[TopLevelActorMessage],
                 componentInfo: ComponentInfo,
                 commandResponseManager: ActorRef[CommandResponseManagerMessage],
                 pubSubRef: ActorRef[PublisherMessage[CurrentState]],
@@ -37,7 +37,7 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[Gali
     new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService, loggerFactory)
 }
 
-private class GalilAssemblyHandlers(ctx: ActorContext[ComponentMessage],
+private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
                                     componentInfo: ComponentInfo,
                                     commandResponseManager: ActorRef[CommandResponseManagerMessage],
                                     pubSubRef: ActorRef[PublisherMessage[CurrentState]],
