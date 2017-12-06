@@ -119,7 +119,7 @@ class CSWDeviceAdapter(config: Config) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(runId, Result(runId, prefix, maybeObsId, resultParamSet))
+      CompletedWithResult(runId, Result(prefix, resultParamSet))
     }
   }
 

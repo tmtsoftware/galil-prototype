@@ -117,6 +117,8 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
         } else {
           CommandResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
+      case _: Cancel =>
+        CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Cancel not supported"))
       case _: Observe =>
         CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
