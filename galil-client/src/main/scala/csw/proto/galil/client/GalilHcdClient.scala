@@ -70,7 +70,7 @@ object GalilHcdClient extends App {
     val axisKey: Key[Char] = KeyType.CharKey.make("axis")
     val countsKey: Key[Int] = KeyType.IntKey.make("counts")
 
-    val setup = Setup(prefix, maybeObsId)
+    val setup = Setup(prefix, prefix, maybeObsId)
       .add(commandKey.set("setRelTarget"))
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
