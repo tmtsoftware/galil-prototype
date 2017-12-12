@@ -9,7 +9,7 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
 import csw.messages.ComponentMessage
-import csw.messages.ccs.commands.Setup
+import csw.messages.ccs.commands.{CommandName, Setup}
 import csw.messages.location.ComponentType.Assembly
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -65,7 +65,7 @@ object GalilAssemblyClient extends App {
     val k2 = KeyType.StringKey.make("filter")
     val i1 = k1.set(22, 33, 44)
     val i2 = k2.set("a", "b", "c").withUnits(degree)
-    val setup = Setup(Prefix("wfos.blue.filter"), Prefix("wfos.blue.filter"), Some(ObsId("2023-Q22-4-33"))).add(i1).add(i2)
+    val setup = Setup(Prefix("wfos.blue.filter"), CommandName("filter"), Some(ObsId("2023-Q22-4-33"))).add(i1).add(i2)
     assembly ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
   }
 }

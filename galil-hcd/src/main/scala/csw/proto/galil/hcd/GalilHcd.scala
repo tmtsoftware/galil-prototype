@@ -130,7 +130,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, setup.target, setup.runId, setup.maybeObsId, cmdMapEntry.get)
+            galilHardwareActor ! GalilRequest(cmdString.get, setup.source, setup.runId, setup.maybeObsId, cmdMapEntry.get)
           }
         }
       case _ =>

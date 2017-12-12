@@ -9,7 +9,7 @@ import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.{ActorRef, Behavior}
 import csw.messages.CommandMessage.Submit
 import csw.messages.ComponentMessage
-import csw.messages.ccs.commands.Setup
+import csw.messages.ccs.commands.{CommandName, Setup}
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -70,7 +70,7 @@ object GalilHcdClient extends App {
     val axisKey: Key[Char] = KeyType.CharKey.make("axis")
     val countsKey: Key[Int] = KeyType.IntKey.make("counts")
 
-    val setup = Setup(prefix, prefix, maybeObsId)
+    val setup = Setup(prefix, CommandName("filter"), maybeObsId)
       .add(commandKey.set("setRelTarget"))
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
