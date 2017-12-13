@@ -2,14 +2,13 @@ package csw.proto.galil.client
 
 import java.net.InetAddress
 
-import akka.actor.{ActorRefFactory, ActorSystem}
+import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.typed.scaladsl.adapter._
 import akka.typed.scaladsl.{Actor, ActorContext}
-import akka.typed.{ActorRef, Behavior}
-import csw.messages.CommandMessage.Submit
-import csw.messages.ComponentMessage
-import csw.messages.ccs.commands.{CommandName, Setup}
+import akka.typed.Behavior
+import akka.util.Timeout
+import csw.messages.ccs.commands.{CommandName, Setup, WrappedComponent}
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -18,6 +17,7 @@ import csw.messages.params.models.Prefix
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import scala.concurrent.duration._
 
 // A client to test locating and communicating with the Galil HCD
 object GalilHcdClient extends App {
@@ -48,7 +48,7 @@ object GalilHcdClient extends App {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].componentRef)
+          interact(ctx, loc.asInstanceOf[AkkaLocation].component())
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -61,7 +61,9 @@ object GalilHcdClient extends App {
   }
 
   // Sends a message to the HCD (and ignores any reply, for now)
-  private def interact(ctx: ActorContext[TrackingEvent], hcd: ActorRef[ComponentMessage]): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], hcd: WrappedComponent): Unit = {
+    implicit val timeout: Timeout = Timeout(3.seconds)
+    implicit val scheduler: Scheduler = ctx.system.scheduler
     // XXX FIXME Dummy value
     val prefix = Prefix("wfos.blue.filter")
     val maybeObsId = None
@@ -75,7 +77,7 @@ object GalilHcdClient extends App {
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
 
-    hcd ! Submit(setup, replyTo = ctx.spawnAnonymous(Actor.ignore))
+    hcd.submit(setup)
   }
 }
 
