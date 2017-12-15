@@ -8,7 +8,7 @@ import akka.typed.scaladsl.adapter._
 import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.Behavior
 import akka.util.Timeout
-import csw.messages.ccs.commands.{CommandName, Setup, WrappedComponent}
+import csw.messages.ccs.commands.{CommandName, Setup, ComponentRef}
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -48,7 +48,7 @@ object GalilHcdClient extends App {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].component())
+          interact(ctx, loc.asInstanceOf[AkkaLocation].component)
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -61,7 +61,7 @@ object GalilHcdClient extends App {
   }
 
   // Sends a message to the HCD (and ignores any reply, for now)
-  private def interact(ctx: ActorContext[TrackingEvent], hcd: WrappedComponent): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], hcd: ComponentRef): Unit = {
     implicit val timeout: Timeout = Timeout(3.seconds)
     implicit val scheduler: Scheduler = ctx.system.scheduler
     // XXX FIXME Dummy value

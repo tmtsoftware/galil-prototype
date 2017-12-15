@@ -344,6 +344,7 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
+    println(s"XXX input len = ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
     val generalState = GeneralState(buffer)

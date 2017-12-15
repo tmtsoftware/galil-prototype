@@ -8,6 +8,7 @@ import csw.services.location.commons.ActorSystemFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
+//noinspection ComparingLength
 // Note: Before running this test, start the galil "simulator" script
 class GalilIoTests extends FunSuite with BeforeAndAfterAll {
 
