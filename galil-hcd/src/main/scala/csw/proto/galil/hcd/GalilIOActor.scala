@@ -45,10 +45,13 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
   }
 
   def galilSend(cmd: String): String = {
+    log.debug(s"Sending '$cmd' to Galil")
     val responses = galilIo.send(cmd)
     if (responses.lengthCompare(1) != 0)
       throw new RuntimeException(s"Received ${responses.size} responses to Galil $cmd")
-    responses.head._2.utf8String
+    val resp = responses.head._2.utf8String
+    log.debug(s"Response from Galil: $resp")
+    resp
   }
 
 }

@@ -96,10 +96,13 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
     case x => log.debug(s"onDomainMessage called: $x")
   }
 
-  def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = galilResponseMessage match {
-    case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
-      val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
-       commandResponseManager ! AddOrUpdateCommand(returnResponse.runId, returnResponse)
+  def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = {
+    log.debug(s"handleGalilResponse $galilResponseMessage")
+    galilResponseMessage match {
+      case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
+        val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
+        commandResponseManager ! AddOrUpdateCommand(returnResponse.runId, returnResponse)
+    }
   }
 
   override def validateCommand(controlCommand: ControlCommand): CommandResponse = {

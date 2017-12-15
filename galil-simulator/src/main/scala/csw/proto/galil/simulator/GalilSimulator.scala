@@ -87,7 +87,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
       formatReply(None) // comment with "'"
     else try {
       val cmd = cmdString.take(2)
-      if (cmdMap.contains(cmd)) genericCmd(cmdString)
+      if (cmdMap.contains(cmd)) formatReply(genericCmd(cmdString))
       else cmd match { // basic commands are two upper case chars
         case "" => formatReply(None) // pressing return will return a ":"
         case "BG" => formatReply(None)

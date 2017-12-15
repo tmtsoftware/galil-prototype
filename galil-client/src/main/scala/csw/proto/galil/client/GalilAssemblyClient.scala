@@ -12,14 +12,14 @@ import csw.messages.ccs.commands.{CommandName, ComponentRef, Setup}
 import csw.messages.location.ComponentType.Assembly
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
-import csw.messages.params.generics.KeyType
-import csw.messages.params.models.{ObsId, Prefix}
-import csw.messages.params.models.Units.degree
+import csw.messages.params.generics.{Key, KeyType}
+import csw.messages.params.models.Prefix
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 
 import scala.concurrent.duration._
+import scala.util.{Failure, Success}
 
 // A client to test locating and communicating with the Galil assembly
 object GalilAssemblyClient extends App {
@@ -61,15 +61,27 @@ object GalilAssemblyClient extends App {
   }
 
   private def interact(ctx: ActorContext[TrackingEvent], assembly: ComponentRef): Unit = {
-    // XXX TODO: Replace with real message
     implicit val timeout: Timeout = Timeout(3.seconds)
     implicit val scheduler: Scheduler = ctx.system.scheduler
-    val k1 = KeyType.IntKey.make("encoder")
-    val k2 = KeyType.StringKey.make("filter")
-    val i1 = k1.set(22, 33, 44)
-    val i2 = k2.set("a", "b", "c").withUnits(degree)
-    val setup = Setup(Prefix("wfos.blue.filter"), CommandName("filter"), Some(ObsId("2023-Q22-4-33"))).add(i1).add(i2)
-    assembly.submit(setup)
+    import ctx.executionContext
+    val maybeObsId = None
+
+    val commandKey: Key[String] = KeyType.StringKey.make("command")
+    val axisKey: Key[Char] = KeyType.CharKey.make("axis")
+    val countsKey: Key[Int] = KeyType.IntKey.make("counts")
+
+    val setup = Setup(Prefix("my.test.client"), CommandName("filter"), maybeObsId)
+      .add(commandKey.set("setRelTarget"))
+      .add(axisKey.set('A'))
+      .add(countsKey.set(2))
+
+    assembly.submitAndSubscribe(setup).onComplete {
+      case Success(resp) =>
+        log.info(s"HCD responded with $resp")
+      case Failure(ex) =>
+        ex.printStackTrace()
+        log.error("Failed to send command to GalilHcd", ex = ex)
+    }
   }
 }
 
