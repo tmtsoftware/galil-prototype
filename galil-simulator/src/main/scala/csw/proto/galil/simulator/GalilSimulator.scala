@@ -8,6 +8,8 @@ import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
 import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
 import akka.util.ByteString
+import csw.proto.galil.io.DataRecord
+import csw.proto.galil.io.DataRecord._
 
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
@@ -83,29 +85,69 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString, conn: IncomingConnection): ByteString = {
     val cmdString = cmd.utf8String
-    val reply = if (cmdString.startsWith("'"))
-      formatReply(None) // comment with "'"
-    else try {
-      val cmd = cmdString.take(2)
-      if (cmdMap.contains(cmd)) formatReply(genericCmd(cmdString))
-      else cmd match { // basic commands are two upper case chars
-        case "" => formatReply(None) // pressing return will return a ":"
-        case "BG" => formatReply(None)
-        case "MO" => formatReply(None)
-        case "NO" => formatReply(None) // no-op
-        case "SH" => formatReply(None)
-        case "ST" => formatReply(None)
-        case "TC" => formatReply(tcCmd(cmdString))
-        case "TH" => formatReply(thCmd(conn))
-        case "TS" => formatReply(None)
-        case _ => formatReply(None, isError = true)
+    if (cmdString == "QR") {
+        ByteString(getDataRecord.toByteBuffer)
+    } else {
+      val reply = if (cmdString.startsWith("'"))
+        formatReply(None) // comment with "'"
+      else try {
+        val cmd = cmdString.take(2)
+        if (cmdMap.contains(cmd)) formatReply(genericCmd(cmdString))
+        else cmd match { // basic commands are two upper case chars
+          case "" => formatReply(None) // pressing return will return a ":"
+          case "BG" => formatReply(None)
+          case "MO" => formatReply(None)
+          case "NO" => formatReply(None) // no-op
+          case "SH" => formatReply(None)
+          case "ST" => formatReply(None)
+          case "TC" => formatReply(tcCmd(cmdString))
+          case "TH" => formatReply(thCmd(conn))
+          case "TS" => formatReply(None)
+          case _ => formatReply(None, isError = true)
+        }
+      } catch {
+        case ex: Throwable =>
+          ex.printStackTrace()
+          formatReply(None)
       }
-    } catch {
-      case ex: Throwable =>
-        ex.printStackTrace()
-        formatReply(None)
+      ByteString(reply)
     }
-    ByteString(reply)
+  }
+
+  private def getDataRecord: DataRecord = {
+    // XXX dummy values
+    val blocksPresent = List("A")
+//    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D", "E", "F", "G", "H")
+
+    val recordSize = 200
+    val header = Header(blocksPresent, recordSize)
+
+    val sampleNumber = 0
+    val inputs = Array(0.toByte)
+    val outputs = Array(0.toByte)
+    val ethernetHandleStatus = Array(0.toByte)
+    val errorCode = 0.toByte
+    val threadStatus = 0.toByte
+    val amplifierStatus = 0
+    val contourModeSegmentCount = 0
+    val contourModeBufferSpaceRemaining = 0
+    val sPlaneSegmentCount = 0
+    val sPlaneMoveStatus = 0
+    val sPlaneDistanceTraveled = 0
+    val sPlaneBufferSpaceRemaining = 0
+    val tPlaneSegmentCount = 0
+    val tPlaneMoveStatus = 0
+    val tPlaneDistanceTraveled = 0
+    val tPlaneBufferSpaceRemaining = 0
+
+    val generalState = GeneralState(sampleNumber, inputs, outputs, ethernetHandleStatus, errorCode,
+      threadStatus, amplifierStatus, contourModeSegmentCount, contourModeBufferSpaceRemaining,
+      sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
+      tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
+
+    val axisStatuses = Array(GalilAxisStatus())
+
+    DataRecord(header, generalState, axisStatuses)
   }
 
   // Receives a future indicating when the flow associated with a client connection completes.

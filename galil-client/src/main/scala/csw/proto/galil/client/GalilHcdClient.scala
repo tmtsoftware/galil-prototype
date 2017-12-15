@@ -62,7 +62,7 @@ object GalilHcdClient extends App {
     }
   }
 
-  // Sends a message to the HCD (and ignores any reply, for now)
+  // Sends a message to the HCD
   private def interact(ctx: ActorContext[TrackingEvent], hcd: ComponentRef): Unit = {
     implicit val timeout: Timeout = Timeout(3.seconds)
     implicit val scheduler: Scheduler = ctx.system.scheduler

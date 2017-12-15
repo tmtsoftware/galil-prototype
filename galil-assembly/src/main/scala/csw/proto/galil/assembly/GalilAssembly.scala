@@ -63,7 +63,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   override def onSubmit(controlCommand: ControlCommand): Unit = {
     log.debug(s"onSubmit called: $controlCommand")
-//    commandResponseManager ! AddOrUpdateCommand(controlCommand.runId, Completed(controlCommand.runId))
     forwardCommandToHcd(controlCommand)
   }
 

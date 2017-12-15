@@ -13,6 +13,7 @@ import csw.proto.galil.io.DataRecord._
   * @param generalState data from byte 4 to 55 (sample number to amplifier status)
   */
 case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: Array[GalilAxisStatus]) {
+
   override def toString: String = {
     val status = axes.zip(axisStatuses).flatMap { p =>
       if (header.blocksPresent.contains(p._1.toString))
@@ -20,6 +21,24 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
       else None
     }.map(p => s"\nAxis ${p._1} Status:${p._2.toString}").mkString("\n")
     s"$header\n$generalState\n$status"
+  }
+
+  /**
+    * For use by the galil simulator: Given a DataRecord, returns the ByteString representation, as
+    * returned by the device.
+    */
+  def toByteBuffer: ByteBuffer = {
+    val buffer = ByteBuffer.allocateDirect(header.recordSize).order(ByteOrder.LITTLE_ENDIAN)
+
+    header.write(buffer)
+    generalState.write(buffer)
+
+    axes.zip(axisStatuses).foreach { p =>
+      if (header.blocksPresent.contains(p._1.toString))
+        p._2.write(buffer)
+    }
+
+    buffer.flip().asInstanceOf[ByteBuffer]
   }
 }
 
@@ -352,24 +371,6 @@ object DataRecord {
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
     }
     DataRecord(header, generalState, axisStatuses.toArray)
-  }
-
-  /**
-    * For use by the galil simulator: Given a DataRecord, returns the ByteString representation, as
-    * returned by the device.
-    */
-  def toByteBuffer(dr: DataRecord): ByteBuffer = {
-    val buffer = ByteBuffer.allocateDirect(dr.header.recordSize).order(ByteOrder.LITTLE_ENDIAN)
-
-    dr.header.write(buffer)
-    dr.generalState.write(buffer)
-
-    axes.zip(dr.axisStatuses).foreach { p =>
-      if (dr.header.blocksPresent.contains(p._1.toString))
-        p._2.write(buffer)
-    }
-
-    buffer.flip().asInstanceOf[ByteBuffer]
   }
 }
 

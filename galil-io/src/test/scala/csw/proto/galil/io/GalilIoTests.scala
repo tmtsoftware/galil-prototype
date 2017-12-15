@@ -77,7 +77,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     val bs1 = r.head._2
     val dr1 = DataRecord(bs1)
     println(s"\nData Record (size: ${bs1.size}): $dr1")
-    val bs2 = ByteString(DataRecord.toByteBuffer(dr1))
+    val bs2 = ByteString(dr1.toByteBuffer)
     println(s"\nGenerated Data Record Size: ${bs2.size}")
     val dr2 = DataRecord(bs2)
     println(s"\nGenerated Data Record: $dr2")

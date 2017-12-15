@@ -36,6 +36,7 @@ lazy val `galil-simulator` = project
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
+  .dependsOn(`galil-io`)
 
 // A REPL client to test talking to the Galil hardware or simulator
 lazy val `galil-repl` = project
