@@ -50,7 +50,7 @@ case class GalilHcdClient(prefix: Prefix, commandName: CommandName) {
     * Gets a reference to the running Galil HCD from the location service, if found.
     */
   private def getGalilHcd: Future[Option[ComponentRef]] = {
-    locationService.find(connection).map(_.map(_.component))
+    locationService.resolve(connection, 30.seconds).map(_.map(_.component))
   }
 
   /**
