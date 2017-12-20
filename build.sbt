@@ -1,7 +1,6 @@
 import sbt.Keys._
 import sbt._
-
-import Dependencies._
+import Dependencies.{scalaTest, _}
 import Settings._
 
 // The Galil prototype HCD, implemented in Scala
@@ -26,7 +25,8 @@ lazy val `galil-client` = project
   .enablePlugins(DeployApp)
   .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
-    `csw-framework`
+    `csw-framework`,
+    scalaTest % Test
   ))
 
 // A Galil hardware simulator
@@ -52,6 +52,7 @@ lazy val `galil-io` = project
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`,
+    playJson,
     scalaTest % Test
   ))
 
