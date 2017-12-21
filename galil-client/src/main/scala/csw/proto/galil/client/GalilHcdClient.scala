@@ -1,7 +1,5 @@
 package csw.proto.galil.client
 
-import java.net.InetAddress
-
 import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.util.Timeout
@@ -19,32 +17,26 @@ import csw.services.logging.scaladsl.LoggingSystemFactory
 import scala.concurrent.Future
 import scala.concurrent.duration._
 
-// A client to test locating and communicating with the Galil HCD
-case class GalilHcdClient(prefix: Prefix, commandName: CommandName) {
+/**
+  * A client for locating and communicating with the Galil HCD
+  *
+  * @param source the client's prefix
+  * @param system optional ActorSystem (must be created by ClusterAwareSettings.system, pass in existing system, if you have one)
+  */
+case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSettings.system) {
 
-  private val system: ActorSystem = ClusterAwareSettings.system
   import system._
 
   implicit val timeout: Timeout = Timeout(3.seconds)
   implicit val scheduler: Scheduler = system.scheduler
   implicit def actorRefFactory: ActorRefFactory = system
+  implicit val mat: ActorMaterializer = ActorMaterializer()
 
   private val locationService = LocationServiceFactory.withSystem(system)
-  implicit val mat: ActorMaterializer = ActorMaterializer()
   private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
 
-  private val commandKey: Key[String] = KeyType.StringKey.make("command")
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
   private val countsKey: Key[Int] = KeyType.IntKey.make("counts")
-
-
-  /**
-    * Call this once at the start of the application to enable logging, if needed.
-    */
-  def init(): Unit = {
-    val host = InetAddress.getLocalHost.getHostName
-    LoggingSystemFactory.start("GalilHcdClient", "0.1", host, system)
-  }
 
   /**
     * Gets a reference to the running Galil HCD from the location service, if found.
@@ -59,8 +51,7 @@ case class GalilHcdClient(prefix: Prefix, commandName: CommandName) {
   def setRelTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
-        val setup = Setup(prefix, commandName, obsId)
-          .add(commandKey.set("setRelTarget"))
+        val setup = Setup(source, CommandName("setRelTarget"), obsId)
           .add(axisKey.set(axis))
           .add(countsKey.set(count))
 
@@ -77,8 +68,7 @@ case class GalilHcdClient(prefix: Prefix, commandName: CommandName) {
   def getRelTarget(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
-        val setup = Setup(prefix, commandName, obsId)
-          .add(commandKey.set("getRelTarget"))
+        val setup = Setup(source, CommandName("getRelTarget"), obsId)
           .add(axisKey.set(axis))
 
         hcd.submitAndSubscribe(setup)

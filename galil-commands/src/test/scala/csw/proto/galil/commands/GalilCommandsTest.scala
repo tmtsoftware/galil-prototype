@@ -24,16 +24,14 @@ class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
     val prefix = Prefix("wfos.blue.filter")
 
     val response1 = cmds.sendCommand(
-      Setup(prefix, CommandName("filter"), Some(obsId))
-        .add(DeviceCommands.commandKey.set("setRelTarget"))
+      Setup(prefix, CommandName("setRelTarget"), Some(obsId))
         .add(DeviceCommands.axisKey.set('A'))
         .add(DeviceCommands.countsKey.set(2)))
 
     assert(response1.isInstanceOf[Completed])
 
     val response2 = cmds.sendCommand(
-      Setup(prefix, CommandName("filter"), Some(obsId))
-        .add(DeviceCommands.commandKey.set("getRelTarget"))
+      Setup(prefix, CommandName("getRelTarget"), Some(obsId))
         .add(DeviceCommands.axisKey.set('A')))
 
     response2 match {

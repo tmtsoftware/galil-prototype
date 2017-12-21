@@ -7,7 +7,7 @@ import scala.collection.JavaConverters._
 import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 import csw.messages.params.models.{ObsId, Prefix, RunId}
-import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandKey, commandParamKeyMap, paramRegex}
+import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
 import scala.util.{Failure, Success, Try}
@@ -17,8 +17,6 @@ object CSWDeviceAdapter {
   private type CommandMap = Map[String, CommandMapEntry]
   private case class ParamDefEntry(name: String, typeStr: String, range: String, dataRegex: String)
   private type ParamDefMap = Map[String, ParamDefEntry]
-
-  val commandKey: Key[String] = KeyType.StringKey.make("command")
 
   //  // --- command parameter keys ---
 
@@ -65,10 +63,7 @@ class CSWDeviceAdapter(config: Config) {
   }.toMap
 
   def getCommandMapEntry(setup: Setup): Try[CommandMapEntry] = {
-    setup.get(commandKey) match {
-      case Some(cmd) => Success(cmdMap(cmd.head))
-      case None => Failure(new RuntimeException(s"Missing ${commandKey.keyName} parameter"))
-    }
+    Try(cmdMap(setup.commandName.name)) // TODO: FIXME: return Option
   }
 
   def validateSetup(setup: Setup, cmdEntry: CommandMapEntry): Try[String] = {

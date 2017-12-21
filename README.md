@@ -46,3 +46,8 @@ csw-cluster-seed --clusterPort 7777
 ```bash
 csw-config-server --initRepo
 ```
+
+Note: To configure galil-hcd to use an actual Galil device, run the `galil-hcd` command with options:
+```
+galil-hcd -Dgalil.host=myhost -Dgalil.port=23
+```

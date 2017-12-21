@@ -1,9 +1,12 @@
 package csw.proto.galil.client
 
-import csw.messages.ccs.commands.CommandName
+import java.net.InetAddress
+
+import akka.actor.ActorSystem
 import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult}
 import csw.messages.params.models.Prefix
-import csw.proto.galil.client.GalilHcdClientApp.{galilHcdClient, maybeObsId}
+import csw.services.location.commons.ClusterAwareSettings
+import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{FunSuite, Ignore}
 
 import scala.concurrent.Await
@@ -12,12 +15,13 @@ import scala.concurrent.duration._
 // Note: Test assumes that location service (csw-cluster-seed), galil-hcd and galil-simulator are running
 @Ignore
 class GalilClientTest extends FunSuite {
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), CommandName("filter"))
+  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"))
   private val maybeObsId = None
+  private val host = InetAddress.getLocalHost.getHostName
+  private val system: ActorSystem = ClusterAwareSettings.system
+  LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
 
   test("Test ") {
-    galilHcdClient.init()
-
     val resp1 = Await.result(galilHcdClient.setRelTarget(maybeObsId, 'A', 3), 3.seconds)
     println(s"setRelTarget: $resp1")
     assert(resp1.isInstanceOf[Completed])

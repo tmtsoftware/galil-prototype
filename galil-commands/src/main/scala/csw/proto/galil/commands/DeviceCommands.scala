@@ -23,12 +23,6 @@ object DeviceCommands {
     */
   type DeviceIo = String => String // TODO: Support multiple commands/responses?
 
-  // --- Setup parameter keys ---
-  /**
-    * The name of the command to send (pseudo-name from config file)
-    */
-  val commandKey: Key[String] = KeyType.StringKey.make("command")
-
 //  // --- command parameter keys ---
 
   val axisKey: Key[Char] = KeyType.CharKey.make("axis")
@@ -76,10 +70,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
 
 
   def sendCommand(setup: Setup): CommandResponse = {
-    setup.get(commandKey) match {
-      case Some(cmd) => handleCmd(setup, cmdMap(cmd.head))
-      case None => Error(setup.runId, s"Missing ${commandKey.keyName} parameter")
-    }
+    handleCmd(setup, cmdMap(setup.commandName.name))
   }
 
   private def handleCmd(setup: Setup, cmdEntry: CommandMapEntry): CommandResponse = {

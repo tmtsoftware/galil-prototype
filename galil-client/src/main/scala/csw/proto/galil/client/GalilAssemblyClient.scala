@@ -66,12 +66,10 @@ object GalilAssemblyClient extends App {
     import ctx.executionContext
     val maybeObsId = None
 
-    val commandKey: Key[String] = KeyType.StringKey.make("command")
     val axisKey: Key[Char] = KeyType.CharKey.make("axis")
     val countsKey: Key[Int] = KeyType.IntKey.make("counts")
 
-    val setup = Setup(Prefix("my.test.client"), CommandName("filter"), maybeObsId)
-      .add(commandKey.set("setRelTarget"))
+    val setup = Setup(Prefix("my.test.client"), CommandName("setRelTarget"), maybeObsId)
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
 
