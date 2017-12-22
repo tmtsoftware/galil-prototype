@@ -20,6 +20,7 @@ lazy val `galil-assembly` = project
   .settings(libraryDependencies ++= Seq(
     `csw-framework`
   ))
+  .dependsOn(`galil-commands`)
 
 // A Scala client application that talks to the Galil assembly
 lazy val `galil-client` = project
