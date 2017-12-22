@@ -10,17 +10,25 @@ import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.CommandResponseManagerMessage.{AddSubCommand, UpdateSubCommand}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
+import csw.messages.ccs.CommandIssue._
 import csw.messages.ccs.commands.CommandResponse.Error
-import csw.messages.ccs.commands.{CommandResponse, ComponentRef, ControlCommand, Setup}
+import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
+import csw.messages.location.ConnectionType.AkkaType
 import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.models.PubSub.PublisherMessage
+import csw.messages.params.generics.KeyType._
+import csw.messages.params.generics.{KeyType, Parameter, SimpleKeyType}
 import csw.messages.params.states.CurrentState
+import csw.proto.models.ComponentModels
+import csw.proto.models.ComponentModels.{AttributeModel, CommandModel, ReceiveCommandModel}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
 import scala.concurrent.duration._
 import scala.async.Async._
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Base trait for Galil Assembly domain messages
@@ -51,14 +59,50 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
-  private var galilHcd: Option[ComponentRef] = None
+  private val connectionsMap = mutable.HashMap[String, ComponentRef]() // TODO correct type?  Synchronization needed?
+  val receiveCommandModels = mutable.ListBuffer[ComponentModels.ReceiveCommandModel]()
+  val sendCommandModel = List[ComponentModels.SendCommandModel]()
+
+  receiveCommandModels += ReceiveCommandModel("SingleFilterMove", "Move a single filter", List[String](),
+    List("wheelNum", "target"),
+    List(
+      AttributeModel("wheelNum",
+        "Number of wheel to move",
+        Some("integer"), None,
+        "",
+        None, None,
+        Some("1"), Some("8"),
+        false, false,
+        "", "integer (1 ≤ x ≤ 8)"),
+      AttributeModel("target",
+        "Target location",
+        Some("integer"), None,
+        "",
+        None, None,
+        None, None,
+        false, false,
+        "", "integer")
+    )
+  )
+
+  val commandModel = CommandModel("csw", "GalilAssembly", "Prototype Assembly", receiveCommandModels.toList, sendCommandModel)
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
   }
 
   override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
-    CommandResponse.Accepted(controlCommand.runId)
+    if (isOnline) {
+      val matchingCommands = receiveCommandModels.filter(_.name == controlCommand.commandName.name).toList
+      if (matchingCommands.isEmpty) {
+        CommandResponse.Invalid(controlCommand.runId,
+          UnsupportedCommandIssue(s"Unknown command: ${controlCommand.commandName.name}"))
+      } else {
+        validateCommandWithModel(controlCommand, matchingCommands.head)
+      }
+    } else {
+      CommandResponse.Invalid(controlCommand.runId, RequiredAssemblyUnavailableIssue("Assembly is offline"))
+    }
   }
 
   override def onSubmit(controlCommand: ControlCommand): Unit = {
@@ -84,18 +128,113 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
+    // dependencies are tracked via a locations service subscription to when TLA starts up
+    // if there is an event, this is called.
     trackingEvent match {
-      case LocationUpdated(location) =>
-        galilHcd = Some(location.asInstanceOf[AkkaLocation].component)
-      case LocationRemoved(_) =>
-        galilHcd = None
+      case LocationUpdated(loc) => {
+        if (loc.connection.connectionType == AkkaType) {
+          connectionsMap += (trackingEvent.connection.name -> loc.asInstanceOf[AkkaLocation].component)
+          // TODO other types?
+        }
+      }
+      case LocationRemoved(connection) => {
+        if (connection.connectionType == AkkaType) {
+          connectionsMap -= trackingEvent.connection.name
+          // TODO other types?
+        }
+      }
     }
+  }
+
+  private def validateCommandWithModel(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
+    if (connectionsMap.contains("GalilHcd")) {
+      val params = controlCommand.paramSet
+
+      if (params.size < commandModel.requiredArgs.size) {
+        CommandResponse.Invalid(controlCommand.runId,
+          WrongNumberOfParametersIssue(s"Command requires ${commandModel.requiredArgs.size}, got ${params.size}"))
+      } else if (params.size > commandModel.args.size) {
+        CommandResponse.Invalid(controlCommand.runId,
+          WrongNumberOfParametersIssue(s"Maximum number of arguments for command is ${commandModel.args.size}, " +
+            s"got ${params.size}"))
+      } else {
+        for (arg <- commandModel.requiredArgs) {
+          if (!params.exists(_ == arg)) {
+            CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument $arg"))
+            // TODO
+          }
+        }
+        for (arg <- params) {
+          val argModels = commandModel.args.filter(_.name == arg.keyName)
+          if (argModels.isEmpty) {
+            CommandResponse.Invalid(controlCommand.runId, OtherIssue("Parameter not supported by command"))
+          } else {
+            val argModel = argModels.head
+            if (keyTypeToString(arg.keyType) != argModel.typeStr) {
+              CommandResponse.Invalid(controlCommand.runId,
+                WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
+            } else {
+              if (arg.units.getName != argModel.units) {
+                CommandResponse.Invalid(controlCommand.runId,
+                  WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model ${argModel.units}"))
+              } else {
+                if (!validateRange(arg, argModel)) {
+                  CommandResponse.Invalid(controlCommand.runId,
+                    ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
+                }
+              }
+            }
+          }
+        }
+
+      }
+    } else {
+      CommandResponse.Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
+    }
+    CommandResponse.Accepted(controlCommand.runId)
+  }
+  private def validateRange(value: Parameter[_], model: ComponentModels.AttributeModel): Boolean = {
+    // TODO
+    true
+  }
+  private def keyTypeToString(t: KeyType[_]): String = t match {
+    case RaDecKey     => "radec"
+    case StringKey    => "string"
+    case StructKey    => "struct"
+
+    case BooleanKey => "boolean"
+    case CharKey    => "char"
+
+    case ByteKey   => "byte"
+    case ShortKey  => "short"
+    case LongKey   => "long"
+    case IntKey    => "integer"
+    case FloatKey  => "float"
+    case DoubleKey => "double"
+
+      // TODO array and matrix types
+    case ByteArrayKey   => "array of byte"
+    case ShortArrayKey  => "array of short"
+    case LongArrayKey   => "array of long"
+    case IntArrayKey    => "array of integer"
+    case FloatArrayKey  => "array of float"
+    case DoubleArrayKey => "array of double"
+
+    case ByteMatrixKey   => "matrix of byte"
+    case ShortMatrixKey  => "matrix of short"
+    case LongMatrixKey   => "matrix of long"
+    case IntMatrixKey    => "matrix of integer"
+    case FloatMatrixKey  => "matrix of float"
+    case DoubleMatrixKey => "matrix of double"
+
+    case _  => ""
   }
 
   // For testing, forward command to HCD and complete this command when it completes
   private def forwardCommandToHcd(controlCommand: ControlCommand): Unit = {
     implicit val scheduler: Scheduler = ctx.system.scheduler
     implicit val timeout: Timeout = Timeout(3.seconds)
+    val galilHcd = connectionsMap.get("GalilHcd")
     galilHcd.foreach { hcd =>
       val setup = Setup(controlCommand.source, controlCommand.commandName, controlCommand.maybeObsId, controlCommand.paramSet)
       commandResponseManager ! AddSubCommand(controlCommand.runId, setup.runId)
