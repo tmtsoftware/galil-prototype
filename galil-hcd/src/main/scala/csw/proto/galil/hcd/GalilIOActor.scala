@@ -1,10 +1,12 @@
 package csw.proto.galil.hcd
 
+import java.io.IOException
+
 import akka.typed.{ActorRef, Behavior}
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
-import csw.proto.galil.io.GalilIoTcp
+import csw.proto.galil.io.{GalilIo, GalilIoTcp}
 import csw.services.logging.scaladsl.LoggerFactory
 
 object GalilIOActor {
@@ -20,7 +22,28 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
   extends Actor.MutableBehavior[GalilCommandMessage] {
 
   private val log = loggerFactory.getLogger
-  val galilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
+
+  private val galilIo = connectToGalil()
+  verifyGalil()
+
+  // Connect to Galikl device and throw error if that doesn't work
+  private def connectToGalil(): GalilIo = {
+    try {
+      GalilIoTcp(galilConfig.host, galilConfig.port)
+    } catch {
+      case ex: Exception =>
+        log.error(s"Failed to connect to Galil device at ${galilConfig.host}:${galilConfig.port}")
+        throw ex
+    }
+  }
+
+  // Check that there is a Galil device on the other end of the socket (Is there good Galil command to use here?)
+  private def verifyGalil(): Unit = {
+    val s = galilSend("")
+    if (s.nonEmpty)
+      throw new IOException(s"Unexpected response to empty galil command: '$s': " +
+        s"Check if Galil device is really located at ${galilConfig.host}:${galilConfig.port}")
+  }
 
   override def onMessage(msg: GalilCommandMessage): Behavior[GalilCommandMessage] = {
     msg match {
