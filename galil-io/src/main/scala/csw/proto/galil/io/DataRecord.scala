@@ -4,6 +4,7 @@ import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
 import csw.proto.galil.io.DataRecord._
+import play.api.libs.json.Json
 
 
 /**
@@ -43,6 +44,13 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 }
 
 object DataRecord {
+
+  // JSON support
+  implicit val headerJsonFormat = Json.format[Header]
+  implicit val generalStateJsonFormat = Json.format[GeneralState]
+  implicit val galilAxisStatusJsonFormat = Json.format[GalilAxisStatus]
+  implicit val dataRecordJsonFormat = Json.format[DataRecord]
+
 
   /**
     * Possible Galil Axis (may not all be present)
@@ -171,6 +179,7 @@ object DataRecord {
   }
 
   object GeneralState {
+
     /**
       * Initializes from the given ByteBuffer in the documented Galil data record format
       */
@@ -299,6 +308,7 @@ object DataRecord {
   }
 
   object GalilAxisStatus {
+
     /**
       * Initialzie from the given bytes
       */

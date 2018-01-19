@@ -130,7 +130,9 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
 
   private val socketAddress = new InetSocketAddress(InetAddress.getByName(host), port)
   private val socket = new Socket()
-  private val timeoutInMs = 10*1000;   // 10 seconds
+  private val timeoutInMs = 3*1000;   // 3 seconds
+
+  // XXX TODO: Error handling when there is no device available!
   socket.connect(socketAddress, timeoutInMs)
 
   override def write(sendBuf: Array[Byte]): Unit = {

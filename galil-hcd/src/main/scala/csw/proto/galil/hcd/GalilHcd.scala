@@ -162,6 +162,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
     val config = ctx.system.settings.config
     val host = if (config.hasPath("galil.host")) config.getString("galil.host") else "127.0.0.1"
     val port = if (config.hasPath("galil.port")) config.getInt("galil.port") else 8888
+    log.info(s"Galil host = $host, port = $port")
     GalilConfig(host, port)
   }
 
