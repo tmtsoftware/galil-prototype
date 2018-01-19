@@ -7,11 +7,11 @@ import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.messages.CommandResponseManagerMessage.{AddSubCommand, UpdateSubCommand}
+import csw.messages.CommandResponseManagerMessage.{AddOrUpdateCommand, AddSubCommand, UpdateSubCommand}
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
 import csw.messages.ccs.CommandIssue._
-import csw.messages.ccs.commands.CommandResponse.Error
+import csw.messages.ccs.commands.CommandResponse.{Completed, Error}
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.ConnectionType.AkkaType
@@ -60,8 +60,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
   private val connectionsMap = mutable.HashMap[String, ComponentRef]() // TODO correct type?  Synchronization needed?
-  val receiveCommandModels = mutable.ListBuffer[ComponentModels.ReceiveCommandModel]()
-  val sendCommandModel = List[ComponentModels.SendCommandModel]()
+  private val receiveCommandModels = mutable.ListBuffer[ComponentModels.ReceiveCommandModel]()
+  private val sendCommandModel = List[ComponentModels.SendCommandModel]()
 
   receiveCommandModels += ReceiveCommandModel("SingleFilterMove", "Move a single filter", List[String](),
     List("wheelNum", "target"),
@@ -107,7 +107,10 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   override def onSubmit(controlCommand: ControlCommand): Unit = {
     log.debug(s"onSubmit called: $controlCommand")
-    forwardCommandToHcd(controlCommand)
+    controlCommand.commandName.name match {
+      case "SingleFilterMove" => commandResponseManager ! AddOrUpdateCommand(controlCommand.runId, Completed(controlCommand.runId))
+      case _ => forwardCommandToHcd(controlCommand)
+    }
   }
 
   override def onOneway(controlCommand: ControlCommand): Unit = {
@@ -158,40 +161,45 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
           WrongNumberOfParametersIssue(s"Maximum number of arguments for command is ${commandModel.args.size}, " +
             s"got ${params.size}"))
       } else {
+/*
         for (arg <- commandModel.requiredArgs) {
-          if (!params.exists(_ == arg)) {
+          if (!params.exists(_.keyName == arg)) {
             CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument $arg"))
             // TODO
           }
         }
-        for (arg <- params) {
-          val argModels = commandModel.args.filter(_.name == arg.keyName)
-          if (argModels.isEmpty) {
-            CommandResponse.Invalid(controlCommand.runId, OtherIssue("Parameter not supported by command"))
-          } else {
-            val argModel = argModels.head
-            if (keyTypeToString(arg.keyType) != argModel.typeStr) {
-              CommandResponse.Invalid(controlCommand.runId,
-                WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
+        */
+        if (!params.exists(p => commandModel.requiredArgs.contains(p.keyName))) {
+          CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument"))
+        } else {
+          for (arg <- params) {
+            val argModels = commandModel.args.filter(_.name == arg.keyName)
+            if (argModels.isEmpty) {
+              return CommandResponse.Invalid(controlCommand.runId, OtherIssue("Parameter not supported by command"))
             } else {
-              if (arg.units.getName != argModel.units) {
-                CommandResponse.Invalid(controlCommand.runId,
-                  WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model ${argModel.units}"))
+              val argModel = argModels.head
+              if (keyTypeToString(arg.keyType) != argModel.typeStr) {
+                return CommandResponse.Invalid(controlCommand.runId,
+                  WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
               } else {
-                if (!validateRange(arg, argModel)) {
-                  CommandResponse.Invalid(controlCommand.runId,
-                    ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
+                if (arg.units.getName != argModel.units) {
+                  return CommandResponse.Invalid(controlCommand.runId,
+                    WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model ${argModel.units}"))
+                } else {
+                  if (!validateRange(arg, argModel)) {
+                    return CommandResponse.Invalid(controlCommand.runId,
+                      ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
+                  }
                 }
               }
             }
           }
         }
-
       }
+      CommandResponse.Accepted(controlCommand.runId)
     } else {
       CommandResponse.Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
     }
-    CommandResponse.Accepted(controlCommand.runId)
   }
   private def validateRange(value: Parameter[_], model: ComponentModels.AttributeModel): Boolean = {
     // TODO
