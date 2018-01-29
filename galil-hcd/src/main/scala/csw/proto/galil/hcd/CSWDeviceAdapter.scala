@@ -29,10 +29,14 @@ object CSWDeviceAdapter {
   val smoothKey: Key[Double] = KeyType.DoubleKey.make("smooth")
   val speedKey: Key[Int] = KeyType.IntKey.make("speed")
   val countsKey: Key[Int] = KeyType.IntKey.make("counts")
+  val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts");
+  val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus");
+  val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts");
+
 
   // Map key name to key
   private val commandParamKeys: List[Key[_]] = List(axisKey, eDescKey, mTypeKey, eCodeKey,
-    swStatusKey, lcParamKey, smoothKey, speedKey, countsKey)
+    swStatusKey, lcParamKey, smoothKey, speedKey, countsKey, interpCountsKey, brushlessModulusKey, voltsKey)
 
   private val commandParamKeyMap: Map[String, Key[_]] = commandParamKeys.map(k => k.keyName -> k).toMap
 

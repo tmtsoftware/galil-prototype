@@ -45,6 +45,8 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
     "PR" -> Map.empty,
     "RP" -> Map.empty,
     "SP" -> Map.empty,
+    "AF" -> Map.empty,
+    "BM" -> Map.empty,
   )
 
   connections.runForeach { conn =>
@@ -85,6 +87,9 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString, conn: IncomingConnection): ByteString = {
     val cmdString = cmd.utf8String
+    
+    println(cmdString);
+    
     if (cmdString == "QR") {
         ByteString(getDataRecord.toByteBuffer)
     } else {
@@ -100,6 +105,10 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
           case "NO" => formatReply(None) // no-op
           case "SH" => formatReply(None)
           case "ST" => formatReply(None)
+          case "BA" => formatReply(None)
+          case "BZ" => formatReply(None)
+          case "HM" => formatReply(None)
+          case "FI" => formatReply(None)
           case "TC" => formatReply(tcCmd(cmdString))
           case "TH" => formatReply(thCmd(conn))
           case "TS" => formatReply(None)
