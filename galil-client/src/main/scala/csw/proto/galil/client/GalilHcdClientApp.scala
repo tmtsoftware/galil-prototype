@@ -23,5 +23,39 @@ object GalilHcdClientApp extends App {
   println(s"setRelTarget: $resp1")
   val resp2 = Await.result(galilHcdClient.getRelTarget(maybeObsId, 'A'), 3.seconds)
   println(s"getRelTarget: $resp2")
+  
+  
+  val resp3 = Await.result(galilHcdClient.setBrushlessAxis(maybeObsId, 'A'), 3.seconds)
+  println(s"setBrushlessAxis: $resp3")  
+  
+  
+  val resp4 = Await.result(galilHcdClient.setAnalogFeedbackSelect(maybeObsId, 'A', 6), 3.seconds)
+  println(s"setAnalogFeedbackSelect: $resp4")  
+ 
+  val resp5 = Await.result(galilHcdClient.setBrushlessModulus(maybeObsId, 'A', 52000), 3.seconds)
+  println(s"setBrushlessModulus: $resp5")  
+ 
+  val resp6 = Await.result(galilHcdClient.brushlessZero(maybeObsId, 'A', 1.0), 3.seconds)
+  println(s"brushlessZero: $resp6")  
+ 
+  val resp7= Await.result(galilHcdClient.motorOn(maybeObsId, 'A'), 3.seconds)
+  println(s"motorOn: $resp7")  
+  
+  val resp8= Await.result(galilHcdClient.motorOff(maybeObsId, 'A'), 3.seconds)
+  println(s"motorOff: $resp8")  
+ 
+  val resp9= Await.result(galilHcdClient.setHomingMode(maybeObsId, 'A'), 3.seconds)
+  println(s"setHomingMode: $resp9")  
+
+  val resp10= Await.result(galilHcdClient.beginMotion(maybeObsId, 'A'), 3.seconds)
+  println(s"beginMotion: $resp10")  
+
+  val resp11= Await.result(galilHcdClient.setJogSpeed(maybeObsId, 'A', 166), 3.seconds)
+  println(s"setJogSpeed: $resp11")  
+
+  val resp12= Await.result(galilHcdClient.setFindIndexMode(maybeObsId, 'A'), 3.seconds)
+  println(s"setFindIndexMode: $resp11")  
+  
+   
 }
 
