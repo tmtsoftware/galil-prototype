@@ -163,62 +163,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     }
   }
 
-  private def validateCommandWithModelOrig(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
-    if (connectionsMap.contains("GalilHcd-hcd-akka")) {
-      val params = controlCommand.paramSet
-
-      if (params.size < commandModel.requiredArgs.size) {
-        Invalid(controlCommand.runId,
-          WrongNumberOfParametersIssue(s"Command requires ${commandModel.requiredArgs.size}, got ${params.size}"))
-      } else if (params.size > commandModel.args.size) {
-        Invalid(controlCommand.runId,
-          WrongNumberOfParametersIssue(s"Maximum number of arguments for command is ${commandModel.args.size}, " +
-            s"got ${params.size}"))
-      } else {
-        /*
-                for (arg <- commandModel.requiredArgs) {
-                  if (!params.exists(_.keyName == arg)) {
-                    CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument $arg"))
-                    // TODO
-                  }
-                }
-                */
-        if (!commandModel.requiredArgs.forall(p => params.map(_.keyName).contains(p))) {
-          //        if (!params.exists(p => commandModel.requiredArgs.contains(p.keyName))) {
-          Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument"))
-        } else {
-
-          for (arg <- params) {
-            val argModels = commandModel.args.filter(_.name == arg.keyName)
-            if (argModels.isEmpty) {
-              return Invalid(controlCommand.runId, OtherIssue(s"Parameter ${arg.keyName} not supported by command ${controlCommand.commandName.name}"))
-            } else {
-              val argModel = argModels.head
-              if (keyTypeToString(arg.keyType) != argModel.typeStr.takeWhile(_ != ' ')) {
-                return Invalid(controlCommand.runId,
-                  WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
-              } else {
-                if (arg.units.getName != s"[${argModel.units}]") {
-                  return Invalid(controlCommand.runId,
-                    WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model s[${argModel.units}]"))
-                } else {
-                  if (!validateRange(arg, argModel)) {
-                    return Invalid(controlCommand.runId,
-                      ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
-                  }
-                }
-              }
-            }
-          }
-          Accepted(controlCommand.runId)
-        }
-      }
-    } else {
-      Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
-    }
-  }
-
-
   private def validateCommandWithModel(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
     if (connectionsMap.contains("GalilHcd-hcd-akka")) {
       val params = controlCommand.paramSet
