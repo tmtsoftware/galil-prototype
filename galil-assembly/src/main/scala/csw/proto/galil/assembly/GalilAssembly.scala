@@ -72,7 +72,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
         "none",
         None, None,
         Some("1"), Some("8"),
-        false, false,
+        exclusiveMinimum = false, exclusiveMaximum = false,
         "", "integer (1 ≤ x ≤ 8)"),
       AttributeModel("target",
         "Target location",
@@ -80,7 +80,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
         "ct",
         None, None,
         None, None,
-        false, false,
+        exclusiveMinimum = false, exclusiveMaximum = false,
         "", "integer"),
       AttributeModel("speed",
         "Move Speed",
@@ -88,7 +88,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
         "ms",   // For now, until speed units are added
         None, None,
         None, None,
-        false, false,
+        exclusiveMinimum = false, exclusiveMaximum = false,
         "", "double")
     )
   )
@@ -150,18 +150,16 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     // dependencies are tracked via a locations service subscription to when TLA starts up
     // if there is an event, this is called.
     trackingEvent match {
-      case LocationUpdated(loc) => {
+      case LocationUpdated(loc) =>
         if (loc.connection.connectionType == AkkaType) {
           connectionsMap += (trackingEvent.connection.name -> loc.asInstanceOf[AkkaLocation].component)
           // TODO other types?
         }
-      }
-      case LocationRemoved(connection) => {
+      case LocationRemoved(connection) =>
         if (connection.connectionType == AkkaType) {
           connectionsMap -= trackingEvent.connection.name
           // TODO other types?
         }
-      }
     }
   }
 
