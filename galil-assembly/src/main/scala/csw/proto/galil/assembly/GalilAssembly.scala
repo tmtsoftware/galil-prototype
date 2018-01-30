@@ -11,25 +11,25 @@ import csw.messages.CommandResponseManagerMessage.{AddOrUpdateCommand, AddSubCom
 import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
 import csw.messages.ccs.CommandIssue._
-import csw.messages.ccs.commands.CommandResponse.{Completed, Error}
+import csw.messages.ccs.commands.CommandResponse._
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
+import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location.ConnectionType.AkkaType
-import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.messages.location._
 import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.generics.KeyType._
-import csw.messages.params.generics.{KeyType, Parameter, SimpleKeyType}
+import csw.messages.params.generics.{KeyType, Parameter}
 import csw.messages.params.states.CurrentState
 import csw.proto.models.ComponentModels
 import csw.proto.models.ComponentModels.{AttributeModel, CommandModel, ReceiveCommandModel}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
-import scala.concurrent.duration._
 import scala.async.Async._
 import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
-import scala.concurrent.{ExecutionContextExecutor, Future}
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContextExecutor, Future}
 
 // Base trait for Galil Assembly domain messages
 sealed trait GalilAssemblyDomainMessage extends DomainMessage
@@ -69,7 +69,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
       AttributeModel("wheelNum",
         "Number of wheel to move",
         Some("integer"), None,
-        "",
+        "none",
         None, None,
         Some("1"), Some("8"),
         false, false,
@@ -77,31 +77,47 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
       AttributeModel("target",
         "Target location",
         Some("integer"), None,
-        "",
+        "ct",
         None, None,
         None, None,
         false, false,
-        "", "integer")
+        "", "integer"),
+      AttributeModel("speed",
+        "Move Speed",
+        Some("double"), None,
+        "ms",   // For now, until speed units are added
+        None, None,
+        None, None,
+        false, false,
+        "", "double")
     )
   )
 
-  val commandModel = CommandModel("csw", "GalilAssembly", "Prototype Assembly", receiveCommandModels.toList, sendCommandModel)
+  val componentCommandModel = CommandModel("csw", "GalilAssembly", "Prototype Assembly", receiveCommandModels.toList, sendCommandModel)
 
-  override def initialize(): Future[Unit] = async {
+  override def initialize(): Future[Unit] = {
     log.debug("Initialize called")
+    // resolve references to dependencies
+    componentInfo.connections.foreach {
+      case connection: AkkaConnection =>
+        val location = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds)
+        location.foreach(l => connectionsMap += (connection.name -> l.component))
+      case _ => // TODO
+    }
+    Future.unit
   }
 
   override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
     if (isOnline) {
       val matchingCommands = receiveCommandModels.filter(_.name == controlCommand.commandName.name).toList
       if (matchingCommands.isEmpty) {
-        CommandResponse.Invalid(controlCommand.runId,
+        Invalid(controlCommand.runId,
           UnsupportedCommandIssue(s"Unknown command: ${controlCommand.commandName.name}"))
       } else {
         validateCommandWithModel(controlCommand, matchingCommands.head)
       }
     } else {
-      CommandResponse.Invalid(controlCommand.runId, RequiredAssemblyUnavailableIssue("Assembly is offline"))
+      Invalid(controlCommand.runId, RequiredAssemblyUnavailableIssue("Assembly is offline"))
     }
   }
 
@@ -149,58 +165,126 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     }
   }
 
-  private def validateCommandWithModel(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
-    if (connectionsMap.contains("GalilHcd")) {
+  private def validateCommandWithModelOrig(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
+    if (connectionsMap.contains("GalilHcd-hcd-akka")) {
       val params = controlCommand.paramSet
 
       if (params.size < commandModel.requiredArgs.size) {
-        CommandResponse.Invalid(controlCommand.runId,
+        Invalid(controlCommand.runId,
           WrongNumberOfParametersIssue(s"Command requires ${commandModel.requiredArgs.size}, got ${params.size}"))
       } else if (params.size > commandModel.args.size) {
-        CommandResponse.Invalid(controlCommand.runId,
+        Invalid(controlCommand.runId,
           WrongNumberOfParametersIssue(s"Maximum number of arguments for command is ${commandModel.args.size}, " +
             s"got ${params.size}"))
       } else {
-/*
-        for (arg <- commandModel.requiredArgs) {
-          if (!params.exists(_.keyName == arg)) {
-            CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument $arg"))
-            // TODO
-          }
-        }
-        */
-        if (!params.exists(p => commandModel.requiredArgs.contains(p.keyName))) {
-          CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument"))
+        /*
+                for (arg <- commandModel.requiredArgs) {
+                  if (!params.exists(_.keyName == arg)) {
+                    CommandResponse.Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument $arg"))
+                    // TODO
+                  }
+                }
+                */
+        if (!commandModel.requiredArgs.forall(p => params.map(_.keyName).contains(p))) {
+          //        if (!params.exists(p => commandModel.requiredArgs.contains(p.keyName))) {
+          Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument"))
         } else {
+
           for (arg <- params) {
             val argModels = commandModel.args.filter(_.name == arg.keyName)
             if (argModels.isEmpty) {
-              return CommandResponse.Invalid(controlCommand.runId, OtherIssue("Parameter not supported by command"))
+              return Invalid(controlCommand.runId, OtherIssue(s"Parameter ${arg.keyName} not supported by command ${controlCommand.commandName.name}"))
             } else {
               val argModel = argModels.head
-              if (keyTypeToString(arg.keyType) != argModel.typeStr) {
-                return CommandResponse.Invalid(controlCommand.runId,
+              if (keyTypeToString(arg.keyType) != argModel.typeStr.takeWhile(_ != ' ')) {
+                return Invalid(controlCommand.runId,
                   WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
               } else {
-                if (arg.units.getName != argModel.units) {
-                  return CommandResponse.Invalid(controlCommand.runId,
-                    WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model ${argModel.units}"))
+                if (arg.units.getName != s"[${argModel.units}]") {
+                  return Invalid(controlCommand.runId,
+                    WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model s[${argModel.units}]"))
                 } else {
                   if (!validateRange(arg, argModel)) {
-                    return CommandResponse.Invalid(controlCommand.runId,
+                    return Invalid(controlCommand.runId,
                       ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
                   }
                 }
               }
             }
           }
+          Accepted(controlCommand.runId)
         }
       }
-      CommandResponse.Accepted(controlCommand.runId)
     } else {
-      CommandResponse.Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
+      Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
     }
   }
+
+
+  private def validateCommandWithModel(controlCommand: ControlCommand, commandModel: ReceiveCommandModel): CommandResponse = {
+    if (connectionsMap.contains("GalilHcd-hcd-akka")) {
+      val params = controlCommand.paramSet
+
+      if (params.size < commandModel.requiredArgs.size) {
+        Invalid(controlCommand.runId,
+          WrongNumberOfParametersIssue(s"Command requires ${commandModel.requiredArgs.size}, got ${params.size}"))
+      } else if (params.size > commandModel.args.size) {
+        Invalid(controlCommand.runId,
+          WrongNumberOfParametersIssue(s"Maximum number of arguments for command is ${commandModel.args.size}, " +
+            s"got ${params.size}"))
+      } else {
+        if (!commandModel.requiredArgs.forall(p => params.map(_.keyName).contains(p))) {
+          Invalid(controlCommand.runId, MissingKeyIssue(s"Missing required argument"))  // TODO ideally this gives more info
+        } else {
+          validateParameterList(params, controlCommand, commandModel)
+        }
+      }
+    } else {
+      Invalid(controlCommand.runId, RequiredHCDUnavailableIssue("Hcd(s) not found"))
+    }
+  }
+
+  // recursive method for checking argument list
+  private def validateParameterList(params: Set[Parameter[_]], command: ControlCommand, model: ReceiveCommandModel): CommandResponse = {
+    validateParameter(params.head, command, model) match {
+      case a:Accepted =>
+        if (params.tail.isEmpty) {
+          a
+        } else {
+          validateParameterList(params.tail, command, model)
+        }
+      case x => x
+    }
+
+  }
+
+  // method for validating individual parameter
+  private def validateParameter(arg: Parameter[_], command: ControlCommand, model: ReceiveCommandModel): CommandResponse = {
+    val argModels = model.args.filter(_.name == arg.keyName)
+    if (argModels.isEmpty) {
+      Invalid(command.runId, OtherIssue(s"Parameter ${arg.keyName} not supported by command ${command.commandName.name}"))
+    } else {
+
+      val argModel = argModels.head
+      if (keyTypeToString(arg.keyType) != argModel.typeStr.takeWhile(_ != ' ')) {
+        Invalid(command.runId,
+          WrongParameterTypeIssue(s"Type ${keyTypeToString(arg.keyType)} does not match model ${argModel.typeStr}"))
+      } else {
+        if (arg.units.getName != s"[${argModel.units}]") {
+          Invalid(command.runId,
+            WrongUnitsIssue(s"Units passed in ${arg.units.getName} does not match model s[${argModel.units}]"))
+        } else {
+          if (!validateRange(arg, argModel)) {
+            Invalid(command.runId, ParameterValueOutOfRangeIssue(s"Parameter value ${arg.items.head} out of range: ${argModel.typeStr}"))
+          } else {
+            Accepted(command.runId)
+          }
+        }
+      }
+    }
+  }
+
+
   private def validateRange(value: Parameter[_], model: ComponentModels.AttributeModel): Boolean = {
     // TODO
     true
