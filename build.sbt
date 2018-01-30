@@ -21,6 +21,7 @@ lazy val `galil-assembly` = project
     scalaTest % Test
   ))
   .dependsOn(`galil-commands`)
+  .dependsOn(`galil-hcd`)
 
 // A Scala client application that talks to the Galil assembly
 lazy val `galil-client` = project
