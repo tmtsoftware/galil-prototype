@@ -9,7 +9,7 @@ import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.{Key, KeyType}
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
@@ -37,9 +37,9 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
 
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
   private val countsKey: Key[Int] = KeyType.IntKey.make("counts")
-  private val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts");
-  private val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus");
-  private val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts");
+  private val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
+  private val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus")
+  private val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
   private val speedKey: Key[Int] = KeyType.IntKey.make("speed")
   
   /**
@@ -62,7 +62,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -78,7 +78,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
   
@@ -95,7 +95,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -111,7 +111,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -128,7 +128,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
  
@@ -145,7 +145,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -162,7 +162,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -178,7 +178,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -194,7 +194,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -210,7 +210,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -226,7 +226,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -243,7 +243,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
@@ -259,7 +259,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
         hcd.submitAndSubscribe(setup)
 
       case None =>
-        Future.successful(Error(RunId(), "Can't locate Galil HCD"))
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 

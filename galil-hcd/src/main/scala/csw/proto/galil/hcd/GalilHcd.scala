@@ -13,7 +13,7 @@ import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.models.PubSub.PublisherMessage
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.params.models.{ObsId, Prefix, Id}
 import csw.messages.params.states.CurrentState
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
@@ -34,7 +34,7 @@ object GalilCommandMessage {
 
   case class GalilCommand(commandString: String) extends GalilCommandMessage
 
-  case class GalilRequest(commandString: String, prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId],
+  case class GalilRequest(commandString: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
                            cmdMapEntry: CommandMapEntry) extends GalilCommandMessage
 
 }
@@ -43,7 +43,7 @@ sealed trait GalilResponseMessage extends GalilHcdDomainMessage
 
 object GalilResponseMessage {
 
-  case class GalilResponse(response: String, prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId],
+  case class GalilResponse(response: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
                            cmdMapEntry: CommandMapEntry) extends GalilResponseMessage
 
 }
