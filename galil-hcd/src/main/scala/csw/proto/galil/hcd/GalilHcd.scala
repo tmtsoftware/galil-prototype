@@ -75,7 +75,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
   private[this] val config = ConfigFactory.load("GalilCommands.conf")
   private val adapter = new CSWDeviceAdapter(config)
 
-  private var galilHardwareActor: ActorRef[GalilCommandMessage] = _
+  private var galilHardwareActor: ActorRef[GalilCommandMessage] = _   // constructed in initialize()
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -136,7 +136,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
             galilHardwareActor ! GalilRequest(cmdString.get, setup.source, setup.runId, setup.maybeObsId, cmdMapEntry.get)
           }
         }
-      case _ =>
+      case _ =>  // Only Setups handled
     }
   }
 
@@ -151,7 +151,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
             galilHardwareActor ! GalilCommand(cmdString.get)
           }
         }
-      case _ =>
+      case _ => // Only Setups handled
     }
   }
 
