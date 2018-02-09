@@ -21,7 +21,9 @@ import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-// A client to test locating and communicating with the Galil assembly
+/**
+  * A client to test locating and communicating with the Galil assembly
+  */
 object GalilAssemblyClient extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system

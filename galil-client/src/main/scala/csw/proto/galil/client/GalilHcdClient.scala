@@ -10,8 +10,7 @@ import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.{Key, KeyType}
 import csw.messages.params.models.{Id, ObsId, Prefix}
-import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.{LocationService, LocationServiceFactory}
+import csw.services.location.scaladsl.LocationService
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -20,7 +19,8 @@ import scala.concurrent.duration._
   * A client for locating and communicating with the Galil HCD
   *
   * @param source the client's prefix
-  * @param system optional ActorSystem (must be created by ClusterAwareSettings.system, pass in existing system, if you have one)
+  * @param system ActorSystem (must be created by ClusterAwareSettings.system - should be one per application)
+  * @param locationService a reference to the location service created with LocationServiceFactory.withSystem(system)
   */
 case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: LocationService) {
 

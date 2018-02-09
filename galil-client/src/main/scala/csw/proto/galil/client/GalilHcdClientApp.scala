@@ -11,7 +11,9 @@ import csw.services.logging.scaladsl.LoggingSystemFactory
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-// A client to test locating and communicating with the Galil HCD
+/**
+  * A demo client to test locating and communicating with the Galil HCD
+  */
 object GalilHcdClientApp extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
