@@ -11,8 +11,7 @@ import csw.messages.location._
 import csw.messages.params.generics.{Key, KeyType}
 import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
+import csw.services.location.scaladsl.{LocationService, LocationServiceFactory}
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -23,7 +22,7 @@ import scala.concurrent.duration._
   * @param source the client's prefix
   * @param system optional ActorSystem (must be created by ClusterAwareSettings.system, pass in existing system, if you have one)
   */
-case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSettings.system) {
+case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: LocationService) {
 
   import system._
 
@@ -32,7 +31,6 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem = ClusterAwareSett
   implicit def actorRefFactory: ActorRefFactory = system
   implicit val mat: ActorMaterializer = ActorMaterializer()
 
-  private val locationService = LocationServiceFactory.withSystem(system)
   private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
 
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
