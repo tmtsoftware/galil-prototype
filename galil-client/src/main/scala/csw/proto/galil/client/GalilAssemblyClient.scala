@@ -50,7 +50,7 @@ object GalilAssemblyClient extends App {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].component)
+          interact(ctx, new ComponentRef(loc.asInstanceOf[AkkaLocation])(ctx.system))
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
