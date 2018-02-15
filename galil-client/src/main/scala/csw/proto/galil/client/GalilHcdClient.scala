@@ -5,7 +5,7 @@ import akka.stream.ActorMaterializer
 import akka.typed
 import akka.util.Timeout
 import csw.messages.ccs.commands.CommandResponse.Error
-import csw.messages.ccs.commands.{CommandName, CommandResponse, ComponentRef, Setup}
+import csw.messages.ccs.commands.{CommandName, CommandResponse, Setup}
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -16,6 +16,7 @@ import csw.services.location.scaladsl.LocationService
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import akka.typed.scaladsl.adapter._
+import csw.services.ccs.scaladsl.CommandService
 
 /**
   * A client for locating and communicating with the Galil HCD
@@ -45,9 +46,9 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: 
   /**
     * Gets a reference to the running Galil HCD from the location service, if found.
     */
-  private def getGalilHcd: Future[Option[ComponentRef]] = {
+  private def getGalilHcd: Future[Option[CommandService]] = {
     implicit val sys: typed.ActorSystem[Nothing] = system.toTyped
-    locationService.resolve(connection, 30.seconds).map(_.map(new ComponentRef(_)))
+    locationService.resolve(connection, 30.seconds).map(_.map(new CommandService(_)))
   }
 
   /**

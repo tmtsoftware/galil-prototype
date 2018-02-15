@@ -10,11 +10,12 @@ import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.CommandResponseManagerMessage.{AddSubCommand, UpdateSubCommand}
 import csw.messages._
 import csw.messages.ccs.commands.CommandResponse.Error
-import csw.messages.ccs.commands.{CommandResponse, ComponentRef, ControlCommand, Setup}
+import csw.messages.ccs.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.states.CurrentState
+import csw.services.ccs.scaladsl.CommandService
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -47,7 +48,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
-  private var galilHcd: Option[ComponentRef] = None
+  private var galilHcd: Option[CommandService] = None
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -78,7 +79,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
     trackingEvent match {
       case LocationUpdated(location) =>
-        galilHcd = Some(new ComponentRef(location.asInstanceOf[AkkaLocation])(ctx.system))
+        galilHcd = Some(new CommandService(location.asInstanceOf[AkkaLocation])(ctx.system))
       case LocationRemoved(_) =>
         galilHcd = None
     }
