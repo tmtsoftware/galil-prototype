@@ -4,15 +4,13 @@ import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
 import csw.messages._
 import csw.messages.ccs.CommandIssue
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
-import csw.messages.models.PubSub.PublisherMessage
-import csw.messages.params.models.{ObsId, Prefix, Id}
-import csw.messages.params.states.CurrentState
+import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.services.location.scaladsl.LocationService
@@ -47,21 +45,21 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(ctx: ActorContext[TopLevelActorMessage],
                         componentInfo: ComponentInfo,
                         commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                        pubSubRef: ActorRef[PublisherMessage[CurrentState]],
+                        currentStatePublisher: CurrentStatePublisher,
                         locationService: LocationService,
                         loggerFactory: LoggerFactory
                        ): ComponentHandlers =
-    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService, loggerFactory)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, loggerFactory)
 }
 
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                componentInfo: ComponentInfo,
                                commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                               pubSubRef: ActorRef[PublisherMessage[CurrentState]],
+                               currentStatePublisher: CurrentStatePublisher,
                                locationService: LocationService,
                                loggerFactory: LoggerFactory)
-  extends ComponentHandlers(ctx, componentInfo, commandResponseManager, pubSubRef,
+  extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
     locationService, loggerFactory) {
 
   private val log = loggerFactory.getLogger
