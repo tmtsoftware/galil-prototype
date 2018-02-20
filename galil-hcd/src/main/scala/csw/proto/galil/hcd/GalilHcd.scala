@@ -13,6 +13,7 @@ import csw.messages.location.TrackingEvent
 import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
+import csw.services.ccs.scaladsl.CommandResponseManager
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -44,7 +45,7 @@ object GalilResponseMessage {
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(ctx: ActorContext[TopLevelActorMessage],
                         componentInfo: ComponentInfo,
-                        commandResponseManager: ActorRef[CommandResponseManagerMessage],
+                        commandResponseManager: CommandResponseManager,
                         currentStatePublisher: CurrentStatePublisher,
                         locationService: LocationService,
                         loggerFactory: LoggerFactory
@@ -55,7 +56,7 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                componentInfo: ComponentInfo,
-                               commandResponseManager: ActorRef[CommandResponseManagerMessage],
+                               commandResponseManager: CommandResponseManager,
                                currentStatePublisher: CurrentStatePublisher,
                                locationService: LocationService,
                                loggerFactory: LoggerFactory)

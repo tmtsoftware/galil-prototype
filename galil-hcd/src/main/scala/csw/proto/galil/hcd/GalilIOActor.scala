@@ -2,25 +2,23 @@ package csw.proto.galil.hcd
 
 import java.io.IOException
 
-import akka.typed.{ActorRef, Behavior}
+import akka.typed.Behavior
 import akka.typed.scaladsl.{Actor, ActorContext}
-import com.typesafe.config.ConfigFactory
-import csw.messages.CommandResponseManagerMessage
-import csw.messages.CommandResponseManagerMessage.AddOrUpdateCommand
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.{GalilIo, GalilIoTcp}
+import csw.services.ccs.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
 
 object GalilIOActor {
-  def behavior(galilConfig: GalilConfig, commandResponseManager: ActorRef[CommandResponseManagerMessage],
+  def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
                adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
     Actor.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
 }
 
 case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                         galilConfig: GalilConfig,
-                        commandResponseManager: ActorRef[CommandResponseManagerMessage],
+                        commandResponseManager: CommandResponseManager,
                         adapter: CSWDeviceAdapter,
                         loggerFactory: LoggerFactory)
   extends Actor.MutableBehavior[GalilCommandMessage] {
@@ -76,7 +74,7 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
     galilResponseMessage match {
       case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
         val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
-        commandResponseManager ! AddOrUpdateCommand(returnResponse.runId, returnResponse)
+        commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
     }
   }
 
