@@ -1,30 +1,27 @@
 package csw.proto.galil.assembly
 
 import akka.actor.Scheduler
+import akka.typed.ActorSystem
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.messages.CommandResponseManagerMessage.{AddOrUpdateCommand, AddSubCommand, UpdateSubCommand}
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
 import csw.messages._
-import csw.messages.ccs.commands.CommandResponse.Error
-import csw.messages.ccs.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.ccs.CommandIssue._
-import csw.messages.ccs.commands.CommandResponse._
-import csw.messages.ccs.commands._
+import csw.messages.ccs.commands.CommandResponse.{Error, _}
+import csw.messages.ccs.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.framework.ComponentInfo
-import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location.ConnectionType.AkkaType
+import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.params.generics.KeyType._
 import csw.messages.params.generics.{KeyType, Parameter}
 import csw.proto.models.ComponentModels
 import csw.proto.models.ComponentModels.{AttributeModel, CommandModel, ReceiveCommandModel}
+import csw.services.ccs.scaladsl.{CommandResponseManager, CommandService}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
-import csw.services.ccs.scaladsl.{CommandResponseManager, CommandService}
-
 
 import scala.async.Async._
 import scala.collection.mutable
@@ -55,8 +52,9 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     locationService, loggerFactory) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
+  implicit val actorSystem: ActorSystem[_] = ctx.system
   private val log = loggerFactory.getLogger
-  private val connectionsMap = mutable.HashMap[String, ComponentRef]() // TODO correct type?  Synchronization needed?
+  private val connectionsMap = mutable.HashMap[String, CommandService]() // TODO correct type?  Synchronization needed?
   private val receiveCommandModels = mutable.ListBuffer[ComponentModels.ReceiveCommandModel]()
   private val sendCommandModel = List[ComponentModels.SendCommandModel]()
 
@@ -98,7 +96,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     componentInfo.connections.foreach {
       case connection: AkkaConnection =>
         val location = Await.result(locationService.resolve(connection, 10.seconds), 10.seconds)
-        location.foreach(l => connectionsMap += (connection.name -> l.component))
+        location.foreach(l => connectionsMap += (connection.name -> new CommandService(l)))
       case _ => // TODO
     }
     Future.unit
@@ -121,7 +119,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   override def onSubmit(controlCommand: ControlCommand): Unit = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand.commandName.name match {
-      case "SingleFilterMove" => commandResponseManager ! AddOrUpdateCommand(controlCommand.runId, Completed(controlCommand.runId))
+      case "SingleFilterMove" => commandResponseManager.addOrUpdateCommand(controlCommand.runId, Completed(controlCommand.runId))
       case _ => forwardCommandToHcd(controlCommand)
     }
   }
@@ -145,7 +143,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     trackingEvent match {
       case LocationUpdated(loc) =>
         if (loc.connection.connectionType == AkkaType) {
-          connectionsMap += (trackingEvent.connection.name -> loc.asInstanceOf[AkkaLocation].component)
+          connectionsMap += (trackingEvent.connection.name -> new CommandService(loc.asInstanceOf[AkkaLocation]))
           // TODO other types?
         }
       case LocationRemoved(connection) =>
