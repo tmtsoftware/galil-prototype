@@ -13,11 +13,12 @@ import com.typesafe.config.ConfigFactory
 import csw.framework.internal.wiring.{Container, FrameworkWiring}
 import csw.messages.ccs.CommandIssue._
 import csw.messages.ccs.commands.CommandResponse.{Accepted, Completed, Invalid}
-import csw.messages.ccs.commands.{CommandName, ComponentRef, Setup}
+import csw.messages.ccs.commands.{CommandName, Setup}
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location.{ComponentId, ComponentType}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 import csw.messages.params.models.{Prefix, Units}
+import csw.services.ccs.scaladsl.CommandService
 import csw.services.location.commons.ClusterSettings
 import csw.services.location.scaladsl.{LocationService, LocationServiceFactory}
 import csw.services.logging.scaladsl.LoggingSystemFactory
@@ -49,7 +50,7 @@ class GalilAssemblyHandlersTest extends org.scalatest.FunSuite with Matchers wit
 
   // resolve assembly running in jvm-3 and send setup command expecting immediate command completion response
   private val assemblyLocF = locationService.resolve(AkkaConnection(ComponentId("GalilAssembly", ComponentType.Assembly)), 5.seconds)
-  private val assemblyComponent: ComponentRef = Await.result(assemblyLocF, 5.seconds).map(_.component).get
+  private val assemblyComponent: CommandService = Await.result(assemblyLocF, 5.seconds).map(new CommandService(_)).get
 
   test("should validate proper SingleFilterMove command") {
 
