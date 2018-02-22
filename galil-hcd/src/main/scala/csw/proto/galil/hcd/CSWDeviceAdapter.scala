@@ -6,7 +6,7 @@ import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult
 import scala.collection.JavaConverters._
 import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models.{ObsId, Prefix, RunId}
+import csw.messages.params.models.{ObsId, Prefix, Id}
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
@@ -104,7 +104,7 @@ class CSWDeviceAdapter(config: Config) {
   }
 
   // Parses and returns the command's response
-  def makeResponse(prefix: Prefix, runId: RunId, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
+  def makeResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
       Completed(runId)
     } else {

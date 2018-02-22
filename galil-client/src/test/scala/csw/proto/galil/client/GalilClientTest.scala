@@ -5,7 +5,9 @@ import java.net.InetAddress
 import akka.actor.ActorSystem
 import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult}
 import csw.messages.params.models.Prefix
+import csw.proto.galil.client.GalilHcdClientApp.system
 import csw.services.location.commons.ClusterAwareSettings
+import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{FunSuite, Ignore}
 
@@ -15,10 +17,11 @@ import scala.concurrent.duration._
 // Note: Test assumes that location service (csw-cluster-seed), galil-hcd and galil-simulator are running
 @Ignore
 class GalilClientTest extends FunSuite {
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"))
+  private val system: ActorSystem = ClusterAwareSettings.system
+  private val locationService = LocationServiceFactory.withSystem(system)
+  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system, locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
-  private val system: ActorSystem = ClusterAwareSettings.system
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
 
   test("Test ") {

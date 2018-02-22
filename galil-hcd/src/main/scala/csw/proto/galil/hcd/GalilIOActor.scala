@@ -2,23 +2,25 @@ package csw.proto.galil.hcd
 
 import java.io.IOException
 
-import akka.typed.{ActorRef, Behavior}
+import akka.typed.Behavior
 import akka.typed.scaladsl.{Actor, ActorContext}
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
 import csw.proto.galil.io.{GalilIo, GalilIoTcp}
+import csw.services.ccs.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
 
 object GalilIOActor {
-  def behavior(galilConfig: GalilConfig, replyTo: Option[ActorRef[GalilResponseMessage]],
-               loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
-    Actor.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, replyTo, loggerFactory))
+  def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
+               adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
+    Actor.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
 }
 
 case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
-                   galilConfig: GalilConfig,
-                   replyTo: Option[ActorRef[GalilResponseMessage]],
-                   loggerFactory: LoggerFactory)
+                        galilConfig: GalilConfig,
+                        commandResponseManager: CommandResponseManager,
+                        adapter: CSWDeviceAdapter,
+                        loggerFactory: LoggerFactory)
   extends Actor.MutableBehavior[GalilCommandMessage] {
 
   private val log = loggerFactory.getLogger
@@ -53,7 +55,7 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
     this
   }
 
-  def processCommand(message: GalilCommandMessage): Unit = message match {
+  private def processCommand(message: GalilCommandMessage): Unit = message match {
     case GalilCommand(commandString) =>
       // TODO
       log.debug(s"doing command: $commandString")
@@ -62,12 +64,21 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       log.debug(s"doing command: $commandString")
       val response = galilSend(commandString)
       // TODO handle error
-      replyTo.foreach(_ ! GalilResponse(response, prefix, runId, maybeObsId, commandKey))
+      handleGalilResponse(GalilResponse(response, prefix, runId, maybeObsId, commandKey))
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }
 
-  def galilSend(cmd: String): String = {
+  private def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = {
+    log.debug(s"handleGalilResponse $galilResponseMessage")
+    galilResponseMessage match {
+      case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
+        val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
+        commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
+    }
+  }
+
+  private def galilSend(cmd: String): String = {
     log.debug(s"Sending '$cmd' to Galil")
     val responses = galilIo.send(cmd)
     if (responses.lengthCompare(1) != 0)
@@ -76,5 +87,4 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
     log.debug(s"Response from Galil: $resp")
     resp
   }
-
 }

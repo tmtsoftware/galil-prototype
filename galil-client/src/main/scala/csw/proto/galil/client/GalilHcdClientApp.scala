@@ -5,16 +5,20 @@ import java.net.InetAddress
 import akka.actor.ActorSystem
 import csw.messages.params.models.Prefix
 import csw.services.location.commons.ClusterAwareSettings
+import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-// A client to test locating and communicating with the Galil HCD
+/**
+  * A demo client to test locating and communicating with the Galil HCD
+  */
 object GalilHcdClientApp extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system)
+  private val locationService = LocationServiceFactory.withSystem(system)
+  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system, locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)

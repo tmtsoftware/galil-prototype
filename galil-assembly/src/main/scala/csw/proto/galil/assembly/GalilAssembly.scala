@@ -1,60 +1,57 @@
 package csw.proto.galil.assembly
 
 import akka.actor.Scheduler
-import akka.typed.ActorRef
 import akka.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.apps.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.CommandResponseManagerMessage.{AddOrUpdateCommand, AddSubCommand, UpdateSubCommand}
-import csw.messages.RunningMessage.DomainMessage
 import csw.messages._
+import csw.messages.ccs.commands.CommandResponse.Error
+import csw.messages.ccs.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.ccs.CommandIssue._
 import csw.messages.ccs.commands.CommandResponse._
 import csw.messages.ccs.commands._
 import csw.messages.framework.ComponentInfo
+import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location.ConnectionType.AkkaType
-import csw.messages.location._
-import csw.messages.models.PubSub.PublisherMessage
 import csw.messages.params.generics.KeyType._
 import csw.messages.params.generics.{KeyType, Parameter}
-import csw.messages.params.states.CurrentState
 import csw.proto.models.ComponentModels
 import csw.proto.models.ComponentModels.{AttributeModel, CommandModel, ReceiveCommandModel}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
+import csw.services.ccs.scaladsl.{CommandResponseManager, CommandService}
+
 
 import scala.async.Async._
 import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContextExecutor, Future}
 
-// Base trait for Galil Assembly domain messages
-sealed trait GalilAssemblyDomainMessage extends DomainMessage
-
 // Add messages here...
 
-private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory[GalilAssemblyDomainMessage] {
+private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(
                 ctx: ActorContext[TopLevelActorMessage],
                 componentInfo: ComponentInfo,
-                commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                pubSubRef: ActorRef[PublisherMessage[CurrentState]],
+                commandResponseManager: CommandResponseManager,
+                currentStatePublisher: CurrentStatePublisher,
                 locationService: LocationService,
                 loggerFactory: LoggerFactory
-              ): ComponentHandlers[GalilAssemblyDomainMessage] =
-    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, pubSubRef, locationService, loggerFactory)
+              ): ComponentHandlers =
+    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, loggerFactory)
 }
 
 private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
                                     componentInfo: ComponentInfo,
-                                    commandResponseManager: ActorRef[CommandResponseManagerMessage],
-                                    pubSubRef: ActorRef[PublisherMessage[CurrentState]],
+                                    commandResponseManager: CommandResponseManager,
+                                    currentStatePublisher: CurrentStatePublisher,
                                     locationService: LocationService,
                                     loggerFactory: LoggerFactory)
-  extends ComponentHandlers[GalilAssemblyDomainMessage](ctx, componentInfo, commandResponseManager, pubSubRef,
+  extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
     locationService, loggerFactory) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -140,10 +137,6 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   override def onGoOffline(): Unit = log.debug("onGoOffline called")
 
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
-
-  override def onDomainMsg(galilMessage: GalilAssemblyDomainMessage): Unit = galilMessage match {
-    case x => log.debug(s"onDomainMsg called: $x")
-  }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit = {
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
@@ -271,17 +264,17 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     val galilHcd = connectionsMap.get("GalilHcd")
     galilHcd.foreach { hcd =>
       val setup = Setup(controlCommand.source, controlCommand.commandName, controlCommand.maybeObsId, controlCommand.paramSet)
-      commandResponseManager ! AddSubCommand(controlCommand.runId, setup.runId)
+      commandResponseManager.addSubCommand(controlCommand.runId, setup.runId)
 
       val f = for {
         response <- hcd.submitAndSubscribe(setup)
       } yield {
         log.info(s"response = $response")
-        commandResponseManager ! UpdateSubCommand(setup.runId, response)
+        commandResponseManager.updateSubCommand(setup.runId, response)
       }
       f.recover {
         case ex =>
-          commandResponseManager ! UpdateSubCommand(setup.runId, Error(setup.runId, ex.toString))
+          commandResponseManager.updateSubCommand(setup.runId, Error(setup.runId, ex.toString))
       }
     }
   }

@@ -8,12 +8,13 @@ import akka.typed.scaladsl.adapter._
 import akka.typed.scaladsl.{Actor, ActorContext}
 import akka.typed.Behavior
 import akka.util.Timeout
-import csw.messages.ccs.commands.{CommandName, ComponentRef, Setup}
+import csw.messages.ccs.commands.{CommandName, Setup}
 import csw.messages.location.ComponentType.Assembly
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
 import csw.messages.params.generics.{Key, KeyType}
 import csw.messages.params.models.Prefix
+import csw.services.ccs.scaladsl.CommandService
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
@@ -21,7 +22,9 @@ import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-// A client to test locating and communicating with the Galil assembly
+/**
+  * A client to test locating and communicating with the Galil assembly
+  */
 object GalilAssemblyClient extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
@@ -48,7 +51,7 @@ object GalilAssemblyClient extends App {
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
-          interact(ctx, loc.asInstanceOf[AkkaLocation].component)
+          interact(ctx, new CommandService(loc.asInstanceOf[AkkaLocation])(ctx.system))
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
@@ -60,7 +63,7 @@ object GalilAssemblyClient extends App {
     }
   }
 
-  private def interact(ctx: ActorContext[TrackingEvent], assembly: ComponentRef): Unit = {
+  private def interact(ctx: ActorContext[TrackingEvent], assembly: CommandService): Unit = {
     implicit val timeout: Timeout = Timeout(3.seconds)
     implicit val scheduler: Scheduler = ctx.system.scheduler
     import ctx.executionContext
