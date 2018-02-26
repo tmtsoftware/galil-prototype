@@ -18,6 +18,7 @@ lazy val `galil-assembly` = project
   .settings(appSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`,
+    `icd-db`,
     scalaTest % Test
   ))
   .dependsOn(`galil-commands`)
