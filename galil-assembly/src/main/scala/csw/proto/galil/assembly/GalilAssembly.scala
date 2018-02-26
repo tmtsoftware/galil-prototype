@@ -17,9 +17,9 @@ import csw.messages.location.ConnectionType.AkkaType
 import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.messages.params.generics.KeyType._
 import csw.messages.params.generics.{KeyType, Parameter}
-import csw.proto.models.ComponentModels
-import csw.proto.models.ComponentModels.{AttributeModel, CommandModel, ReceiveCommandModel}
+import icd.web.shared.IcdModels.{AttributeModel, CommandModel, ReceiveCommandModel, SendCommandModel}
 import csw.services.ccs.scaladsl.{CommandResponseManager, CommandService}
+import csw.services.icd.model.CommandModelParser
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -55,40 +55,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   implicit val actorSystem: ActorSystem[_] = ctx.system
   private val log = loggerFactory.getLogger
   private val connectionsMap = mutable.HashMap[String, CommandService]() // TODO correct type?  Synchronization needed?
-  private val receiveCommandModels = mutable.ListBuffer[ComponentModels.ReceiveCommandModel]()
-  private val sendCommandModel = List[ComponentModels.SendCommandModel]()
-
-  receiveCommandModels += ReceiveCommandModel("SingleFilterMove", "Move a single filter", List[String](),
-    List("wheelNum", "target"),
-    List(
-      AttributeModel("wheelNum",
-        "Number of wheel to move",
-        Some("integer"), None,
-        "none",
-        None, None,
-        Some("1"), Some("8"),
-        exclusiveMinimum = false, exclusiveMaximum = false,
-        "", "integer (1 ≤ x ≤ 8)"),
-      AttributeModel("target",
-        "Target location",
-        Some("integer"), None,
-        "ct",
-        None, None,
-        None, None,
-        exclusiveMinimum = false, exclusiveMaximum = false,
-        "", "integer"),
-      AttributeModel("speed",
-        "Move Speed",
-        Some("double"), None,
-        "ms",   // For now, until speed units are added
-        None, None,
-        None, None,
-        exclusiveMinimum = false, exclusiveMaximum = false,
-        "", "double")
-    )
-  )
-
-  val componentCommandModel = CommandModel("csw", "GalilAssembly", "Prototype Assembly", receiveCommandModels.toList, sendCommandModel)
+  val commandModel = CommandModelParser(ConfigFactory.load("GalilPrototypeAssembly_command-model.conf"))
 
   override def initialize(): Future[Unit] = {
     log.debug("Initialize called")
@@ -104,7 +71,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
     if (isOnline) {
-      val matchingCommands = receiveCommandModels.filter(_.name == controlCommand.commandName.name).toList
+      val matchingCommands = commandModel.receive.filter(_.name == controlCommand.commandName.name)
       if (matchingCommands.isEmpty) {
         Invalid(controlCommand.runId,
           UnsupportedCommandIssue(s"Unknown command: ${controlCommand.commandName.name}"))
@@ -218,7 +185,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   }
 
 
-  private def validateRange(value: Parameter[_], model: ComponentModels.AttributeModel): Boolean = {
+  private def validateRange(value: Parameter[_], model: AttributeModel): Boolean = {
     // TODO
     true
   }
