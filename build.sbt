@@ -65,3 +65,11 @@ lazy val `galil-commands` = project
   ))
   .dependsOn(`galil-io`)
 
+lazy val `galil-deploy` = project
+  .enablePlugins(DeployApp)
+  .settings(defaultSettings: _*)
+  .settings(libraryDependencies ++= Seq(
+    `csw-framework`,
+    `galil-assembly-dep`,
+    `galil-hcd-dep`
+  ))
