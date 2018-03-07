@@ -4,8 +4,8 @@ import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
 import DeviceCommands._
-import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult, Error}
-import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
+import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult, Error}
+import csw.messages.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
 
 import scala.annotation.tailrec
@@ -34,9 +34,9 @@ object DeviceCommands {
   val smoothKey: Key[Double] = KeyType.DoubleKey.make("smooth")
   val speedKey: Key[Int] = KeyType.IntKey.make("speed")
   val countsKey: Key[Int] = KeyType.IntKey.make("counts")
-  val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts");
-  val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus");
-  val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts");
+  val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
+  val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus")
+  val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
 
   // Map key name to key
   private val commandParamKeys: List[Key[_]] = List(axisKey, eDescKey, mTypeKey, eCodeKey,

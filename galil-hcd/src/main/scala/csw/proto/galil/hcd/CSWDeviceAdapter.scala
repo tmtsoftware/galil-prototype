@@ -1,12 +1,12 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
-import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.messages.commands.{CommandResponse, Result, Setup}
 
 import scala.collection.JavaConverters._
-import csw.messages.ccs.commands.{CommandResponse, Result, Setup}
 import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models.{ObsId, Prefix, Id}
+import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
@@ -29,9 +29,9 @@ object CSWDeviceAdapter {
   val smoothKey: Key[Double] = KeyType.DoubleKey.make("smooth")
   val speedKey: Key[Int] = KeyType.IntKey.make("speed")
   val countsKey: Key[Int] = KeyType.IntKey.make("counts")
-  val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts");
-  val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus");
-  val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts");
+  val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
+  val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus")
+  val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
 
 
   // Map key name to key

@@ -3,9 +3,8 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.ccs.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
 import csw.messages.params.models.Prefix
-import csw.proto.galil.client.GalilHcdClientApp.system
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
