@@ -13,7 +13,5 @@ object Dependencies {
   val playJson = "com.typesafe.play" %% "play-json" % PlayVersion
 
   val `csw-framework`  = "org.tmt" %% "csw-framework"  % CswVersion
-  val `galil-assembly-dep` = "org.tmt" %% "galil-assembly" % Version
-  val `galil-hcd-dep`      = "org.tmt" %% "galil-hcd"      % Version
 }
 
