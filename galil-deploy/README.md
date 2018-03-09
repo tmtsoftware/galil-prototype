@@ -14,9 +14,8 @@ lazy val `galil-deploy` = project
   .settings(defaultSettings: _*)
   .settings(libraryDependencies ++= Seq(
     `csw-framework`,
-    `galil-assembly-dep`,
-    `galil-hcd-dep`
   ))
+  .dependsOn(`galil-assembly`, `galil-hcd`)
   ```
 
 and in Dependencies.scala:
@@ -24,8 +23,6 @@ and in Dependencies.scala:
 ```
 
   val `csw-framework`  = "org.tmt" %% "csw-framework"  % Version
-  val `galil-assembly-dep` = "org.tmt" %% "galil-assembly" % Version
-  val `galil-hcd-dep`      = "org.tmt" %% "galil-hcd"      % Version
 
 ```
 
