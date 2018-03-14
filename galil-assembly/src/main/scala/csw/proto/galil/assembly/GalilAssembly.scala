@@ -15,8 +15,8 @@ import csw.services.command.scaladsl.{CommandResponseManager, CommandService}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
-import scala.concurrent.duration._
 import scala.async.Async._
+import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Add messages here...
