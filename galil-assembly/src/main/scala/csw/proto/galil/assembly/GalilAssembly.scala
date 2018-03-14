@@ -1,7 +1,7 @@
 package csw.proto.galil.assembly
 
 import akka.actor.Scheduler
-import akka.typed.scaladsl.ActorContext
+import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.framework.deploy.containercmd.ContainerCmd

@@ -1,7 +1,7 @@
 package csw.proto.galil.hcd
 
-import akka.typed.ActorRef
-import akka.typed.scaladsl.ActorContext
+import akka.actor.typed.ActorRef
+import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}

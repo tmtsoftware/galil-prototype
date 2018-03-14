@@ -2,7 +2,7 @@ package csw.proto.galil.client
 
 import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
-import akka.typed
+import akka.actor.typed
 import akka.util.Timeout
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
@@ -13,7 +13,7 @@ import csw.services.location.scaladsl.LocationService
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import akka.typed.scaladsl.adapter._
+import akka.actor.typed.scaladsl.adapter._
 import csw.messages.commands.CommandResponse.Error
 import csw.messages.commands.{CommandName, CommandResponse, Setup}
 import csw.services.command.scaladsl.CommandService

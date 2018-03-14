@@ -4,9 +4,9 @@ import java.net.InetAddress
 
 import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
-import akka.typed.scaladsl.adapter._
-import akka.typed.scaladsl.{Actor, ActorContext}
-import akka.typed.Behavior
+import akka.actor.typed.scaladsl.adapter._
+import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
+import akka.actor.typed.Behavior
 import akka.util.Timeout
 import csw.messages.commands.{CommandName, Setup}
 import csw.messages.location.ComponentType.Assembly
@@ -38,7 +38,7 @@ object GalilAssemblyClient extends App {
   system.spawn(initialBehavior, "GalilAssemblyClient")
 
   def initialBehavior: Behavior[TrackingEvent] =
-    Actor.deferred { ctx =>
+    Behaviors.setup { ctx =>
       val connection = AkkaConnection(ComponentId("GalilAssembly", Assembly))
       locationService.subscribe(connection, { loc =>
         ctx.self ! loc
@@ -47,7 +47,7 @@ object GalilAssemblyClient extends App {
     }
 
   def subscriberBehavior: Behavior[TrackingEvent] = {
-    Actor.immutable[TrackingEvent] { (ctx, msg) =>
+    Behaviors.immutable[TrackingEvent] { (ctx, msg) =>
       msg match {
         case LocationUpdated(loc) =>
           log.info(s"LocationUpdated: $loc")
@@ -55,11 +55,11 @@ object GalilAssemblyClient extends App {
         case LocationRemoved(loc) =>
           log.info(s"LocationRemoved: $loc")
       }
-      Actor.same
+      Behaviors.same
     } onSignal {
       case (ctx, x) =>
         log.info(s"${ctx.self} received signal $x")
-        Actor.stopped
+        Behaviors.stopped
     }
   }
 

@@ -12,6 +12,6 @@ object Dependencies {
   val `junit-interface` = "com.novocode" % "junit-interface" % "0.11"
   val playJson = "com.typesafe.play" %% "play-json" % PlayVersion
 
-  val `csw-framework`  = "org.tmt" %% "csw-framework"  % CswVersion
+  val `csw-framework`     = "org.tmt" %% "csw-framework"     % CswVersion
 }
 
