@@ -6,17 +6,17 @@ import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
-import csw.messages._
 import csw.messages.commands.CommandResponse.Error
 import csw.messages.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.messages.scaladsl.TopLevelActorMessage
 import csw.services.command.scaladsl.{CommandResponseManager, CommandService}
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
-import scala.concurrent.duration._
 import scala.async.Async._
+import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Add messages here...

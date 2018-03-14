@@ -5,11 +5,11 @@ import akka.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
-import csw.messages._
 import csw.messages.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.models.{Id, ObsId, Prefix}
+import csw.messages.scaladsl.TopLevelActorMessage
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.services.command.scaladsl.CommandResponseManager
