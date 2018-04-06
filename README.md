@@ -42,7 +42,7 @@ running. These can be found in _csw-prod/target/universal/stage/bin_.
 
 Make sure also that the necessary environment variables are set. For example:
 
-* Set the environment variables (Replace interface name, IP address and port with your own values):
+* Set these environment variables (Replace interface name, IP address and port with your own values):
 ```bash
 export interfaceName=enp0s31f6
 export clusterSeeds=192.168.178.77:7777
