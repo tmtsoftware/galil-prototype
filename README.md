@@ -70,13 +70,16 @@ csw-config-server --initRepo
 
 To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
 ```
-galil-hcd -Dgalil.host=myhost -Dgalil.port=23
+galil-hcd --local GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
 ```
+
+An example GalilHcd.conf file can be found [here](galil-hcd/src/main/resources/GalilHcd.conf). 
+If `--local` is not given, the file would be fetched from the Config Service, if available.
 
 To run using a Galil simulator:
 ```
 galil-simulator
-galil-hcd
+galil-hcd --local GalilHcd.conf
 ```
 
 ## Loading the galil-prototype project in IntelliJ Idea

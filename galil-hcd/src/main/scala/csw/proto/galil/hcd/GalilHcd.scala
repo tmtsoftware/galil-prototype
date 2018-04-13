@@ -31,16 +31,6 @@ object GalilCommandMessage {
 
 }
 
-sealed trait GalilResponseMessage
-
-object GalilResponseMessage {
-
-  case class GalilResponse(response: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
-                           cmdMapEntry: CommandMapEntry) extends GalilResponseMessage
-
-}
-
-
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(ctx: ActorContext[TopLevelActorMessage],
                         componentInfo: ComponentInfo,

@@ -14,7 +14,7 @@ import scala.concurrent.Await
 import scala.concurrent.duration._
 
 // Note: Test assumes that location service (csw-cluster-seed), galil-hcd and galil-simulator are running
-@Ignore
+//@Ignore
 class GalilClientTest extends FunSuite {
   private val system: ActorSystem = ClusterAwareSettings.system
   private val locationService = LocationServiceFactory.withSystem(system)
@@ -31,5 +31,9 @@ class GalilClientTest extends FunSuite {
     val resp2 = Await.result(galilHcdClient.getRelTarget(maybeObsId, 'A'), 3.seconds)
     println(s"getRelTarget: $resp2")
     assert(resp2.isInstanceOf[CompletedWithResult])
+
+    val resp3 = Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
+    println(s"getDataRecord: $resp3")
+    assert(resp3.isInstanceOf[Completed])
   }
 }

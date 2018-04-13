@@ -4,24 +4,35 @@ import java.io.IOException
 
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
+import csw.messages.params.models.{Id, ObsId, Prefix}
+import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
-import csw.proto.galil.hcd.GalilResponseMessage.GalilResponse
-import csw.proto.galil.io.{GalilIo, GalilIoTcp}
+import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import csw.services.command.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
 
-object GalilIOActor {
+/**
+  *
+  */
+private[hcd] object GalilIOActor {
   def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
                adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
     Behaviors.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
+
+  // Internal class used to build command response
+  case class GalilResponse(response: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
+                           cmdMapEntry: CommandMapEntry)
+
 }
 
-case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
+private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                         galilConfig: GalilConfig,
                         commandResponseManager: CommandResponseManager,
                         adapter: CSWDeviceAdapter,
                         loggerFactory: LoggerFactory)
   extends Behaviors.MutableBehavior[GalilCommandMessage] {
+
+  import GalilIOActor._
 
   private val log = loggerFactory.getLogger
 
@@ -62,14 +73,23 @@ case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
 
     case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey) =>
       log.debug(s"doing command: $commandString")
-      val response = galilSend(commandString)
       // TODO handle error
-      handleGalilResponse(GalilResponse(response, prefix, runId, maybeObsId, commandKey))
+      if (commandString == "QR") {
+        val response = galilIo.send("QR")
+        val bs = response.head._2
+        val dr = DataRecord(bs)
+        log.debug(s"Data Record (size: ${bs.size}): $dr")
+        // XXX TODO: What is the response for QR? Or is it only used internally?
+        handleGalilResponse(GalilResponse("", prefix, runId, maybeObsId, commandKey))
+      } else {
+        val response = galilSend(commandString)
+        handleGalilResponse(GalilResponse(response, prefix, runId, maybeObsId, commandKey))
+      }
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }
 
-  private def handleGalilResponse(galilResponseMessage: GalilResponseMessage): Unit = {
+  private def handleGalilResponse(galilResponseMessage: GalilResponse): Unit = {
     log.debug(s"handleGalilResponse $galilResponseMessage")
     galilResponseMessage match {
       case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>

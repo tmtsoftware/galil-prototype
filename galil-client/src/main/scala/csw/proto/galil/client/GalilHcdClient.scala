@@ -52,6 +52,20 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: 
   }
 
   /**
+    * Sends a getDataRecord message to the HCD and returns the response
+    */
+  def getDataRecord(obsId: Option[ObsId]): Future[CommandResponse] = {
+    getGalilHcd.flatMap {
+      case Some(hcd) =>
+        val setup = Setup(source, CommandName("getDataRecord"), obsId)
+        hcd.submitAndSubscribe(setup)
+
+      case None =>
+        Future.successful(Error(Id(), "Can't locate Galil HCD"))
+    }
+  }
+
+  /**
     * Sends a setRelTarget message to the HCD and returns the response
     */
   def setRelTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {

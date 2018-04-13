@@ -58,8 +58,9 @@ object GalilHcdClientApp extends App {
   println(s"setJogSpeed: $resp11")  
 
   val resp12= Await.result(galilHcdClient.setFindIndexMode(maybeObsId, 'A'), 3.seconds)
-  println(s"setFindIndexMode: $resp11")  
+  println(s"setFindIndexMode: $resp12")
   
-   
+  val resp13= Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
+  println(s"getDataRecord: $resp13")
 }
 
