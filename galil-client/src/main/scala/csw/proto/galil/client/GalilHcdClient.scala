@@ -54,10 +54,12 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: 
   /**
     * Sends a getDataRecord message to the HCD and returns the response
     */
-  def getDataRecord(obsId: Option[ObsId]): Future[CommandResponse] = {
+  def getDataRecord(obsId: Option[ObsId], axis: Option[Char] = None): Future[CommandResponse] = {
+    // FIXME: THere are still problems parsing result when an axis argument is passed
     getGalilHcd.flatMap {
       case Some(hcd) =>
-        val setup = Setup(source, CommandName("getDataRecord"), obsId)
+        val s = Setup(source, CommandName("getDataRecord"), obsId)
+        val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
         hcd.submitAndSubscribe(setup)
 
       case None =>

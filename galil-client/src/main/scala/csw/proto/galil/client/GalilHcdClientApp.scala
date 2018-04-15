@@ -3,6 +3,8 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
+import csw.messages.commands.CommandResponse.CompletedWithResult
+import csw.messages.params.generics.KeyType
 import csw.messages.params.models.Prefix
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
@@ -62,5 +64,16 @@ object GalilHcdClientApp extends App {
   
   val resp13= Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
   println(s"getDataRecord: $resp13")
+
+  val result = resp13.asInstanceOf[CompletedWithResult].result
+
+  // Example of how you could extract the motor position for each axis
+  val blocksPresent = result.get(KeyType.StringKey.make("blocksPresent")).get.values
+  blocksPresent.filter(b => b >= "A" && b <= "F").foreach { axis =>
+    val struct = result.get(KeyType.StructKey.make(axis)).get.head
+    val motorPos = struct.get(KeyType.IntKey.make("motorPosition")).get.head
+    println(s"Axis $axis: motor position: $motorPos")
+  }
+
 }
 

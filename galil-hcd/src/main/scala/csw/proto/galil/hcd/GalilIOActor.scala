@@ -12,27 +12,20 @@ import csw.services.command.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
 
 /**
-  *
+  * Worker actor that handles the Galil I/O
   */
 private[hcd] object GalilIOActor {
   def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
                adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
     Behaviors.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
-
-  // Internal class used to build command response
-  case class GalilResponse(response: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
-                           cmdMapEntry: CommandMapEntry)
-
 }
 
 private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
-                        galilConfig: GalilConfig,
-                        commandResponseManager: CommandResponseManager,
-                        adapter: CSWDeviceAdapter,
-                        loggerFactory: LoggerFactory)
+                                     galilConfig: GalilConfig,
+                                     commandResponseManager: CommandResponseManager,
+                                     adapter: CSWDeviceAdapter,
+                                     loggerFactory: LoggerFactory)
   extends Behaviors.MutableBehavior[GalilCommandMessage] {
-
-  import GalilIOActor._
 
   private val log = loggerFactory.getLogger
 
@@ -73,29 +66,32 @@ private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
 
     case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey) =>
       log.debug(s"doing command: $commandString")
-      // TODO handle error
-      if (commandString == "QR") {
-        val response = galilIo.send("QR")
+      if (commandString.startsWith("QR")) {
+        val response = galilIo.send(commandString)
         val bs = response.head._2
         val dr = DataRecord(bs)
         log.debug(s"Data Record (size: ${bs.size}): $dr")
-        // XXX TODO: What is the response for QR? Or is it only used internally?
-        handleGalilResponse(GalilResponse("", prefix, runId, maybeObsId, commandKey))
+        handleDataRecordResponse(dr, prefix, runId, maybeObsId, commandKey)
       } else {
         val response = galilSend(commandString)
-        handleGalilResponse(GalilResponse(response, prefix, runId, maybeObsId, commandKey))
+        handleGalilResponse(response, prefix, runId, maybeObsId, commandKey)
       }
 
     case _ => log.debug("unhanded GalilCommandMessage")
   }
 
-  private def handleGalilResponse(galilResponseMessage: GalilResponse): Unit = {
-    log.debug(s"handleGalilResponse $galilResponseMessage")
-    galilResponseMessage match {
-      case GalilResponse(response, prefix, runId, maybeObsId, cmdMapEntry) =>
-        val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
-        commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
-    }
+  private def handleDataRecordResponse(dr: DataRecord, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
+                                  cmdMapEntry: CommandMapEntry): Unit = {
+    log.debug(s"handleDataRecordResponse $dr")
+    val returnResponse = DataRecord.makeCommandResponse(prefix, runId, maybeObsId, dr)
+    commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
+  }
+
+  private def handleGalilResponse(response: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
+                                  cmdMapEntry: CommandMapEntry): Unit = {
+    log.debug(s"handleGalilResponse $response")
+    val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
+    commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
   }
 
   private def galilSend(cmd: String): String = {

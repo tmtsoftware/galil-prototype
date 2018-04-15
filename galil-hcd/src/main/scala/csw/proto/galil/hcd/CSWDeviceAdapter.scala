@@ -133,7 +133,7 @@ class CSWDeviceAdapter(config: Config) {
     }
   }
 
-  // Returns a paramSet based on the given reponse, using the configured regex to extract the parameters
+  // Returns a paramSet based on the given response, using the configured regex to extract the parameters
   def makeResultParamSet(paramValues: List[String], paramDefs: List[ParamDefEntry],
                          paramSet: List[Parameter[_]]): List[Parameter[_]] = {
 

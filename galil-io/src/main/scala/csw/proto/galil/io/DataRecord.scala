@@ -3,8 +3,12 @@ package csw.proto.galil.io
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
+import csw.messages.commands.CommandResponse.CompletedWithResult
+import csw.messages.commands.{CommandResponse, Result}
+import csw.messages.params.generics.{KeyType, Parameter}
+import csw.messages.params.models.{Id, ObsId, Prefix, Struct}
 import csw.proto.galil.io.DataRecord._
-import play.api.libs.json.Json
+import play.api.libs.json.{Json, OFormat}
 
 
 /**
@@ -29,7 +33,7 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
     * returned by the device.
     */
   def toByteBuffer: ByteBuffer = {
-    val buffer = ByteBuffer.allocateDirect(header.recordSize).order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = ByteBuffer.allocateDirect(header.recordSize+1).order(ByteOrder.LITTLE_ENDIAN)
 
     header.write(buffer)
     generalState.write(buffer)
@@ -41,15 +45,25 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 
     buffer.flip().asInstanceOf[ByteBuffer]
   }
+
+  def toParamSet: Set[Parameter[_]] = {
+    val status = axes.zip(axisStatuses).flatMap { p =>
+      val axis = p._1.toString
+      if (header.blocksPresent.contains(axis))
+        Some(KeyType.StructKey.make(axis).set(Struct(p._2.toParamSet)))
+      else None
+    }
+    header.toParamSet ++ generalState.toParamSet ++ status.toSet
+  }
 }
 
 object DataRecord {
 
   // JSON support
-  implicit val headerJsonFormat = Json.format[Header]
-  implicit val generalStateJsonFormat = Json.format[GeneralState]
-  implicit val galilAxisStatusJsonFormat = Json.format[GalilAxisStatus]
-  implicit val dataRecordJsonFormat = Json.format[DataRecord]
+  implicit val headerJsonFormat: OFormat[Header] = Json.format[Header]
+  implicit val generalStateJsonFormat: OFormat[GeneralState] = Json.format[GeneralState]
+  implicit val galilAxisStatusJsonFormat: OFormat[GalilAxisStatus] = Json.format[GalilAxisStatus]
+  implicit val dataRecordJsonFormat: OFormat[DataRecord] = Json.format[DataRecord]
 
 
   /**
@@ -59,8 +73,9 @@ object DataRecord {
 
   /**
     * The 4 byte Galil header
+    *
     * @param blocksPresent Contains the char name of the block for each block present, or empty string if block not present
-    * @param recordSize size of the data record, including the header
+    * @param recordSize    size of the data record, including the header
     */
   case class Header(blocksPresent: List[String], recordSize: Int) {
 
@@ -80,6 +95,11 @@ object DataRecord {
          |Blocks present:   ${blocksPresent.mkString(" ")}
          |Data record size: $recordSize
        """.stripMargin
+
+    def toParamSet: Set[Parameter[_]] = {
+      Set(KeyType.StringKey.make("blocksPresent").set(blocksPresent.toArray))
+    }
+
   }
 
   object Header {
@@ -109,7 +129,7 @@ object DataRecord {
     }
   }
 
-  case class GeneralState(sampleNumber: Int,
+  case class GeneralState(sampleNumber: Short,
                           inputs: Array[Byte],
                           outputs: Array[Byte],
                           ethernetHandleStatus: Array[Byte],
@@ -117,22 +137,22 @@ object DataRecord {
                           threadStatus: Byte,
                           amplifierStatus: Int,
                           contourModeSegmentCount: Int,
-                          contourModeBufferSpaceRemaining: Int,
-                          sPlaneSegmentCount: Int,
-                          sPlaneMoveStatus: Int,
+                          contourModeBufferSpaceRemaining: Short,
+                          sPlaneSegmentCount: Short,
+                          sPlaneMoveStatus: Short,
                           sPlaneDistanceTraveled: Int,
-                          sPlaneBufferSpaceRemaining: Int,
-                          tPlaneSegmentCount: Int,
-                          tPlaneMoveStatus: Int,
+                          sPlaneBufferSpaceRemaining: Short,
+                          tPlaneSegmentCount: Short,
+                          tPlaneMoveStatus: Short,
                           tPlaneDistanceTraveled: Int,
-                          tPlaneBufferSpaceRemaining: Int) {
+                          tPlaneBufferSpaceRemaining: Short) {
 
     /**
       * Appends the GeneralState to the given ByteBuffer in the documented Galil format
       */
     def write(buffer: ByteBuffer): Unit = {
 
-      buffer.putShort(sampleNumber.asInstanceOf[Short])
+      buffer.putShort(sampleNumber)
         .put(inputs)
         .put(outputs)
 
@@ -143,22 +163,22 @@ object DataRecord {
         .put(threadStatus)
         .putInt(amplifierStatus)
         .putInt(contourModeSegmentCount)
-        .putShort(contourModeBufferSpaceRemaining.asInstanceOf[Short])
-        .putShort(sPlaneSegmentCount.asInstanceOf[Short])
-        .putShort(sPlaneMoveStatus.asInstanceOf[Short])
+        .putShort(contourModeBufferSpaceRemaining)
+        .putShort(sPlaneSegmentCount)
+        .putShort(sPlaneMoveStatus)
         .putInt(sPlaneDistanceTraveled)
-        .putShort(sPlaneBufferSpaceRemaining.asInstanceOf[Short])
-        .putShort(tPlaneSegmentCount.asInstanceOf[Short])
-        .putShort(tPlaneMoveStatus.asInstanceOf[Short])
+        .putShort(sPlaneBufferSpaceRemaining)
+        .putShort(tPlaneSegmentCount)
+        .putShort(tPlaneMoveStatus)
         .putInt(tPlaneDistanceTraveled)
-        .putShort(tPlaneBufferSpaceRemaining.asInstanceOf[Short])
+        .putShort(tPlaneBufferSpaceRemaining)
     }
 
     private def toBinaryString(a: Array[Byte]) = a.map(i => i.toBinaryString).mkString(" ")
 
     override def toString: String =
       s"""
-         |Sample number:                  $sampleNumber
+         |Sample number:                  ${sampleNumber & 0xFF}
          |Inputs:                         ${toBinaryString(inputs)}
          |Outputs:                        ${toBinaryString(outputs)}
          |Ethernet handle status:         ${ethernetHandleStatus.map(_ & 0xFF).mkString(", ")}
@@ -166,16 +186,39 @@ object DataRecord {
          |Thread status:                  ${threadStatus.toBinaryString}
          |Amplifier status:               $amplifierStatus
          |Contour mode segment count:                     $contourModeSegmentCount,
-         |contour mode buffer space remaining:            $contourModeBufferSpaceRemaining,
-         |S plane segment count of coordinated move:      $sPlaneSegmentCount,
-         |S plane coordinated move status:                $sPlaneMoveStatus,
+         |contour mode buffer space remaining:            ${contourModeBufferSpaceRemaining & 0xFF},
+         |S plane segment count of coordinated move:      ${sPlaneSegmentCount & 0xFF},
+         |S plane coordinated move status:                ${sPlaneMoveStatus & 0xFF},
          |S plane distance traveled in coordinated move:  $sPlaneDistanceTraveled,
-         |S plane buffer space remaining:                 $sPlaneBufferSpaceRemaining,
-         |T plane segment count of coordinated move:      $tPlaneSegmentCount,
-         |T plane coordinated move status:                $tPlaneMoveStatus,
+         |S plane buffer space remaining:                 ${sPlaneBufferSpaceRemaining & 0xFF},
+         |T plane segment count of coordinated move:      ${tPlaneSegmentCount & 0xFF},
+         |T plane coordinated move status:                ${tPlaneMoveStatus & 0xFF},
          |T plane distance traveled in coordinated move:  $tPlaneDistanceTraveled,
-         |T plane buffer space remaining:                 $tPlaneBufferSpaceRemaining,
+         |T plane buffer space remaining:                 ${tPlaneBufferSpaceRemaining & 0xFF},
        """.stripMargin
+
+    def toParamSet: Set[Parameter[_]] = {
+      Set(
+        KeyType.ShortKey.make("sampleNumber").set(sampleNumber),
+        KeyType.ByteKey.make("inputs").set(inputs),
+        KeyType.ByteKey.make("outputs").set(outputs),
+        KeyType.ByteKey.make("ethernetHandleStatus").set(ethernetHandleStatus),
+        KeyType.ByteKey.make("errorCode").set(errorCode),
+        KeyType.ByteKey.make("threadStatus").set(threadStatus),
+        KeyType.IntKey.make("amplifierStatus").set(amplifierStatus),
+        KeyType.IntKey.make("contourModeSegmentCount").set(contourModeSegmentCount),
+        KeyType.ShortKey.make("contourModeBufferSpaceRemaining").set(contourModeBufferSpaceRemaining),
+        KeyType.IntKey.make("sPlaneSegmentCount").set(sPlaneSegmentCount),
+        KeyType.IntKey.make("sPlaneMoveStatus").set(sPlaneMoveStatus),
+        KeyType.IntKey.make("sPlaneDistanceTraveled").set(sPlaneDistanceTraveled),
+        KeyType.IntKey.make("sPlaneBufferSpaceRemaining").set(sPlaneBufferSpaceRemaining),
+        KeyType.IntKey.make("tPlaneSegmentCount").set(tPlaneSegmentCount),
+        KeyType.IntKey.make("tPlaneMoveStatus").set(tPlaneMoveStatus),
+        KeyType.IntKey.make("tPlaneDistanceTraveled").set(tPlaneDistanceTraveled),
+        KeyType.IntKey.make("tPlaneBufferSpaceRemaining").set(tPlaneBufferSpaceRemaining)
+      )
+    }
+
   }
 
   object GeneralState {
@@ -183,7 +226,14 @@ object DataRecord {
     /**
       * Initializes from the given ByteBuffer in the documented Galil data record format
       */
-    def apply(buffer: ByteBuffer): GeneralState = {
+    def apply(buffer: ByteBuffer, header: Header): GeneralState = {
+
+      // QZ
+      // 4, 52, 26, 36
+      //Number of axes present
+      //number of bytes in general block of data record
+      //number of bytes in coordinate plane block of data record
+      //Number of Bytes in each axis block of data record
 
       def getBytes(numBytes: Int): Array[Byte] = {
         val ar = Array.fill(numBytes)(0.toByte)
@@ -191,18 +241,22 @@ object DataRecord {
         ar
       }
 
+      val numAxes = header.blocksPresent.size
+      val ioSize = if (numAxes > 4) 10 else 1
+
       // ADDR 04 - 05
-      val sampleNumber = buffer.getShort() & 0xFFFF
+      val sampleNumber = buffer.getShort()
       // ADDR 06 - 15
-      val inputs = getBytes(10)
+      val inputs = getBytes(ioSize)
       // ADDR 16 - 25
-      val outputs = getBytes(10)
+      val outputs = getBytes(ioSize)
 
       // ADDR 26 - 41 (reserved)
       buffer.position(buffer.position() + 16)
 
       // ADDR 42 - 49
       val ethernetHandleStatus = axes.map(_ => buffer.get).toArray
+//      val ethernetHandleStatus = axes.flatMap(axis =>  if (header.blocksPresent.contains(axis.toString)) Some(buffer.get) else None).toArray
 
       // ADDR 50
       val errorCode = buffer.get()
@@ -217,35 +271,35 @@ object DataRecord {
       val countourModeSegmentCount = buffer.getInt()
 
       // ADDR 60-61
-      val contourModeBufferSpaceRemaining = buffer.getShort() & 0xFFFF
+      val contourModeBufferSpaceRemaining = buffer.getShort()
 
       // TODO check for existence?
 
       // ADDR 62-63
-      val sPlaneSegmentCount = buffer.getShort() & 0xFFFF
+      val sPlaneSegmentCount = buffer.getShort()
 
       // ADDR 64-65
-      val sPlaneMoveStatus = buffer.getShort() & 0xFFFF
+      val sPlaneMoveStatus = buffer.getShort()
 
       // ADDR 66-69
       val sPlaneDistanceTraveled = buffer.getInt()
 
       // ADDR 70-71
-      val sPlaneBufferSpaceRemaining = buffer.getShort() & 0xFFFF
+      val sPlaneBufferSpaceRemaining = buffer.getShort()
 
       // TODO Check for existance
 
       // ADDR 72-73
-      val tPlaneSegmentCount = buffer.getShort() & 0xFFFF
+      val tPlaneSegmentCount = buffer.getShort()
 
       // ADDR 74-75
-      val tPlaneMoveStatus = buffer.getShort() & 0xFFFF
+      val tPlaneMoveStatus = buffer.getShort()
 
       // ADDR 76-79
       val tPlaneDistanceTraveled = buffer.getInt()
 
       // ADDR 80-81
-      val tPlaneBufferSpaceRemaining = buffer.getShort() & 0xFFFF
+      val tPlaneBufferSpaceRemaining = buffer.getShort()
 
 
       GeneralState(sampleNumber, inputs, outputs, ethernetHandleStatus, errorCode, threadStatus,
@@ -290,7 +344,7 @@ object DataRecord {
 
     override def toString: String = {
       s"""
-         |status:              $status
+         |status:              ${status & 0xFF}
          |switches:            $switches
          |stopCode:            $stopCode
          |referencePosition:   $referencePosition
@@ -299,12 +353,29 @@ object DataRecord {
          |auxiliaryPosition:   $auxiliaryPosition
          |velocity:            $velocity
          |torque:              $torque
-         |analogInput:         $analogInput
+         |analogInput:         ${analogInput & 0xFF}
          |hallInputStatus:     $hallInputStatus
          |reservedByte:        $reservedByte
          |userDefinedVariable: $userDefinedVariable
        """.stripMargin
     }
+
+    def toParamSet: Set[Parameter[_]] = {
+      Set(
+        KeyType.ShortKey.make("status").set(status),
+        KeyType.ByteKey.make("switches").set(switches),
+        KeyType.ByteKey.make("stopCode").set(stopCode),
+        KeyType.IntKey.make("referencePosition").set(referencePosition),
+        KeyType.IntKey.make("motorPosition").set(motorPosition),
+        KeyType.IntKey.make("positionError").set(positionError),
+        KeyType.IntKey.make("auxiliaryPosition").set(auxiliaryPosition),
+        KeyType.IntKey.make("velocity").set(velocity),
+        KeyType.IntKey.make("torque").set(torque),
+        KeyType.ShortKey.make("analogInput").set(analogInput),
+        KeyType.ByteKey.make("hallInputStatus").set(hallInputStatus)
+      )
+    }
+
   }
 
   object GalilAxisStatus {
@@ -376,11 +447,26 @@ object DataRecord {
     println(s"XXX input len = ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
-    val generalState = GeneralState(buffer)
+    println(s"XXX header = $header")
+    val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
     }
     DataRecord(header, generalState, axisStatuses.toArray)
   }
+
+  /**
+    * Returns a command response for a QR (getDataRecord) command
+    *
+    * @param prefix     the component's prefix
+    * @param runId      runId from the Setup command
+    * @param maybeObsId optional observation id from the command
+    * @param dr         the parsed data record from the device
+    * @return a CommandResponse containing values from the data record
+    */
+  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): CommandResponse = {
+    CompletedWithResult(runId, Result(prefix, dr.toParamSet))
+  }
+
 }
 

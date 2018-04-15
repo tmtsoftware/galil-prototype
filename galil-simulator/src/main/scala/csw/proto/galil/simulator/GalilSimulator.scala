@@ -88,9 +88,9 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
   private def processCommand(cmd: ByteString, conn: IncomingConnection): ByteString = {
     val cmdString = cmd.utf8String
     
-    println(cmdString);
+    println(cmdString)
     
-    if (cmdString == "QR") {
+    if (cmdString.startsWith("QR")) {
         ByteString(getDataRecord.toByteBuffer)
     } else {
       val reply = if (cmdString.startsWith("'"))
@@ -125,36 +125,35 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
   private def getDataRecord: DataRecord = {
     // XXX dummy values
-    val blocksPresent = List("A")
-//    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D", "E", "F", "G", "H")
+    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D")
 
-    val recordSize = 200
+    val recordSize = 226
     val header = Header(blocksPresent, recordSize)
 
-    val sampleNumber = 0
-    val inputs = Array(0.toByte)
-    val outputs = Array(0.toByte)
-    val ethernetHandleStatus = Array(0.toByte)
+    val sampleNumber = 28114.toShort
+    val inputs = (0 to 9).map(_ => 0.toByte).toArray
+    val outputs = (0 to 9).map(_ => 0.toByte).toArray
+    val ethernetHandleStatus = (0 to 8).map(_ => 0.toByte).toArray
     val errorCode = 0.toByte
     val threadStatus = 0.toByte
     val amplifierStatus = 0
     val contourModeSegmentCount = 0
-    val contourModeBufferSpaceRemaining = 0
-    val sPlaneSegmentCount = 0
-    val sPlaneMoveStatus = 0
+    val contourModeBufferSpaceRemaining = 0.toShort
+    val sPlaneSegmentCount = 0.toShort
+    val sPlaneMoveStatus = 0.toShort
     val sPlaneDistanceTraveled = 0
-    val sPlaneBufferSpaceRemaining = 0
-    val tPlaneSegmentCount = 0
-    val tPlaneMoveStatus = 0
+    val sPlaneBufferSpaceRemaining = 0.toShort
+    val tPlaneSegmentCount = 0.toShort
+    val tPlaneMoveStatus = 0.toShort
     val tPlaneDistanceTraveled = 0
-    val tPlaneBufferSpaceRemaining = 0
+    val tPlaneBufferSpaceRemaining = 0.toShort
 
     val generalState = GeneralState(sampleNumber, inputs, outputs, ethernetHandleStatus, errorCode,
       threadStatus, amplifierStatus, contourModeSegmentCount, contourModeBufferSpaceRemaining,
       sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
       tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
 
-    val axisStatuses = Array(GalilAxisStatus())
+    val axisStatuses = axes.map(_ => GalilAxisStatus()).toArray
 
     DataRecord(header, generalState, axisStatuses)
   }
