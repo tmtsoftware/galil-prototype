@@ -96,6 +96,7 @@ object DataRecord {
          |Data record size: $recordSize
        """.stripMargin
 
+    // XXX FIXME: Return an array of axis chars instead of blocksPresent, which contains empty strings for missing blocks!
     def toParamSet: Set[Parameter[_]] = {
       Set(KeyType.StringKey.make("blocksPresent").set(blocksPresent.toArray))
     }
@@ -178,7 +179,7 @@ object DataRecord {
 
     override def toString: String =
       s"""
-         |Sample number:                  ${sampleNumber & 0xFF}
+         |Sample number:                  ${sampleNumber & 0xFFFF}
          |Inputs:                         ${toBinaryString(inputs)}
          |Outputs:                        ${toBinaryString(outputs)}
          |Ethernet handle status:         ${ethernetHandleStatus.map(_ & 0xFF).mkString(", ")}
@@ -186,15 +187,15 @@ object DataRecord {
          |Thread status:                  ${threadStatus.toBinaryString}
          |Amplifier status:               $amplifierStatus
          |Contour mode segment count:                     $contourModeSegmentCount,
-         |contour mode buffer space remaining:            ${contourModeBufferSpaceRemaining & 0xFF},
-         |S plane segment count of coordinated move:      ${sPlaneSegmentCount & 0xFF},
-         |S plane coordinated move status:                ${sPlaneMoveStatus & 0xFF},
+         |contour mode buffer space remaining:            ${contourModeBufferSpaceRemaining & 0xFFFF},
+         |S plane segment count of coordinated move:      ${sPlaneSegmentCount & 0xFFFF},
+         |S plane coordinated move status:                ${sPlaneMoveStatus & 0xFFFF},
          |S plane distance traveled in coordinated move:  $sPlaneDistanceTraveled,
-         |S plane buffer space remaining:                 ${sPlaneBufferSpaceRemaining & 0xFF},
-         |T plane segment count of coordinated move:      ${tPlaneSegmentCount & 0xFF},
-         |T plane coordinated move status:                ${tPlaneMoveStatus & 0xFF},
+         |S plane buffer space remaining:                 ${sPlaneBufferSpaceRemaining & 0xFFFF},
+         |T plane segment count of coordinated move:      ${tPlaneSegmentCount & 0xFFFF},
+         |T plane coordinated move status:                ${tPlaneMoveStatus & 0xFFFF},
          |T plane distance traveled in coordinated move:  $tPlaneDistanceTraveled,
-         |T plane buffer space remaining:                 ${tPlaneBufferSpaceRemaining & 0xFF},
+         |T plane buffer space remaining:                 ${tPlaneBufferSpaceRemaining & 0xFFFF},
        """.stripMargin
 
     def toParamSet: Set[Parameter[_]] = {
@@ -344,7 +345,7 @@ object DataRecord {
 
     override def toString: String = {
       s"""
-         |status:              ${status & 0xFF}
+         |status:              ${status & 0xFFFF}
          |switches:            $switches
          |stopCode:            $stopCode
          |referencePosition:   $referencePosition
@@ -353,7 +354,7 @@ object DataRecord {
          |auxiliaryPosition:   $auxiliaryPosition
          |velocity:            $velocity
          |torque:              $torque
-         |analogInput:         ${analogInput & 0xFF}
+         |analogInput:         ${analogInput & 0xFFFF}
          |hallInputStatus:     $hallInputStatus
          |reservedByte:        $reservedByte
          |userDefinedVariable: $userDefinedVariable
