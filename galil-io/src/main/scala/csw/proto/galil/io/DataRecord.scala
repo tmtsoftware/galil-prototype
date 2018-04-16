@@ -5,8 +5,8 @@ import java.nio.{ByteBuffer, ByteOrder}
 import akka.util.ByteString
 import csw.messages.commands.CommandResponse.CompletedWithResult
 import csw.messages.commands.{CommandResponse, Result}
-import csw.messages.params.generics.{KeyType, Parameter}
-import csw.messages.params.models.{Id, ObsId, Prefix, Struct}
+import csw.messages.params.generics.{Key, KeyType, Parameter}
+import csw.messages.params.models._
 import csw.proto.galil.io.DataRecord._
 import play.api.libs.json.{Json, OFormat}
 
@@ -16,6 +16,7 @@ import play.api.libs.json.{Json, OFormat}
   *
   * @param header       the parsed data from the 4 byte header
   * @param generalState data from byte 4 to 55 (sample number to amplifier status)
+  * @param axisStatuses an array of axis status, one for each value of axes ('A' to 'H'), Use default (0) values if axis not present
   */
 case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: Array[GalilAxisStatus]) {
 
@@ -33,7 +34,7 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
     * returned by the device.
     */
   def toByteBuffer: ByteBuffer = {
-    val buffer = ByteBuffer.allocateDirect(header.recordSize+1).order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = ByteBuffer.allocateDirect(header.recordSize + 1).order(ByteOrder.LITTLE_ENDIAN)
 
     header.write(buffer)
     generalState.write(buffer)
@@ -59,6 +60,11 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 
 object DataRecord {
 
+  /**
+    * Param set key for getting the raw data record bytes (with getDataRecordRaw command in GalilCommands.conf)
+    */
+  val key: Key[ArrayData[Byte]] = KeyType.ByteArrayKey.make("dataRecord")
+
   // JSON support
   implicit val headerJsonFormat: OFormat[Header] = Json.format[Header]
   implicit val generalStateJsonFormat: OFormat[GeneralState] = Json.format[GeneralState]
@@ -78,6 +84,7 @@ object DataRecord {
     * @param recordSize    size of the data record, including the header
     */
   case class Header(blocksPresent: List[String], recordSize: Int) {
+    import Header._
 
     /**
       * Appends the header to the buffer in the documented Galil format
@@ -96,14 +103,17 @@ object DataRecord {
          |Data record size: $recordSize
        """.stripMargin
 
-    // XXX FIXME: Return an array of axis chars instead of blocksPresent, which contains empty strings for missing blocks!
     def toParamSet: Set[Parameter[_]] = {
-      Set(KeyType.StringKey.make("blocksPresent").set(blocksPresent.toArray))
+      Set(blocksPresentKey.set(blocksPresent.toArray),
+        recordSizeKey.set(recordSize))
     }
 
   }
 
   object Header {
+    val recordSizeKey: Key[Int] = KeyType.IntKey.make("recordSize")
+    val blocksPresentKey: Key[String] = KeyType.StringKey.make("blocksPresent")
+
     /**
       * Initialze the header from the given byte buffer
       */
@@ -128,6 +138,15 @@ object DataRecord {
       val recordSize = buffer.getShort() & 0xFFFF
       Header(blocksPresent, recordSize)
     }
+
+    /**
+      * Initialze the header from the result of a command (See CompletedWithResult)
+      */
+    def apply(result: Result): Header = {
+      val blocksPresent = result.get(blocksPresentKey).get.values.toList
+      val recordSize = result.get(recordSizeKey).get.head
+      Header(blocksPresent, recordSize)
+    }
   }
 
   case class GeneralState(sampleNumber: Short,
@@ -147,6 +166,8 @@ object DataRecord {
                           tPlaneMoveStatus: Short,
                           tPlaneDistanceTraveled: Int,
                           tPlaneBufferSpaceRemaining: Short) {
+
+    import GeneralState._
 
     /**
       * Appends the GeneralState to the given ByteBuffer in the documented Galil format
@@ -200,29 +221,47 @@ object DataRecord {
 
     def toParamSet: Set[Parameter[_]] = {
       Set(
-        KeyType.ShortKey.make("sampleNumber").set(sampleNumber),
-        KeyType.ByteKey.make("inputs").set(inputs),
-        KeyType.ByteKey.make("outputs").set(outputs),
-        KeyType.ByteKey.make("ethernetHandleStatus").set(ethernetHandleStatus),
-        KeyType.ByteKey.make("errorCode").set(errorCode),
-        KeyType.ByteKey.make("threadStatus").set(threadStatus),
-        KeyType.IntKey.make("amplifierStatus").set(amplifierStatus),
-        KeyType.IntKey.make("contourModeSegmentCount").set(contourModeSegmentCount),
-        KeyType.ShortKey.make("contourModeBufferSpaceRemaining").set(contourModeBufferSpaceRemaining),
-        KeyType.IntKey.make("sPlaneSegmentCount").set(sPlaneSegmentCount),
-        KeyType.IntKey.make("sPlaneMoveStatus").set(sPlaneMoveStatus),
-        KeyType.IntKey.make("sPlaneDistanceTraveled").set(sPlaneDistanceTraveled),
-        KeyType.IntKey.make("sPlaneBufferSpaceRemaining").set(sPlaneBufferSpaceRemaining),
-        KeyType.IntKey.make("tPlaneSegmentCount").set(tPlaneSegmentCount),
-        KeyType.IntKey.make("tPlaneMoveStatus").set(tPlaneMoveStatus),
-        KeyType.IntKey.make("tPlaneDistanceTraveled").set(tPlaneDistanceTraveled),
-        KeyType.IntKey.make("tPlaneBufferSpaceRemaining").set(tPlaneBufferSpaceRemaining)
+        sampleNumberKey.set(sampleNumber),
+        inputsKey.set(inputs),
+        outputsKey.set(outputs),
+        outputsKey.set(ethernetHandleStatus),
+        errorCodeKey.set(errorCode),
+        threadStatusKey.set(threadStatus),
+        amplifierStatusKey.set(amplifierStatus),
+        contourModeSegmentCountKey.set(contourModeSegmentCount),
+        contourModeBufferSpaceRemainingKey.set(contourModeBufferSpaceRemaining),
+        sPlaneSegmentCountKey.set(sPlaneSegmentCount),
+        sPlaneMoveStatusKey.set(sPlaneMoveStatus),
+        sPlaneDistanceTraveledKey.set(sPlaneDistanceTraveled),
+        sPlaneBufferSpaceRemainingKey.set(sPlaneBufferSpaceRemaining),
+        tPlaneSegmentCountKey.set(tPlaneSegmentCount),
+        tPlaneMoveStatusKey.set(tPlaneMoveStatus),
+        tPlaneDistanceTraveledKey.set(tPlaneDistanceTraveled),
+        tPlaneBufferSpaceRemainingKey.set(tPlaneBufferSpaceRemaining)
       )
     }
 
   }
 
   object GeneralState {
+    val sampleNumberKey: Key[Short] = KeyType.ShortKey.make("sampleNumber")
+    val inputsKey: Key[Byte] = KeyType.ByteKey.make("inputs")
+    val outputsKey: Key[Byte] = KeyType.ByteKey.make("outputs")
+    val ethernetHandleStatusKey: Key[Byte] = KeyType.ByteKey.make("ethernetHandleStatus")
+    val errorCodeKey: Key[Byte] = KeyType.ByteKey.make("errorCode")
+    val threadStatusKey: Key[Byte] = KeyType.ByteKey.make("threadStatus")
+    val amplifierStatusKey: Key[Int] = KeyType.IntKey.make("amplifierStatus")
+    val contourModeSegmentCountKey: Key[Int] = KeyType.IntKey.make("contourModeSegmentCount")
+    val contourModeBufferSpaceRemainingKey: Key[Short] = KeyType.ShortKey.make("contourModeBufferSpaceRemaining")
+    val sPlaneSegmentCountKey: Key[Int] = KeyType.IntKey.make("sPlaneSegmentCount")
+    val sPlaneMoveStatusKey: Key[Int] = KeyType.IntKey.make("sPlaneMoveStatus")
+    val sPlaneDistanceTraveledKey: Key[Int] = KeyType.IntKey.make("sPlaneDistanceTraveled")
+    val sPlaneBufferSpaceRemainingKey: Key[Int] = KeyType.IntKey.make("sPlaneBufferSpaceRemaining")
+    val tPlaneSegmentCountKey: Key[Int] = KeyType.IntKey.make("tPlaneSegmentCount")
+    val tPlaneMoveStatusKey: Key[Int] = KeyType.IntKey.make("tPlaneMoveStatus")
+    val tPlaneDistanceTraveledKey: Key[Int] = KeyType.IntKey.make("tPlaneDistanceTraveled")
+    val tPlaneBufferSpaceRemainingKey: Key[Int] = KeyType.IntKey.make("tPlaneBufferSpaceRemaining")
+
 
     /**
       * Initializes from the given ByteBuffer in the documented Galil data record format
@@ -257,7 +296,7 @@ object DataRecord {
 
       // ADDR 42 - 49
       val ethernetHandleStatus = axes.map(_ => buffer.get).toArray
-//      val ethernetHandleStatus = axes.flatMap(axis =>  if (header.blocksPresent.contains(axis.toString)) Some(buffer.get) else None).toArray
+      //      val ethernetHandleStatus = axes.flatMap(axis =>  if (header.blocksPresent.contains(axis.toString)) Some(buffer.get) else None).toArray
 
       // ADDR 50
       val errorCode = buffer.get()
@@ -323,6 +362,7 @@ object DataRecord {
                              hallInputStatus: Byte = 0, // unsigned
                              reservedByte: Byte = 0, //unsigned
                              userDefinedVariable: Int = 0) {
+    import GalilAxisStatus._
 
     /**
       * Appends bytes to the buffer in the documented Galil format
@@ -363,23 +403,34 @@ object DataRecord {
 
     def toParamSet: Set[Parameter[_]] = {
       Set(
-        KeyType.ShortKey.make("status").set(status),
-        KeyType.ByteKey.make("switches").set(switches),
-        KeyType.ByteKey.make("stopCode").set(stopCode),
-        KeyType.IntKey.make("referencePosition").set(referencePosition),
-        KeyType.IntKey.make("motorPosition").set(motorPosition),
-        KeyType.IntKey.make("positionError").set(positionError),
-        KeyType.IntKey.make("auxiliaryPosition").set(auxiliaryPosition),
-        KeyType.IntKey.make("velocity").set(velocity),
-        KeyType.IntKey.make("torque").set(torque),
-        KeyType.ShortKey.make("analogInput").set(analogInput),
-        KeyType.ByteKey.make("hallInputStatus").set(hallInputStatus)
+        statusKey.set(status),
+        switchesKey.set(switches),
+        stopCodeKey.set(stopCode),
+        referencePositionKey.set(referencePosition),
+        motorPositionKey.set(motorPosition),
+        positionErrorKey.set(positionError),
+        auxiliaryPositionKey.set(auxiliaryPosition),
+        velocityKey.set(velocity),
+        torqueKey.set(torque),
+        analogInputKey.set(analogInput),
+        hallInputStatusKey.set(hallInputStatus)
       )
     }
 
   }
 
   object GalilAxisStatus {
+    val statusKey: Key[Short] = KeyType.ShortKey.make("status")
+    val switchesKey: Key[Byte] = KeyType.ByteKey.make("switches")
+    val stopCodeKey: Key[Byte] = KeyType.ByteKey.make("stopCode")
+    val referencePositionKey: Key[Int] = KeyType.IntKey.make("referencePosition")
+    val motorPositionKey: Key[Int] = KeyType.IntKey.make("motorPosition")
+    val positionErrorKey: Key[Int] = KeyType.IntKey.make("positionError")
+    val auxiliaryPositionKey: Key[Int] = KeyType.IntKey.make("auxiliaryPosition")
+    val velocityKey: Key[Int] = KeyType.IntKey.make("velocity")
+    val torqueKey: Key[Int] = KeyType.IntKey.make("torque")
+    val analogInputKey: Key[Short] = KeyType.ShortKey.make("analogInput")
+    val hallInputStatusKey: Key[Byte] = KeyType.ByteKey.make("hallInputStatus")
 
     /**
       * Initialzie from the given bytes

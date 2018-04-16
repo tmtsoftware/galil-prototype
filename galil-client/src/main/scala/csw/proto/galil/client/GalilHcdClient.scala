@@ -1,9 +1,11 @@
 package csw.proto.galil.client
 
+import java.io.IOException
+
 import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.actor.typed
-import akka.util.Timeout
+import akka.util.{ByteString, Timeout}
 import csw.messages.location.ComponentType.HCD
 import csw.messages.location.Connection.AkkaConnection
 import csw.messages.location._
@@ -16,6 +18,7 @@ import scala.concurrent.duration._
 import akka.actor.typed.scaladsl.adapter._
 import csw.messages.commands.CommandResponse.Error
 import csw.messages.commands.{CommandName, CommandResponse, Setup}
+import csw.proto.galil.io.DataRecord
 import csw.services.command.scaladsl.CommandService
 
 /**
@@ -55,15 +58,36 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: 
     * Sends a getDataRecord message to the HCD and returns the response
     */
   def getDataRecord(obsId: Option[ObsId], axis: Option[Char] = None): Future[CommandResponse] = {
-    // FIXME: THere are still problems parsing result when an axis argument is passed
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val s = Setup(source, CommandName("getDataRecord"), obsId)
+        // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
         hcd.submitAndSubscribe(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
+    }
+  }
+
+  /**
+    * Sends a getDataRecord message to the HCD and returns a DataRecord object
+    */
+  def getDataRecordRaw(obsId: Option[ObsId], axis: Option[Char] = None): Future[DataRecord] = {
+    getGalilHcd.flatMap {
+      case Some(hcd) =>
+        val s = Setup(source, CommandName("getDataRecordRaw"), obsId)
+        // FIXME: There are still problems parsing result when an axis argument is passed
+        val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
+        hcd.submitAndSubscribe(setup).map {
+          case CommandResponse.CompletedWithResult(id, result) =>
+            val bytes = result.get(DataRecord.key).get.head.values
+            DataRecord(ByteString(bytes))
+          case x => throw new IOException(s"Unexpected result from getDataRecordRaw command: $x")
+        }
+
+      case None =>
+        Future.failed(new IOException("Can't locate Galil HCD"))
     }
   }
 

@@ -6,6 +6,7 @@ import akka.actor.ActorSystem
 import csw.messages.commands.CommandResponse.CompletedWithResult
 import csw.messages.params.generics.KeyType
 import csw.messages.params.models.Prefix
+import csw.proto.galil.io.DataRecord
 import csw.services.location.commons.ClusterAwareSettings
 import csw.services.location.scaladsl.LocationServiceFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
@@ -61,10 +62,13 @@ object GalilHcdClientApp extends App {
 
   val resp12= Await.result(galilHcdClient.setFindIndexMode(maybeObsId, 'A'), 3.seconds)
   println(s"setFindIndexMode: $resp12")
-  
+
+
+  // --- Data Record Access ---
+
+  // 1. getDataRecord sends QR and returns the parsed fields in the result (The keys are defined in the DataRecord object)
   val resp13= Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
   println(s"getDataRecord: $resp13")
-
   val result = resp13.asInstanceOf[CompletedWithResult].result
 
   // Example of how you could extract the motor position for each axis
@@ -75,5 +79,13 @@ object GalilHcdClientApp extends App {
     println(s"Axis $axis: motor position: $motorPos")
   }
 
+  // 2. Alternative getDataRecordRaw command returns the raw bytes, so you can create a DataRecord object locally
+  val dataRecord = Await.result(galilHcdClient.getDataRecordRaw(maybeObsId), 3.seconds)
+  println(s"getDataRecordRaw: $dataRecord")
+  val blocksPresent2 = dataRecord.header.blocksPresent
+  DataRecord.axes.zip(dataRecord.axisStatuses).foreach { p =>
+    if (blocksPresent2.contains(p._1.toString))
+      println(s"Axis ${p._1}: motor position: ${p._2.motorPosition}")
+  }
 }
 

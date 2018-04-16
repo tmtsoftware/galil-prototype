@@ -4,6 +4,9 @@ import java.io.IOException
 
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
+import akka.util.ByteString
+import csw.messages.commands.CommandResponse.CompletedWithResult
+import csw.messages.commands.Result
 import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
@@ -69,9 +72,16 @@ private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
       if (commandString.startsWith("QR")) {
         val response = galilIo.send(commandString)
         val bs = response.head._2
-        val dr = DataRecord(bs)
-        log.debug(s"Data Record (size: ${bs.size}): $dr")
-        handleDataRecordResponse(dr, prefix, runId, maybeObsId, commandKey)
+        log.debug(s"Data Record size: ${bs.size})")
+        if (commandKey.name.equals("getDataRecord")) {
+          // parse the data record
+          val dr = DataRecord(bs)
+          log.debug(s"Data Record: $dr")
+          handleDataRecordResponse(dr, prefix, runId, maybeObsId, commandKey)
+        } else {
+          // return a paramset with the raw data record bytes
+          handleDataRecordRawResponse(bs, prefix, runId, maybeObsId, commandKey)
+        }
       } else {
         val response = galilSend(commandString)
         handleGalilResponse(response, prefix, runId, maybeObsId, commandKey)
@@ -84,6 +94,12 @@ private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                                   cmdMapEntry: CommandMapEntry): Unit = {
     log.debug(s"handleDataRecordResponse $dr")
     val returnResponse = DataRecord.makeCommandResponse(prefix, runId, maybeObsId, dr)
+    commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
+  }
+
+  private def handleDataRecordRawResponse(bs: ByteString, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
+                                  cmdMapEntry: CommandMapEntry): Unit = {
+    val returnResponse = CompletedWithResult(runId, Result(prefix, Set(DataRecord.key.set(bs.toByteBuffer.array()))))
     commandResponseManager.addOrUpdateCommand(returnResponse.runId, returnResponse)
   }
 

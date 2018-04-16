@@ -28,6 +28,7 @@ lazy val `galil-client` = project
     `csw-framework`,
     scalaTest % Test
   ))
+  .dependsOn(`galil-io`)
 
 // A Galil hardware simulator
 lazy val `galil-simulator` = project

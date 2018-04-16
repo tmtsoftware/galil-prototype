@@ -74,7 +74,6 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
 
   test("Test DataRecord generation and parsing") {
     val r = galilIo.send("QR")
-//    val r = galilIo.send("QR ABCD") // XXX TODO: Figure out the format of the result with axis argument (or multiple axes)
     val bs1 = r.head._2
     val dr1 = DataRecord(bs1)
     println(s"\nData Record (size: ${bs1.size}): $dr1")

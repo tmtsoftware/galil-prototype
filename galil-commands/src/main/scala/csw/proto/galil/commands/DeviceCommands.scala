@@ -111,7 +111,6 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
 
   // Parses and returns the command's response
   private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
-    println(s"XXX ${cmdEntry.name} responseStr = $responseStr")
     if (cmdEntry.responseFormat.isEmpty) {
       Completed(setup.runId)
     } else {

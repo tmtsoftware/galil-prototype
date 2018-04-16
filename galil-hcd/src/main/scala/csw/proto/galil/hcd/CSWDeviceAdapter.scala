@@ -138,10 +138,10 @@ class CSWDeviceAdapter(config: Config) {
                          paramSet: List[Parameter[_]]): List[Parameter[_]] = {
 
     paramValues.zip(paramDefs).map { pair =>
-      val name = pair._2.name
+      val name = pair._2.name.trim
       val key = commandParamKeyMap(name)
-      val typeStr = pair._2.typeStr
-      val valueStr = pair._1
+      val typeStr = pair._2.typeStr.trim
+      val valueStr = pair._1.trim
 
       typeStr match {
         case "char" => key.asInstanceOf[Key[Char]].set(valueStr.charAt(0))
