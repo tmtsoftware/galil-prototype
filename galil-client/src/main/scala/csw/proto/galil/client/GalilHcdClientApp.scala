@@ -71,7 +71,8 @@ object GalilHcdClientApp extends App {
   println(s"getDataRecord: $resp13")
   val result = resp13.asInstanceOf[CompletedWithResult].result
 
-  // Example of how you could extract the motor position for each axis
+  // Example of how you could extract the motor position for each axis.
+  // The axis status for each axis is stored in a param set "struct" with tha name of the axis.
   val blocksPresent = result.get(KeyType.StringKey.make("blocksPresent")).get.values
   blocksPresent.filter(b => b >= "A" && b <= "F").foreach { axis =>
     val struct = result.get(KeyType.StructKey.make(axis)).get.head
@@ -82,7 +83,9 @@ object GalilHcdClientApp extends App {
   // 2. Alternative getDataRecordRaw command returns the raw bytes, so you can create a DataRecord object locally
   val dataRecord = Await.result(galilHcdClient.getDataRecordRaw(maybeObsId), 3.seconds)
   println(s"getDataRecordRaw: $dataRecord")
+  // blocksPresent is a list that contains the name of the axis ("A" to "H") for each block present, or an empty string if the block not present
   val blocksPresent2 = dataRecord.header.blocksPresent
+  // print the motor position for each axis that is present
   DataRecord.axes.zip(dataRecord.axisStatuses).foreach { p =>
     if (blocksPresent2.contains(p._1.toString))
       println(s"Axis ${p._1}: motor position: ${p._2.motorPosition}")
