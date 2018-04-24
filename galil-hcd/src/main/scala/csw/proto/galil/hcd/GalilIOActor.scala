@@ -13,6 +13,7 @@ import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import csw.services.command.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
+import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
 
 /**
   * Worker actor that handles the Galil I/O
@@ -20,7 +21,7 @@ import csw.services.logging.scaladsl.LoggerFactory
 private[hcd] object GalilIOActor {
   def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
                adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
-    Behaviors.mutable(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
+    Behaviors.setup(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
 }
 
 private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
@@ -28,7 +29,7 @@ private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
                                      commandResponseManager: CommandResponseManager,
                                      adapter: CSWDeviceAdapter,
                                      loggerFactory: LoggerFactory)
-  extends Behaviors.MutableBehavior[GalilCommandMessage] {
+  extends MutableBehavior[GalilCommandMessage] {
 
   private val log = loggerFactory.getLogger
 
