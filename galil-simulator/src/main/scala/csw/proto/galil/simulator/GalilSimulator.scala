@@ -157,7 +157,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
     val dataRecord = DataRecord(header, generalState, axisStatuses)
 
-    println(s"DataRecord = $dataRecord")
+    //println(s"DataRecord = $dataRecord")
 
     dataRecord
   }
@@ -174,8 +174,6 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
     val galilAxisStatus = GalilAxisStatus(status, 0, 0, referencePosition, motorPosition, positionError,
       0, velocity, torque, 0, 0, 0, 1)
-
-    //println(s"galilAxisStatus = $galilAxisStatus")
 
     galilAxisStatus
 

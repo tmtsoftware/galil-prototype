@@ -9,7 +9,7 @@ import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.{Behaviors, MutableBehavior, TimerScheduler}
 import akka.util.ByteString
 import csw.framework.scaladsl.CurrentStatePublisher
-import csw.messages.params.generics.KeyType
+import csw.messages.params.generics.{Key, KeyType, Parameter}
 import csw.messages.params.models.Prefix
 import csw.messages.params.models.Units.degree
 import csw.messages.params.states.CurrentState
@@ -114,7 +114,7 @@ object StatePollerMessage {
 
       val dataRecord = queryDataRecord()
 
-      log.debug(s"dataRecord = $dataRecord")
+      //log.debug(s"dataRecord = $dataRecord")
 
       val motorPositions = ArrayBuffer[Int]()
       val positionErrors = ArrayBuffer[Int]()
@@ -145,6 +145,12 @@ object StatePollerMessage {
 
       val timestamp = timestampKey.set(Instant.now)
 
+
+      // FIXME: matcher test only
+      val testParam: Parameter[Int] = KeyType.IntKey.make("encoder").set(100)
+
+
+
       //create CurrentState and use sequential add
       val currentState = CurrentState(prefix)
         .add(motorPositionParam)
@@ -155,17 +161,18 @@ object StatePollerMessage {
         .add(torqueParam)
         .add(errorCodeParam)
         .add(timestamp)
+        .add(testParam)
 
       currentStatePublisher.publish(currentState)
 
     }
 
     private def queryDataRecord(): DataRecord = {
-      log.debug(s"Sending 'QR to Galil")
+      //log.debug(s"Sending 'QR to Galil")
       val responses = galilIo.send("QR")
 
       val bs: ByteString  = responses.head._2
-      log.debug(s"Data Record size: ${bs.size})")
+      //log.debug(s"Data Record size: ${bs.size})")
 
       // parse the data record
       val dr = DataRecord(bs)
@@ -176,12 +183,12 @@ object StatePollerMessage {
     }
 
     private def galilSend(cmd: String): String = {
-      log.debug(s"Sending '$cmd' to Galil")
+      //log.debug(s"Sending '$cmd' to Galil")
       val responses = galilIo.send(cmd)
       if (responses.lengthCompare(1) != 0)
         throw new RuntimeException(s"Received ${responses.size} responses to Galil $cmd")
       val resp = responses.head._2.utf8String
-      log.debug(s"Response from Galil: $resp")
+      //log.debug(s"Response from Galil: $resp")
       resp
     }
 
