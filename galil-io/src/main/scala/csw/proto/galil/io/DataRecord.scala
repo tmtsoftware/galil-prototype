@@ -308,7 +308,7 @@ object DataRecord {
       val amplifierStatus = buffer.getInt()
 
       // ADDR 56-59
-      val countourModeSegmentCount = buffer.getInt()
+      val countourModeSegmentCount = buffer.getInt()      /// screwed up
 
       // ADDR 60-61
       val contourModeBufferSpaceRemaining = buffer.getShort()

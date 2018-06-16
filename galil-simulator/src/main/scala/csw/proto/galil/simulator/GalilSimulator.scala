@@ -131,13 +131,13 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
     val header = Header(blocksPresent, recordSize)
 
     val sampleNumber = 28114.toShort
-    val inputs = (0 to 9).map(_ => 0.toByte).toArray
-    val outputs = (0 to 9).map(_ => 0.toByte).toArray
-    val ethernetHandleStatus = (0 to 8).map(_ => 0.toByte).toArray
-    val errorCode = 0.toByte
+    val inputs = (0 to 9).map(_ => 4.toByte).toArray
+    val outputs = (0 to 9).map(_ => 2.toByte).toArray
+    val ethernetHandleStatus = (0 to 7).map(_ => 2.toByte).toArray  // sm - changed to 7 from 8
+    val errorCode = 4.toByte
     val threadStatus = 0.toByte
     val amplifierStatus = 0
-    val contourModeSegmentCount = 0
+    val contourModeSegmentCount = 4
     val contourModeBufferSpaceRemaining = 0.toShort
     val sPlaneSegmentCount = 0.toShort
     val sPlaneMoveStatus = 0.toShort
@@ -153,9 +153,30 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
       sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
       tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
 
-    val axisStatuses = axes.map(_ => GalilAxisStatus()).toArray
+    val axisStatuses: Array[GalilAxisStatus] = axes.map(axis => generateAxisStatus(axis)).toArray
 
-    DataRecord(header, generalState, axisStatuses)
+    val dataRecord = DataRecord(header, generalState, axisStatuses)
+
+    //println(s"DataRecord = $dataRecord")
+
+    dataRecord
+  }
+
+
+  private def generateAxisStatus(axis: Char): GalilAxisStatus = {
+
+    val status: Short = 4
+    val referencePosition = 1700
+    val motorPosition = 243
+    val positionError = -25
+    val velocity = 100
+    val torque = 5
+
+    val galilAxisStatus = GalilAxisStatus(status, 0, 0, referencePosition, motorPosition, positionError,
+      0, velocity, torque, 0, 0, 0, 1)
+
+    galilAxisStatus
+
   }
 
   // Receives a future indicating when the flow associated with a client connection completes.

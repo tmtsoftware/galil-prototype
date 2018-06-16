@@ -22,6 +22,7 @@ private[hcd] object GalilIOActor {
   def behavior(galilConfig: GalilConfig, commandResponseManager: CommandResponseManager,
                adapter: CSWDeviceAdapter, loggerFactory: LoggerFactory): Behavior[GalilCommandMessage] =
     Behaviors.setup(ctx ⇒ GalilIOActor(ctx, galilConfig, commandResponseManager, adapter, loggerFactory))
+
 }
 
 private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
