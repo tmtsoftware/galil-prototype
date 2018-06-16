@@ -2,7 +2,7 @@ package csw.proto.galil.hcd
 
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{Config, ConfigFactory}
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
 import csw.messages.commands._
@@ -14,6 +14,7 @@ import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.hcd.StatePollerMessage.StartMessage
 import csw.services.command.scaladsl.CommandResponseManager
+import csw.services.event.scaladsl.EventService
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -38,9 +39,10 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
                         commandResponseManager: CommandResponseManager,
                         currentStatePublisher: CurrentStatePublisher,
                         locationService: LocationService,
+                        eventService: EventService,
                         loggerFactory: LoggerFactory
                        ): ComponentHandlers =
-    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, loggerFactory)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, eventService, loggerFactory)
 }
 
 
@@ -49,9 +51,10 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                commandResponseManager: CommandResponseManager,
                                currentStatePublisher: CurrentStatePublisher,
                                locationService: LocationService,
+                               eventService: EventService,
                                loggerFactory: LoggerFactory)
   extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
-    locationService, loggerFactory) {
+    locationService, eventService, loggerFactory) {
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
@@ -63,8 +66,8 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
 
 
   // read in poller flag from environment
-  val systemConfig = ctx.system.settings.config
-  val pollerEnabled = if (systemConfig.hasPath("galil.hcd.pollerEnabled")) systemConfig.getBoolean("galil.hcd.pollerEnabled") else false
+  val systemConfig: Config = ctx.system.settings.config
+  val pollerEnabled: Boolean = if (systemConfig.hasPath("galil.hcd.pollerEnabled")) systemConfig.getBoolean("galil.hcd.pollerEnabled") else false
 
   log.debug(s"pollerEnabled = $pollerEnabled")
 

@@ -9,10 +9,9 @@ import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.{Behaviors, MutableBehavior, TimerScheduler}
 import akka.util.ByteString
 import csw.framework.scaladsl.CurrentStatePublisher
-import csw.messages.params.generics.{Key, KeyType, Parameter}
+import csw.messages.params.generics.{KeyType, Parameter}
 import csw.messages.params.models.Prefix
-import csw.messages.params.models.Units.degree
-import csw.messages.params.states.CurrentState
+import csw.messages.params.states.{CurrentState, StateName}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -29,14 +28,16 @@ object StatePollerMessage {
 
 }
 
-  private case object TimerKey
+private case object TimerKey
 
-  object StatePollerActor {
-    def behavior(galilConfig: GalilConfig, currentStatePublisher: CurrentStatePublisher, loggerFactory: LoggerFactory): Behavior[StatePollerMessage] =
-      Behaviors.withTimers(timers ⇒ StatePollerActor(timers, galilConfig, currentStatePublisher, loggerFactory))
-  }
+object StatePollerActor {
+  def behavior(galilConfig: GalilConfig, currentStatePublisher: CurrentStatePublisher, loggerFactory: LoggerFactory): Behavior[StatePollerMessage] =
+    Behaviors.withTimers(timers ⇒ StatePollerActor(timers, galilConfig, currentStatePublisher, loggerFactory))
 
-  case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
+  val currentStateName = StateName("GalilState")
+}
+
+case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
                               galilConfig: GalilConfig,
                               currentStatePublisher: CurrentStatePublisher,
                               loggerFactory: LoggerFactory)
@@ -152,7 +153,7 @@ object StatePollerMessage {
 
 
       //create CurrentState and use sequential add
-      val currentState = CurrentState(prefix)
+      val currentState = CurrentState(prefix, StatePollerActor.currentStateName)
         .add(motorPositionParam)
         .add(positionErrorParam)
         .add(referencePositionParam)
