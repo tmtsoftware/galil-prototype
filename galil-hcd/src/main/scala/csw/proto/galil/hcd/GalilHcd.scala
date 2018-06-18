@@ -73,7 +73,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   if (pollerEnabled) {
     val statePublisherActor: ActorRef[StatePollerMessage] =
-      ctx.spawnAnonymous(StatePollerActor.behavior(galilConfig, currentStatePublisher, loggerFactory))
+      ctx.spawnAnonymous(StatePollerActor.behavior(galilConfig, componentInfo, currentStatePublisher, loggerFactory))
 
     log.debug(s"sending start message to state publisher: $statePublisherActor")
     statePublisherActor ! StartMessage()

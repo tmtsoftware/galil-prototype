@@ -9,6 +9,7 @@ import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.{Behaviors, MutableBehavior, TimerScheduler}
 import akka.util.ByteString
 import csw.framework.scaladsl.CurrentStatePublisher
+import csw.messages.framework.ComponentInfo
 import csw.messages.params.generics.{KeyType, Parameter}
 import csw.messages.params.models.Prefix
 import csw.messages.params.states.{CurrentState, StateName}
@@ -31,14 +32,15 @@ object StatePollerMessage {
 private case object TimerKey
 
 object StatePollerActor {
-  def behavior(galilConfig: GalilConfig, currentStatePublisher: CurrentStatePublisher, loggerFactory: LoggerFactory): Behavior[StatePollerMessage] =
-    Behaviors.withTimers(timers ⇒ StatePollerActor(timers, galilConfig, currentStatePublisher, loggerFactory))
+  def behavior(galilConfig: GalilConfig, componentInfo: ComponentInfo, currentStatePublisher: CurrentStatePublisher, loggerFactory: LoggerFactory): Behavior[StatePollerMessage] =
+    Behaviors.withTimers(timers ⇒ StatePollerActor(timers, galilConfig, componentInfo, currentStatePublisher, loggerFactory))
 
   val currentStateName = StateName("GalilState")
 }
 
 case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
-                              galilConfig: GalilConfig,
+                            galilConfig: GalilConfig,
+                            componentInfo: ComponentInfo,
                               currentStatePublisher: CurrentStatePublisher,
                               loggerFactory: LoggerFactory)
     extends MutableBehavior[StatePollerMessage] {
@@ -75,7 +77,8 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
 
 
     //prefix
-    val prefix = Prefix("tcs.test")
+    val prefix = componentInfo.prefix
+
 
     //keys
     val timestampKey = KeyType.TimestampKey.make("timestampKey")
