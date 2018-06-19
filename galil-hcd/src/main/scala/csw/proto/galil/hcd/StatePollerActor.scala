@@ -118,54 +118,13 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
 
       val dataRecord = queryDataRecord()
 
-      //log.debug(s"dataRecord = $dataRecord")
-
-      val motorPositions = ArrayBuffer[Int]()
-      val positionErrors = ArrayBuffer[Int]()
-      val referencePositions = ArrayBuffer[Int]()
-      val statuses = ArrayBuffer[Short]()
-      val velocities = ArrayBuffer[Int]()
-      val torques = ArrayBuffer[Int]()
-
-      dataRecord.axisStatuses.foreach((axis: DataRecord.GalilAxisStatus) => {
-
-        motorPositions += axis.motorPosition
-        positionErrors += axis.positionError
-        referencePositions += axis.referencePosition
-        statuses += axis.status
-        velocities += axis.velocity
-        torques += axis.torque
-
-      })
-
-      val motorPositionParam = DataRecord.GalilAxisStatus.motorPositionKey.set(motorPositions.toArray)
-      val positionErrorParam = DataRecord.GalilAxisStatus.positionErrorKey.set(positionErrors.toArray)
-      val referencePositionParam = DataRecord.GalilAxisStatus.referencePositionKey.set(referencePositions.toArray)
-      val statusParam = DataRecord.GalilAxisStatus.statusKey.set(statuses.toArray)
-      val velocityParam = DataRecord.GalilAxisStatus.velocityKey.set(velocities.toArray)
-      val torqueParam = DataRecord.GalilAxisStatus.torqueKey.set(torques.toArray)
-
-      val errorCodeParam = DataRecord.GeneralState.errorCodeKey.set(dataRecord.generalState.errorCode)
 
       val timestamp = timestampKey.set(Instant.now)
 
 
-      // FIXME: matcher test only
-      val testParam: Parameter[Int] = KeyType.IntKey.make("encoder").set(100)
-
-
-
       //create CurrentState and use sequential add
-      val currentState = CurrentState(prefix, StatePollerActor.currentStateName)
-        .add(motorPositionParam)
-        .add(positionErrorParam)
-        .add(referencePositionParam)
-        .add(statusParam)
-        .add(velocityParam)
-        .add(torqueParam)
-        .add(errorCodeParam)
+      val currentState = CurrentState(prefix, StatePollerActor.currentStateName, dataRecord.toParamSet)
         .add(timestamp)
-        .add(testParam)
 
       currentStatePublisher.publish(currentState)
 

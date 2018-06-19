@@ -167,7 +167,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
     val status: Short = 4
     val referencePosition = 1700
-    val motorPosition = 243
+    val motorPosition = 100
     val positionError = -25
     val velocity = 100
     val torque = 5
