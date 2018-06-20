@@ -125,9 +125,9 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
   private def getDataRecord: DataRecord = {
     // XXX dummy values
-    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D")
+    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D", "E", "F", "G", "H")
 
-    val recordSize = 226
+    val recordSize = 370
     val header = Header(blocksPresent, recordSize)
 
     val sampleNumber = 28114.toShort
