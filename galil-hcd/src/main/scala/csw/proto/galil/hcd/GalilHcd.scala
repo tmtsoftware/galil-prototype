@@ -3,16 +3,18 @@ package csw.proto.galil.hcd
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
+import csw.framework.CurrentStatePublisher
 import csw.framework.deploy.containercmd.ContainerCmd
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.messages.TopLevelActorMessage
 import csw.messages.commands._
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.models.{Id, ObsId, Prefix}
-import csw.messages.scaladsl.TopLevelActorMessage
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
-import csw.services.command.scaladsl.CommandResponseManager
+import csw.services.command.CommandResponseManager
+import csw.services.event.scaladsl.EventService
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -37,9 +39,10 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
                         commandResponseManager: CommandResponseManager,
                         currentStatePublisher: CurrentStatePublisher,
                         locationService: LocationService,
+                        eventService: EventService,
                         loggerFactory: LoggerFactory
                        ): ComponentHandlers =
-    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, loggerFactory)
+    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, eventService, loggerFactory)
 }
 
 
@@ -48,9 +51,10 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                commandResponseManager: CommandResponseManager,
                                currentStatePublisher: CurrentStatePublisher,
                                locationService: LocationService,
+                               eventService: EventService,
                                loggerFactory: LoggerFactory)
   extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
-    locationService, loggerFactory) {
+    locationService, eventService, loggerFactory) {
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext

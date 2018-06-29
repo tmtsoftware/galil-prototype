@@ -3,7 +3,7 @@ package csw.proto.galil.hcd
 import java.io.IOException
 
 import akka.actor.typed.Behavior
-import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
+import akka.actor.typed.scaladsl.Behaviors
 import akka.util.ByteString
 import csw.messages.commands.CommandResponse.CompletedWithResult
 import csw.messages.commands.Result
@@ -11,9 +11,9 @@ import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
-import csw.services.command.scaladsl.CommandResponseManager
 import csw.services.logging.scaladsl.LoggerFactory
 import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
+import csw.services.command.CommandResponseManager
 
 /**
   * Worker actor that handles the Galil I/O
@@ -57,7 +57,7 @@ private[hcd] case class GalilIOActor(ctx: ActorContext[GalilCommandMessage],
 
   override def onMessage(msg: GalilCommandMessage): Behavior[GalilCommandMessage] = {
     msg match {
-      case (x: GalilCommandMessage) => processCommand(x)
+      case x: GalilCommandMessage => processCommand(x)
       case _ => log.error(s"unhandled message in GalilIOActor onMessage: $msg")
     }
     this

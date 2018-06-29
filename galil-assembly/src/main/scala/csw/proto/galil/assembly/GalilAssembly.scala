@@ -4,14 +4,17 @@ import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
+import csw.framework.CurrentStatePublisher
 import csw.framework.deploy.containercmd.ContainerCmd
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.messages.TopLevelActorMessage
 import csw.messages.commands.CommandResponse.Error
 import csw.messages.commands.{CommandResponse, ControlCommand, Setup}
 import csw.messages.framework.ComponentInfo
 import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.messages.scaladsl.TopLevelActorMessage
-import csw.services.command.scaladsl.{CommandResponseManager, CommandService}
+import csw.services.command.CommandResponseManager
+import csw.services.command.scaladsl.CommandService
+import csw.services.event.scaladsl.EventService
 import csw.services.location.scaladsl.LocationService
 import csw.services.logging.scaladsl.LoggerFactory
 
@@ -28,9 +31,10 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
                 commandResponseManager: CommandResponseManager,
                 currentStatePublisher: CurrentStatePublisher,
                 locationService: LocationService,
+                eventService: EventService,
                 loggerFactory: LoggerFactory
               ): ComponentHandlers =
-    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, loggerFactory)
+    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, eventService, loggerFactory)
 }
 
 private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
@@ -38,9 +42,10 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
                                     commandResponseManager: CommandResponseManager,
                                     currentStatePublisher: CurrentStatePublisher,
                                     locationService: LocationService,
+                                    eventService: EventService,
                                     loggerFactory: LoggerFactory)
   extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
-    locationService, loggerFactory) {
+    locationService, eventService, loggerFactory) {
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
