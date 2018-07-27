@@ -4,6 +4,8 @@ import java.net.InetAddress
 
 import akka.actor.ActorSystem
 import akka.util.ByteString
+import csw.messages.commands.Result
+import csw.messages.params.models.Prefix
 import csw.services.location.commons.ActorSystemFactory
 import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
@@ -75,6 +77,8 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   test("Test DataRecord generation and parsing") {
     val r = galilIo.send("QR")
     val bs1 = r.head._2
+
+    // Test creating a DataRecord from the bytes returned from the Galil device
     val dr1 = DataRecord(bs1)
     println(s"\nData Record (size: ${bs1.size}): $dr1")
     val bs2 = ByteString(dr1.toByteBuffer)
@@ -83,6 +87,11 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     println(s"\nGenerated Data Record: $dr2")
     assert(dr1.toString == dr2.toString)
 
-    println(s"DataRecord ParamSet: ${dr1.toParamSet}\n")
+    // Test creating a DataRecord from a paramset (wrapped in a Result object, which contains a prefix and a param set)
+    val paramSet = dr1.toParamSet
+    println(s"DataRecord ParamSet: $paramSet\n")
+    val result = Result(Prefix("test.one"), paramSet)
+    val dr3 = DataRecord(result)
+    assert(dr1.toString == dr3.toString)
   }
 }

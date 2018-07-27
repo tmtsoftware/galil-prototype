@@ -140,7 +140,7 @@ object DataRecord {
     }
 
     /**
-      * Initialze the header from the result of a command (See CompletedWithResult)
+      * Initialze from the result of a command (See CompletedWithResult)
       */
     def apply(result: Result): Header = {
       val blocksPresent = result.get(blocksPresentKey).get.values.toList
@@ -224,7 +224,7 @@ object DataRecord {
         sampleNumberKey.set(sampleNumber),
         inputsKey.set(inputs),
         outputsKey.set(outputs),
-        outputsKey.set(ethernetHandleStatus),
+        ethernetHandleStatusKey.set(ethernetHandleStatus),
         errorCodeKey.set(errorCode),
         threadStatusKey.set(threadStatus),
         amplifierStatusKey.set(amplifierStatus),
@@ -347,6 +347,35 @@ object DataRecord {
         sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
         tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
     }
+
+    /**
+      * Creates a GeneralState from the result of a command (See CompletedWithResult)
+      */
+    def apply(result: Result): GeneralState = {
+      val sampleNumber = result.get(sampleNumberKey).get.head
+      val inputs = result.get(inputsKey).get.values
+      val outputs = result.get(outputsKey).get.values
+      val ethernetHandleStatus = result.get(ethernetHandleStatusKey).get.values
+      val errorCode = result.get(errorCodeKey).get.head
+      val threadStatus = result.get(threadStatusKey).get.head
+      val amplifierStatus = result.get(amplifierStatusKey).get.head
+      val countourModeSegmentCount = result.get(contourModeSegmentCountKey).get.head
+      val contourModeBufferSpaceRemaining = result.get(contourModeBufferSpaceRemainingKey).get.head
+      val sPlaneSegmentCount = result.get(sPlaneSegmentCountKey).get.head.toShort
+      val sPlaneMoveStatus = result.get(sPlaneMoveStatusKey).get.head.toShort
+      val sPlaneDistanceTraveled = result.get(sPlaneDistanceTraveledKey).get.head
+      val sPlaneBufferSpaceRemaining = result.get(sPlaneBufferSpaceRemainingKey).get.head.toShort
+      val tPlaneSegmentCount = result.get(tPlaneSegmentCountKey).get.head.toShort
+      val tPlaneMoveStatus = result.get(tPlaneMoveStatusKey).get.head.toShort
+      val tPlaneDistanceTraveled = result.get(tPlaneDistanceTraveledKey).get.head
+      val tPlaneBufferSpaceRemaining = result.get(tPlaneBufferSpaceRemainingKey).get.head.toShort
+
+      GeneralState(sampleNumber, inputs, outputs, ethernetHandleStatus, errorCode, threadStatus,
+        amplifierStatus, countourModeSegmentCount, contourModeBufferSpaceRemaining,
+        sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
+        tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
+    }
+
   }
 
   case class GalilAxisStatus(status: Short = 0, // unsigned
@@ -452,6 +481,28 @@ object DataRecord {
       GalilAxisStatus(status, switches, stopCode, referencePosition, motorPosition, positionError,
         auxiliaryPosition, velocity, torque, analogInput, hallInputStatus, reservedByte, userDefinedVariable)
     }
+
+    /**
+      * Initialze from the result of a command (See CompletedWithResult)
+      */
+    def apply(result: Result): GalilAxisStatus = {
+      val status = result.get(statusKey).get.head
+      val switches = result.get(switchesKey).get.head
+      val stopCode = result.get(stopCodeKey).get.head
+      val referencePosition = result.get(referencePositionKey).get.head
+      val motorPosition = result.get(motorPositionKey).get.head
+      val positionError = result.get(positionErrorKey).get.head
+      val auxiliaryPosition = result.get(auxiliaryPositionKey).get.head
+      val velocity = result.get(velocityKey).get.head
+      val torque = result.get(torqueKey).get.head
+      val analogInput = result.get(analogInputKey).get.head
+      val hallInputStatus = result.get(hallInputStatusKey).get.head
+
+      GalilAxisStatus(status, switches, stopCode, referencePosition, motorPosition, positionError,
+        auxiliaryPosition, velocity, torque, analogInput, hallInputStatus)
+
+    }
+
   }
 
   private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
@@ -503,6 +554,22 @@ object DataRecord {
     val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
+    }
+    DataRecord(header, generalState, axisStatuses.toArray)
+  }
+
+  /**
+    * Initialze the header from the result of a command (See CompletedWithResult)
+    */
+  def apply(result: Result): DataRecord = {
+    val header = Header(result)
+    val generalState = GeneralState(result)
+    val axisStatuses = axes.flatMap { axis =>
+      val axisKey = KeyType.StructKey.make(axis.toString)
+      result.get(axisKey)
+        .map(_.head.paramSet)
+        .map(Result(result.prefix, _))
+        .map(GalilAxisStatus(_))
     }
     DataRecord(header, generalState, axisStatuses.toArray)
   }
