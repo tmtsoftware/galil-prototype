@@ -13,6 +13,7 @@ import csw.messages.location.TrackingEvent
 import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
+import csw.services.alarm.api.scaladsl.AlarmService
 import csw.services.command.CommandResponseManager
 import csw.services.event.api.scaladsl.EventService
 import csw.services.location.scaladsl.LocationService
@@ -28,8 +29,12 @@ object GalilCommandMessage {
 
   case class GalilCommand(commandString: String) extends GalilCommandMessage
 
-  case class GalilRequest(commandString: String, prefix: Prefix, runId: Id, maybeObsId: Option[ObsId],
-                          cmdMapEntry: CommandMapEntry) extends GalilCommandMessage
+  case class GalilRequest(commandString: String,
+                          prefix: Prefix,
+                          runId: Id,
+                          maybeObsId: Option[ObsId],
+                          cmdMapEntry: CommandMapEntry)
+      extends GalilCommandMessage
 
 }
 
@@ -40,11 +45,17 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
                         currentStatePublisher: CurrentStatePublisher,
                         locationService: LocationService,
                         eventService: EventService,
-                        loggerFactory: LoggerFactory
-                       ): ComponentHandlers =
-    new GalilHcdHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, eventService, loggerFactory)
+                        alarmService: AlarmService,
+                        loggerFactory: LoggerFactory): ComponentHandlers =
+    new GalilHcdHandlers(ctx,
+                         componentInfo,
+                         commandResponseManager,
+                         currentStatePublisher,
+                         locationService,
+                         eventService,
+                         alarmService,
+                         loggerFactory)
 }
-
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                componentInfo: ComponentInfo,
@@ -52,16 +63,24 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                currentStatePublisher: CurrentStatePublisher,
                                locationService: LocationService,
                                eventService: EventService,
+                               alarmService: AlarmService,
                                loggerFactory: LoggerFactory)
-  extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
-    locationService, eventService, loggerFactory) {
+    extends ComponentHandlers(ctx,
+                              componentInfo,
+                              commandResponseManager,
+                              currentStatePublisher,
+                              locationService,
+                              eventService,
+                              alarmService,
+                              loggerFactory) {
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val config = ConfigFactory.load("GalilCommands.conf")
   private val adapter = new CSWDeviceAdapter(config)
-  private val galilHardwareActor: ActorRef[GalilCommandMessage] = ctx.spawnAnonymous(
-    GalilIOActor.behavior(getGalilConfig, commandResponseManager, adapter, loggerFactory))
+  private val galilHardwareActor: ActorRef[GalilCommandMessage] =
+    ctx.spawnAnonymous(GalilIOActor
+      .behavior(getGalilConfig, commandResponseManager, adapter, loggerFactory))
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -75,7 +94,8 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
-  override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
+  override def validateCommand(
+      controlCommand: ControlCommand): CommandResponse = {
     log.debug(s"validateSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -85,13 +105,19 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
           if (cmdString.isSuccess) {
             CommandResponse.Accepted(controlCommand.runId)
           } else {
-            CommandResponse.Invalid(controlCommand.runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
+            CommandResponse.Invalid(controlCommand.runId,
+                                    CommandIssue.ParameterValueOutOfRangeIssue(
+                                      cmdString.failed.get.getMessage))
           }
         } else {
-          CommandResponse.Invalid(controlCommand.runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
+          CommandResponse.Invalid(
+            controlCommand.runId,
+            CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
         }
       case _: Observe =>
-        CommandResponse.Invalid(controlCommand.runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
+        CommandResponse.Invalid(
+          controlCommand.runId,
+          CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
 
@@ -103,7 +129,11 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get, setup.source, setup.runId, setup.maybeObsId, cmdMapEntry.get)
+            galilHardwareActor ! GalilRequest(cmdString.get,
+                                              setup.source,
+                                              setup.runId,
+                                              setup.maybeObsId,
+                                              cmdMapEntry.get)
           }
         }
       case _ => // Only Setups handled
@@ -130,8 +160,11 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   def getGalilConfig: GalilConfig = {
     val config = ctx.system.settings.config
-    val host = if (config.hasPath("galil.host")) config.getString("galil.host") else "127.0.0.1"
-    val port = if (config.hasPath("galil.port")) config.getInt("galil.port") else 8888
+    val host =
+      if (config.hasPath("galil.host")) config.getString("galil.host")
+      else "127.0.0.1"
+    val port =
+      if (config.hasPath("galil.port")) config.getInt("galil.port") else 8888
     log.info(s"Galil host = $host, port = $port")
     GalilConfig(host, port)
   }
