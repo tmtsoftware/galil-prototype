@@ -57,20 +57,15 @@ for csh or tcsh. The list of available network interfaces can be found using the
 If you don't specify the network interface this way, a default will be chosen, which might sometimes not be
 the one you expect. 
 
-* Start the location service: 
+* Start the csw services: 
 
 ```bash
-csw-cluster-seed --clusterPort 7777
-```
-
-* Start the config service:
-```bash
-csw-config-server --initRepo
+csw-services.sh start
 ```
 
 To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
 ```
-galil-hcd --local GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
+galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
 ```
 
 An example GalilHcd.conf file can be found [here](galil-hcd/src/main/resources/GalilHcd.conf). 
@@ -79,7 +74,7 @@ If `--local` is not given, the file would be fetched from the Config Service, if
 To run using a Galil simulator:
 ```
 galil-simulator
-galil-hcd --local GalilHcd.conf
+galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf
 ```
 
 ## Loading the galil-prototype project in IntelliJ Idea

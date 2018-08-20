@@ -90,5 +90,8 @@ object GalilHcdClientApp extends App {
     if (blocksPresent2.contains(p._1.toString))
       println(s"Axis ${p._1}: motor position: ${p._2.motorPosition}")
   }
+
+  import system.dispatcher
+  system.terminate().onComplete(_ => System.exit(0))
 }
 
