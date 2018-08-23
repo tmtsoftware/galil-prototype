@@ -14,7 +14,8 @@ object Settings {
     scalaVersion := Dependencies.ScalaVersion,
     crossPaths := true,
     parallelExecution in Test := false,
-    fork := true
+    fork := true,
+    updateOptions := updateOptions.value.withLatestSnapshots(false)
   )
 
   lazy val defaultSettings = buildSettings ++ Seq(
