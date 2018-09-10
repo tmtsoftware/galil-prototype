@@ -3,21 +3,15 @@ package csw.proto.galil.hcd
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
-import csw.framework.CurrentStatePublisher
 import csw.framework.deploy.containercmd.ContainerCmd
+import csw.framework.models.CswServices
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.messages.TopLevelActorMessage
 import csw.messages.commands._
-import csw.messages.framework.ComponentInfo
 import csw.messages.location.TrackingEvent
 import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
-import csw.services.alarm.api.scaladsl.AlarmService
-import csw.services.command.CommandResponseManager
-import csw.services.event.api.scaladsl.EventService
-import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.LoggerFactory
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -40,39 +34,15 @@ object GalilCommandMessage {
 
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(ctx: ActorContext[TopLevelActorMessage],
-                        componentInfo: ComponentInfo,
-                        commandResponseManager: CommandResponseManager,
-                        currentStatePublisher: CurrentStatePublisher,
-                        locationService: LocationService,
-                        eventService: EventService,
-                        alarmService: AlarmService,
-                        loggerFactory: LoggerFactory): ComponentHandlers =
-    new GalilHcdHandlers(ctx,
-                         componentInfo,
-                         commandResponseManager,
-                         currentStatePublisher,
-                         locationService,
-                         eventService,
-                         alarmService,
-                         loggerFactory)
+                        cswServices: CswServices): ComponentHandlers =
+    new GalilHcdHandlers(ctx, cswServices)
 }
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
-                               componentInfo: ComponentInfo,
-                               commandResponseManager: CommandResponseManager,
-                               currentStatePublisher: CurrentStatePublisher,
-                               locationService: LocationService,
-                               eventService: EventService,
-                               alarmService: AlarmService,
-                               loggerFactory: LoggerFactory)
-    extends ComponentHandlers(ctx,
-                              componentInfo,
-                              commandResponseManager,
-                              currentStatePublisher,
-                              locationService,
-                              eventService,
-                              alarmService,
-                              loggerFactory) {
+                               cswServices: CswServices)
+    extends ComponentHandlers(ctx, cswServices) {
+
+  import cswServices._
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
