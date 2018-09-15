@@ -3,10 +3,10 @@ package csw.proto.galil.io
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
-import csw.messages.commands.CommandResponse.CompletedWithResult
-import csw.messages.commands.{CommandResponse, Result}
-import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models._
+import csw.params.commands.CommandResponse.CompletedWithResult
+import csw.params.commands.{CommandResponse, Result}
+import csw.params.core.generics.{Key, KeyType, Parameter}
+import csw.params.core.models._
 import csw.proto.galil.io.DataRecord._
 import play.api.libs.json.{Json, OFormat}
 

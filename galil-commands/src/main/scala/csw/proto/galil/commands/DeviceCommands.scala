@@ -4,9 +4,9 @@ import com.typesafe.config.Config
 
 import scala.collection.JavaConverters._
 import DeviceCommands._
-import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult, Error}
-import csw.messages.commands.{CommandResponse, Result, Setup}
-import csw.messages.params.generics.{Key, KeyType, Parameter}
+import csw.params.commands.CommandResponse.{Completed, CompletedWithResult, Error}
+import csw.params.commands.{CommandResponse, Result, Setup}
+import csw.params.core.generics.{Key, KeyType, Parameter}
 
 import scala.annotation.tailrec
 

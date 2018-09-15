@@ -6,20 +6,20 @@ import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.actor.typed
 import akka.util.{ByteString, Timeout}
-import csw.messages.location.ComponentType.HCD
-import csw.messages.location.Connection.AkkaConnection
-import csw.messages.location._
-import csw.messages.params.generics.{Key, KeyType}
-import csw.messages.params.models.{Id, ObsId, Prefix}
-import csw.services.location.scaladsl.LocationService
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import akka.actor.typed.scaladsl.adapter._
-import csw.messages.commands.CommandResponse.Error
-import csw.messages.commands.{CommandName, CommandResponse, Setup}
+import csw.command.scaladsl.CommandService
+import csw.location.api.models.ComponentId
+import csw.location.api.models.ComponentType.HCD
+import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.scaladsl.LocationService
+import csw.params.commands.CommandResponse.Error
+import csw.params.commands.{CommandName, CommandResponse, Setup}
+import csw.params.core.generics.{Key, KeyType}
+import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.io.DataRecord
-import csw.services.command.scaladsl.CommandService
 
 /**
   * A client for locating and communicating with the Galil HCD

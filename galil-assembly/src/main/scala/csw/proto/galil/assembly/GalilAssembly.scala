@@ -4,14 +4,14 @@ import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
+import csw.command.messages.TopLevelActorMessage
+import csw.command.scaladsl.CommandService
 import csw.framework.deploy.containercmd.ContainerCmd
-import csw.framework.models.CswServices
+import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.messages.TopLevelActorMessage
-import csw.messages.commands.CommandResponse.Error
-import csw.messages.commands.{CommandResponse, ControlCommand, Setup}
-import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.services.command.scaladsl.CommandService
+import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.params.commands.CommandResponse.Error
+import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 
 import scala.async.Async._
 import scala.concurrent.duration._
@@ -21,14 +21,14 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 
 private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(
-      ctx: ActorContext[TopLevelActorMessage],
-      cswServices: CswServices
+                         ctx: ActorContext[TopLevelActorMessage],
+                         cswCtx: CswContext
   ): ComponentHandlers =
-    new GalilAssemblyHandlers(ctx, cswServices)
+    new GalilAssemblyHandlers(ctx, cswCtx)
 }
 
 private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
-                                    cswServices: CswServices)
+                                    cswServices: CswContext)
     extends ComponentHandlers(ctx, cswServices) {
 
   import cswServices._

@@ -5,15 +5,15 @@ import java.io.IOException
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
 import akka.util.ByteString
-import csw.messages.commands.CommandResponse.CompletedWithResult
-import csw.messages.commands.Result
-import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
-import csw.services.logging.scaladsl.LoggerFactory
 import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
-import csw.services.command.CommandResponseManager
+import csw.command.CommandResponseManager
+import csw.logging.scaladsl.LoggerFactory
+import csw.params.commands.CommandResponse.CompletedWithResult
+import csw.params.commands.Result
+import csw.params.core.models.{Id, ObsId, Prefix}
 
 /**
   * Worker actor that handles the Galil I/O

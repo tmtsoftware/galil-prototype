@@ -8,16 +8,16 @@ import akka.actor.typed.scaladsl.adapter._
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.Behavior
 import akka.util.Timeout
-import csw.messages.commands.{CommandName, Setup}
-import csw.messages.location.ComponentType.Assembly
-import csw.messages.location.Connection.AkkaConnection
-import csw.messages.location._
-import csw.messages.params.generics.{Key, KeyType}
-import csw.messages.params.models.Prefix
-import csw.services.command.scaladsl.CommandService
-import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.command.scaladsl.CommandService
+import csw.location.api.models.ComponentType.Assembly
+import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.models._
+import csw.location.commons.ClusterAwareSettings
+import csw.location.scaladsl.LocationServiceFactory
+import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.params.commands.{CommandName, Setup}
+import csw.params.core.generics.{Key, KeyType}
+import csw.params.core.models.Prefix
 
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}

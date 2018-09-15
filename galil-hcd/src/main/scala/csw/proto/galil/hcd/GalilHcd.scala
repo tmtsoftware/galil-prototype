@@ -3,13 +3,13 @@ package csw.proto.galil.hcd
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
+import csw.command.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
-import csw.framework.models.CswServices
+import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.messages.TopLevelActorMessage
-import csw.messages.commands._
-import csw.messages.location.TrackingEvent
-import csw.messages.params.models.{Id, ObsId, Prefix}
+import csw.location.api.models.TrackingEvent
+import csw.params.commands._
+import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 
@@ -34,12 +34,12 @@ object GalilCommandMessage {
 
 private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(ctx: ActorContext[TopLevelActorMessage],
-                        cswServices: CswServices): ComponentHandlers =
-    new GalilHcdHandlers(ctx, cswServices)
+                        cswCtx: CswContext): ComponentHandlers =
+    new GalilHcdHandlers(ctx, cswCtx)
 }
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
-                               cswServices: CswServices)
+                               cswServices: CswContext)
     extends ComponentHandlers(ctx, cswServices) {
 
   import cswServices._
