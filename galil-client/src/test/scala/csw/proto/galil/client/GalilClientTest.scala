@@ -3,14 +3,13 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
-import csw.messages.params.generics.KeyType
-import csw.messages.params.models.{Prefix, Struct}
-import csw.proto.galil.client.GalilHcdClientApp.result
-import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
-import org.scalatest.{FunSuite, Ignore}
+import csw.location.api.commons.ClusterAwareSettings
+import csw.location.scaladsl.LocationServiceFactory
+import csw.logging.scaladsl.LoggingSystemFactory
+import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.params.core.generics.KeyType
+import csw.params.core.models.Prefix
+import org.scalatest.FunSuite
 
 import scala.concurrent.Await
 import scala.concurrent.duration._

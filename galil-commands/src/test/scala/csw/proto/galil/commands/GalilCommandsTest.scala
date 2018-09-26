@@ -3,12 +3,12 @@ package csw.proto.galil.commands
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
-import csw.messages.commands.{CommandName, Setup}
-import csw.messages.params.models.{ObsId, Prefix}
+import csw.location.client.ActorSystemFactory
+import csw.logging.scaladsl.LoggingSystemFactory
+import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.params.commands.{CommandName, Setup}
+import csw.params.core.models.{ObsId, Prefix}
 import csw.proto.galil.io.GalilIoTcp
-import csw.services.location.commons.ActorSystemFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {

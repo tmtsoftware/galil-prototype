@@ -4,10 +4,10 @@ import java.net.InetAddress
 
 import akka.actor.ActorSystem
 import akka.util.ByteString
-import csw.messages.commands.Result
-import csw.messages.params.models.Prefix
-import csw.services.location.commons.ActorSystemFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
+import csw.location.client.ActorSystemFactory
+import csw.logging.scaladsl.LoggingSystemFactory
+import csw.params.commands.Result
+import csw.params.core.models.Prefix
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 //noinspection ComparingLength
