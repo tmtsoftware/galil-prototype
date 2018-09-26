@@ -9,10 +9,10 @@ import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.Behavior
 import akka.util.Timeout
 import csw.command.scaladsl.CommandService
+import csw.location.api.commons.ClusterAwareSettings
 import csw.location.api.models.ComponentType.Assembly
 import csw.location.api.models.Connection.AkkaConnection
 import csw.location.api.models._
-import csw.location.commons.ClusterAwareSettings
 import csw.location.scaladsl.LocationServiceFactory
 import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 import csw.params.commands.{CommandName, Setup}

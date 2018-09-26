@@ -3,7 +3,7 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.location.commons.ClusterAwareSettings
+import csw.location.api.commons.ClusterAwareSettings
 import csw.location.scaladsl.LocationServiceFactory
 import csw.logging.scaladsl.LoggingSystemFactory
 import csw.params.commands.CommandResponse.CompletedWithResult
