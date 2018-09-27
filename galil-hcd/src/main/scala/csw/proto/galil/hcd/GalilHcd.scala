@@ -39,18 +39,24 @@ private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
 }
 
 private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
-                               cswServices: CswContext)
-    extends ComponentHandlers(ctx, cswServices) {
+                               cswCtx: CswContext)
+    extends ComponentHandlers(ctx, cswCtx) {
 
-  import cswServices._
+  import cswCtx._
 
   private val log = loggerFactory.getLogger
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val config = ConfigFactory.load("GalilCommands.conf")
   private val adapter = new CSWDeviceAdapter(config)
   private val galilHardwareActor: ActorRef[GalilCommandMessage] =
-    ctx.spawnAnonymous(GalilIOActor
-      .behavior(getGalilConfig, commandResponseManager, adapter, loggerFactory))
+    ctx.spawnAnonymous(
+      GalilIOActor
+        .behavior(getGalilConfig,
+                  commandResponseManager,
+                  adapter,
+                  loggerFactory,
+                  componentInfo.prefix,
+                  cswCtx.currentStatePublisher))
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
@@ -118,7 +124,16 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
         if (cmdMapEntry.isSuccess) {
           val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
           if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilCommand(cmdString.get)
+            cmdString.get match {
+              case cmd if cmd == GalilIOActor.publishDataRecord =>
+                galilHardwareActor ! GalilCommand(cmd)
+              case cmd =>
+                galilHardwareActor ! GalilRequest(cmd,
+                  setup.source,
+                  setup.runId,
+                  setup.maybeObsId,
+                  cmdMapEntry.get)
+            }
           }
         }
       case _ => // Only Setups handled

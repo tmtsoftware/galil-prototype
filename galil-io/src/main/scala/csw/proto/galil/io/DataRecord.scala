@@ -547,10 +547,8 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
-    println(s"XXX input len = ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
-    println(s"XXX header = $header")
     val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
