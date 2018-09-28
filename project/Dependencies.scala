@@ -8,8 +8,8 @@ object Dependencies {
   val ScalaVersion = "2.12.6"
   val PlayVersion = "2.6.5"
 
-//  val `csw-framework` = "org.tmt" %% "csw-framework" % Version
-  val `csw-framework` = "com.github.tmtsoftware.csw-prod" %% "csw-framework" % "fd0a83a74"
+  val `csw-framework` = "org.tmt" %% "csw-framework" % Version
+//  val `csw-framework` = "com.github.tmtsoftware.csw-prod" %% "csw-framework" % "fd0a83a74"
 
   val scalaTest = "org.scalatest" %% "scalatest" % "3.0.5" // ApacheV2
   val `junit-interface` = "com.novocode" % "junit-interface" % "0.11"
