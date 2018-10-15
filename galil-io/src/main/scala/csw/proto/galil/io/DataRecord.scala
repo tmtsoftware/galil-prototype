@@ -3,8 +3,8 @@ package csw.proto.galil.io
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
-import csw.params.commands.CommandResponse.CompletedWithResult
-import csw.params.commands.{CommandResponse, Result}
+import csw.params.commands.CommandResponse.{CompletedWithResult, SubmitResponse}
+import csw.params.commands.Result
 import csw.params.core.generics.{Key, KeyType, Parameter}
 import csw.params.core.models._
 import csw.proto.galil.io.DataRecord._
@@ -581,7 +581,7 @@ object DataRecord {
     * @param dr         the parsed data record from the device
     * @return a CommandResponse containing values from the data record
     */
-  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): CommandResponse = {
+  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): SubmitResponse = {
     CompletedWithResult(runId, Result(prefix, dr.toParamSet))
   }
 

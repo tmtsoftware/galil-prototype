@@ -38,28 +38,11 @@ and installs the prototype applications in _./target/universal/stage/bin/_.
 ## Running the galil-prototype applications
 
 The tests and applications in this project require that the CSW location service cluster and config service are
-running. These can be found in _csw-prod/target/universal/stage/bin_.
-
-Make sure also that the necessary environment variables are set. For example:
-
-* Set these environment variables (Replace interface name, IP address and port with your own values):
-```bash
-export interfaceName=enp0s31f6
-export clusterSeeds=192.168.178.77:7777
-```
-for bash shell, or 
-```csh
-setenv interfaceName enp0s31f6
-setenv clusterSeeds 192.168.178.77:7777
-```
-
-for csh or tcsh. The list of available network interfaces can be found using the _ifconfig -a_ command.
-If you don't specify the network interface this way, a default will be chosen, which might sometimes not be
-the one you expect. 
+running. These can be started by running `csw-services.sh start` from the `csw` project.
 
 * Start the csw services: 
 
-```bash
+```
 csw-services.sh start
 ```
 

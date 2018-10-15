@@ -4,13 +4,14 @@ import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
-import csw.command.messages.TopLevelActorMessage
-import csw.command.scaladsl.CommandService
+import csw.command.api.scaladsl.CommandService
+import csw.command.client.CommandServiceFactory
+import csw.command.client.internal.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.params.commands.CommandResponse.Error
+import csw.params.commands.CommandResponse.{Error, SubmitResponse, ValidateCommandResponse}
 import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 
 import scala.async.Async._
@@ -42,13 +43,14 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   }
 
   override def validateCommand(
-      controlCommand: ControlCommand): CommandResponse = {
+      controlCommand: ControlCommand): ValidateCommandResponse = {
     CommandResponse.Accepted(controlCommand.runId)
   }
 
-  override def onSubmit(controlCommand: ControlCommand): Unit = {
+  override def onSubmit(controlCommand: ControlCommand): SubmitResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     forwardCommandToHcd(controlCommand)
+    CommandResponse.Started(controlCommand.runId)
   }
 
   override def onOneway(controlCommand: ControlCommand): Unit = {
@@ -68,7 +70,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     trackingEvent match {
       case LocationUpdated(location) =>
         galilHcd = Some(
-          new CommandService(location.asInstanceOf[AkkaLocation])(ctx.system))
+          CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(ctx.system))
       case LocationRemoved(_) =>
         galilHcd = None
     }
@@ -86,7 +88,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
       commandResponseManager.addSubCommand(controlCommand.runId, setup.runId)
 
       val f = for {
-        response <- hcd.submitAndSubscribe(setup)
+        response <- hcd.complete(setup)
       } yield {
         log.info(s"response = $response")
         commandResponseManager.updateSubCommand(setup.runId, response)

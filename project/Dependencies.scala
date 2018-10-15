@@ -1,20 +1,40 @@
 import sbt._
 
-//noinspection TypeAnnotation
 object Dependencies {
 
-  val Version = "0.1-SNAPSHOT"
-  val CswVersion = "0.1-SNAPSHOT"
-  val ScalaVersion = "2.12.6"
-  val PlayVersion = "2.6.5"
+  val `galil-hcd-deps` = Seq(
+    CSW.`csw-framework`
+  )
 
-  val `csw-framework` = "org.tmt" %% "csw-framework" % Version
-//  val `csw-framework` = "com.github.tmtsoftware.csw-prod" %% "csw-framework" % "fd0a83a74"
+  val `galil-assembly-deps` = Seq(
+    CSW.`csw-framework`
+  )
 
-  val scalaTest = "org.scalatest" %% "scalatest" % "3.0.5" // ApacheV2
-  val `junit-interface` = "com.novocode" % "junit-interface" % "0.11"
+  val `galil-client-deps` = Seq(
+    CSW.`csw-framework`,
+    Libs.scalaTest % Test
+  )
 
-  val `slf4j-api` = "org.slf4j" % "slf4j-api" % "1.7.25"
-  val playJson = "com.typesafe.play" %% "play-json" % PlayVersion
+  val `galil-simulator-deps` = Seq(
+    CSW.`csw-framework`
+  )
+
+  val `galil-repl-deps` = Seq(
+    CSW.`csw-framework`
+  )
+
+  val `galil-io-deps` = Seq(
+    CSW.`csw-framework`,
+    Libs.playJson,
+    Libs.scalaTest % Test
+  )
+
+  val `galil-commands-deps` = Seq(
+    CSW.`csw-framework`,
+    Libs.scalaTest % Test
+  )
+
+  val `galil-deploy-deps` = Seq(
+    CSW.`csw-framework`
+  )
 }
-

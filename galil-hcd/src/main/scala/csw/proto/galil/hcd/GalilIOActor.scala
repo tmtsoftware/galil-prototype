@@ -9,7 +9,7 @@ import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
-import csw.command.CommandResponseManager
+import csw.command.client.CommandResponseManager
 import csw.framework.CurrentStatePublisher
 import csw.logging.scaladsl.LoggerFactory
 import csw.params.commands.CommandResponse.CompletedWithResult
@@ -106,7 +106,9 @@ private[hcd] case class GalilIOActor(
         log.debug(s"doing command: $commandString")
         if (commandString == GalilIOActor.publishDataRecord) {
           publishDataRecord()
-          ctx.schedule(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
+          ctx.schedule(1.second,
+                       ctx.self,
+                       GalilCommand(GalilIOActor.publishDataRecord))
         }
 
       case GalilRequest(commandString, prefix, runId, maybeObsId, commandKey) =>

@@ -3,11 +3,12 @@ package csw.proto.galil.hcd
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
-import csw.command.messages.TopLevelActorMessage
+import csw.command.client.internal.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
 import csw.location.api.models.TrackingEvent
+import csw.params.commands.CommandResponse.{SubmitResponse, ValidateCommandResponse}
 import csw.params.commands._
 import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
@@ -71,7 +72,7 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
   override def onGoOnline(): Unit = log.debug("onGoOnline called")
 
   override def validateCommand(
-      controlCommand: ControlCommand): CommandResponse = {
+      controlCommand: ControlCommand): ValidateCommandResponse = {
     log.debug(s"validateSubmit called: $controlCommand")
     controlCommand match {
       case x: Setup =>
@@ -97,22 +98,18 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
     }
   }
 
-  override def onSubmit(controlCommand: ControlCommand): Unit = {
+  override def onSubmit(controlCommand: ControlCommand): SubmitResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
       case setup: Setup =>
         val cmdMapEntry = adapter.getCommandMapEntry(setup)
-        if (cmdMapEntry.isSuccess) {
-          val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
-          if (cmdString.isSuccess) {
-            galilHardwareActor ! GalilRequest(cmdString.get,
-                                              setup.source,
-                                              setup.runId,
-                                              setup.maybeObsId,
-                                              cmdMapEntry.get)
-          }
-        }
-      case _ => // Only Setups handled
+        val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
+        galilHardwareActor ! GalilRequest(cmdString.get,
+                                          setup.source,
+                                          setup.runId,
+                                          setup.maybeObsId,
+                                          cmdMapEntry.get)
+        CommandResponse.Started(controlCommand.runId)
     }
   }
 
@@ -129,10 +126,10 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                 galilHardwareActor ! GalilCommand(cmd)
               case cmd =>
                 galilHardwareActor ! GalilRequest(cmd,
-                  setup.source,
-                  setup.runId,
-                  setup.maybeObsId,
-                  cmdMapEntry.get)
+                                                  setup.source,
+                                                  setup.runId,
+                                                  setup.maybeObsId,
+                                                  cmdMapEntry.get)
             }
           }
         }
