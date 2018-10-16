@@ -17,6 +17,7 @@ object Settings {
     crossPaths := true,
     parallelExecution in Test := false,
     fork := true,
+    resolvers += "jitpack" at "https://jitpack.io",
     updateOptions := updateOptions.value.withLatestSnapshots(false)
   )
 
