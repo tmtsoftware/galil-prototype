@@ -28,7 +28,7 @@ import csw.services.command.scaladsl.CommandService
   * @param system ActorSystem (must be created by ClusterAwareSettings.system - should be one per application)
   * @param locationService a reference to the location service created with LocationServiceFactory.withSystem(system)
   */
-case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: LocationService) {
+case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, locationService: LocationService) {
 
   import system._
 
@@ -37,7 +37,7 @@ case class GalilHcdClient(source: Prefix, system: ActorSystem, locationService: 
   implicit def actorRefFactory: ActorRefFactory = system
   implicit val mat: ActorMaterializer = ActorMaterializer()
 
-  private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
+  private val connection = AkkaConnection(ComponentId(hcdName, HCD))
 
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
   private val countsKey: Key[Int] = KeyType.IntKey.make("counts")

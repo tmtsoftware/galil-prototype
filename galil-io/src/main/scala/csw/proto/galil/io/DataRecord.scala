@@ -147,6 +147,8 @@ object DataRecord {
       val recordSize = result.get(recordSizeKey).get.head
       Header(blocksPresent, recordSize)
     }
+
+
   }
 
   case class GeneralState(sampleNumber: Short,
@@ -224,7 +226,7 @@ object DataRecord {
         sampleNumberKey.set(sampleNumber),
         inputsKey.set(inputs),
         outputsKey.set(outputs),
-        outputsKey.set(ethernetHandleStatus),
+        ethernetHandleStatusKey.set(ethernetHandleStatus),
         errorCodeKey.set(errorCode),
         threadStatusKey.set(threadStatus),
         amplifierStatusKey.set(amplifierStatus),
@@ -347,6 +349,8 @@ object DataRecord {
         sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
         tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
     }
+
+
   }
 
   case class GalilAxisStatus(status: Short = 0, // unsigned
@@ -452,6 +456,7 @@ object DataRecord {
       GalilAxisStatus(status, switches, stopCode, referencePosition, motorPosition, positionError,
         auxiliaryPosition, velocity, torque, analogInput, hallInputStatus, reservedByte, userDefinedVariable)
     }
+
   }
 
   private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
@@ -496,16 +501,17 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
-    println(s"XXX input len = ${bs.size}")
+    //println(s"XXX input len = ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
-    println(s"XXX header = $header")
+    //println(s"XXX header = $header")
     val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
     }
     DataRecord(header, generalState, axisStatuses.toArray)
   }
+
 
   /**
     * Returns a command response for a QR (getDataRecord) command

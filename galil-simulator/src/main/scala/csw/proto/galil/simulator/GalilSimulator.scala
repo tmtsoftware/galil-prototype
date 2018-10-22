@@ -165,12 +165,14 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)
 
   private def generateAxisStatus(axis: Char): GalilAxisStatus = {
 
-    val status: Short = 4
-    val referencePosition = 1700
-    val motorPosition = 100
-    val positionError = -25
-    val velocity = 100
-    val torque = 5
+    val r = scala.util.Random
+
+    val status: Short = r.nextInt(65000).toShort
+    val referencePosition = r.nextInt(20000)
+    val motorPosition = r.nextInt(2000)
+    val positionError = r.nextInt(100)
+    val velocity = r.nextInt(500)
+    val torque = r.nextInt(20)
 
     val galilAxisStatus = GalilAxisStatus(status, 0, 0, referencePosition, motorPosition, positionError,
       0, velocity, torque, 0, 0, 0, 1)

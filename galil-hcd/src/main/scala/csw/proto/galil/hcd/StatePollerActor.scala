@@ -131,11 +131,11 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
     }
 
     private def queryDataRecord(): DataRecord = {
-      //log.debug(s"Sending 'QR to Galil")
+      log.debug(s"Sending 'QR to Galil")
       val responses = galilIo.send("QR")
 
       val bs: ByteString  = responses.head._2
-      //log.debug(s"Data Record size: ${bs.size})")
+      log.debug(s"Data Record size: ${bs.size})")
 
       // parse the data record
       val dr = DataRecord(bs)

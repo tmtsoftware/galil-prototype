@@ -21,7 +21,7 @@ object GalilHcdClientApp extends App {
 
   private val system: ActorSystem = ClusterAwareSettings.system
   private val locationService = LocationServiceFactory.withSystem(system)
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system, locationService)
+  private val galilHcdClient = GalilHcdClient("GalilHcd", Prefix("test.galil.client"), system, locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
