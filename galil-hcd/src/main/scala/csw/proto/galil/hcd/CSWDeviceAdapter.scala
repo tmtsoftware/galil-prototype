@@ -1,12 +1,12 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
-import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
-import csw.messages.commands.{CommandResponse, Result, Setup}
+import csw.params.commands.CommandResponse.{Completed, CompletedWithResult, SubmitResponse}
+import csw.params.commands.{Result, Setup}
+import csw.params.core.generics.{Key, KeyType, Parameter}
+import csw.params.core.models.{Id, ObsId, Prefix}
 
 import scala.collection.JavaConverters._
-import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
@@ -104,7 +104,7 @@ class CSWDeviceAdapter(config: Config) {
   }
 
   // Parses and returns the command's response
-  def makeResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
+  def makeResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): SubmitResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
       Completed(runId)
     } else {

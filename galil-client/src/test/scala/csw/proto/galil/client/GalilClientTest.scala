@@ -3,14 +3,15 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.commands.CommandResponse.{Completed, CompletedWithResult}
-import csw.messages.params.generics.KeyType
-import csw.messages.params.models.{Prefix, Struct}
-import csw.proto.galil.client.GalilHcdClientApp.result
-import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
-import org.scalatest.{FunSuite, Ignore}
+import akka.stream.ActorMaterializer
+import akka.util.Timeout
+import csw.location.client.ActorSystemFactory
+import csw.location.client.scaladsl.HttpLocationServiceFactory
+import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.params.core.generics.KeyType
+import csw.params.core.models.Prefix
+import org.scalatest.FunSuite
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
@@ -18,12 +19,18 @@ import scala.concurrent.duration._
 // Note: Test assumes that location service (csw-cluster-seed), galil-hcd and galil-simulator are running
 //@Ignore
 class GalilClientTest extends FunSuite {
-  private val system: ActorSystem = ClusterAwareSettings.system
-  private val locationService = LocationServiceFactory.withSystem(system)
+  implicit val system: ActorSystem = ActorSystemFactory.remote("TestAssemblyClient")
+  import system.dispatcher
+
+  implicit val mat: ActorMaterializer = ActorMaterializer()
+  private val locationService = HttpLocationServiceFactory.makeLocalClient(system, mat)
   private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system, locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
-  LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
+  LoggingSystemFactory.start("GalilClientTest", "0.1", host, system)
+  implicit val timeout: Timeout = Timeout(3.seconds)
+  private val log = GenericLoggerFactory.getLogger
+  log.info("Starting GalilClientTest")
 
   test("Test ") {
     val resp1 = Await.result(galilHcdClient.setRelTarget(maybeObsId, 'A', 3), 3.seconds)

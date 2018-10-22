@@ -3,10 +3,10 @@ package csw.proto.galil.io
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
-import csw.messages.commands.CommandResponse.CompletedWithResult
-import csw.messages.commands.{CommandResponse, Result}
-import csw.messages.params.generics.{Key, KeyType, Parameter}
-import csw.messages.params.models._
+import csw.params.commands.CommandResponse.{CompletedWithResult, SubmitResponse}
+import csw.params.commands.Result
+import csw.params.core.generics.{Key, KeyType, Parameter}
+import csw.params.core.models._
 import csw.proto.galil.io.DataRecord._
 import play.api.libs.json.{Json, OFormat}
 
@@ -140,15 +140,13 @@ object DataRecord {
     }
 
     /**
-      * Initialze the header from the result of a command (See CompletedWithResult)
+      * Initialze from the result of a command (See CompletedWithResult)
       */
     def apply(result: Result): Header = {
       val blocksPresent = result.get(blocksPresentKey).get.values.toList
       val recordSize = result.get(recordSizeKey).get.head
       Header(blocksPresent, recordSize)
     }
-
-
   }
 
   case class GeneralState(sampleNumber: Short,
@@ -310,7 +308,7 @@ object DataRecord {
       val amplifierStatus = buffer.getInt()
 
       // ADDR 56-59
-      val countourModeSegmentCount = buffer.getInt()      /// screwed up
+      val countourModeSegmentCount = buffer.getInt()
 
       // ADDR 60-61
       val contourModeBufferSpaceRemaining = buffer.getShort()
@@ -350,6 +348,33 @@ object DataRecord {
         tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
     }
 
+    /**
+      * Creates a GeneralState from the result of a command (See CompletedWithResult)
+      */
+    def apply(result: Result): GeneralState = {
+      val sampleNumber = result.get(sampleNumberKey).get.head
+      val inputs = result.get(inputsKey).get.values
+      val outputs = result.get(outputsKey).get.values
+      val ethernetHandleStatus = result.get(ethernetHandleStatusKey).get.values
+      val errorCode = result.get(errorCodeKey).get.head
+      val threadStatus = result.get(threadStatusKey).get.head
+      val amplifierStatus = result.get(amplifierStatusKey).get.head
+      val countourModeSegmentCount = result.get(contourModeSegmentCountKey).get.head
+      val contourModeBufferSpaceRemaining = result.get(contourModeBufferSpaceRemainingKey).get.head
+      val sPlaneSegmentCount = result.get(sPlaneSegmentCountKey).get.head.toShort
+      val sPlaneMoveStatus = result.get(sPlaneMoveStatusKey).get.head.toShort
+      val sPlaneDistanceTraveled = result.get(sPlaneDistanceTraveledKey).get.head
+      val sPlaneBufferSpaceRemaining = result.get(sPlaneBufferSpaceRemainingKey).get.head.toShort
+      val tPlaneSegmentCount = result.get(tPlaneSegmentCountKey).get.head.toShort
+      val tPlaneMoveStatus = result.get(tPlaneMoveStatusKey).get.head.toShort
+      val tPlaneDistanceTraveled = result.get(tPlaneDistanceTraveledKey).get.head
+      val tPlaneBufferSpaceRemaining = result.get(tPlaneBufferSpaceRemainingKey).get.head.toShort
+
+      GeneralState(sampleNumber, inputs, outputs, ethernetHandleStatus, errorCode, threadStatus,
+        amplifierStatus, countourModeSegmentCount, contourModeBufferSpaceRemaining,
+        sPlaneSegmentCount, sPlaneMoveStatus, sPlaneDistanceTraveled, sPlaneBufferSpaceRemaining,
+        tPlaneSegmentCount, tPlaneMoveStatus, tPlaneDistanceTraveled, tPlaneBufferSpaceRemaining)
+    }
 
   }
 
@@ -457,6 +482,27 @@ object DataRecord {
         auxiliaryPosition, velocity, torque, analogInput, hallInputStatus, reservedByte, userDefinedVariable)
     }
 
+    /**
+      * Initialze from the result of a command (See CompletedWithResult)
+      */
+    def apply(result: Result): GalilAxisStatus = {
+      val status = result.get(statusKey).get.head
+      val switches = result.get(switchesKey).get.head
+      val stopCode = result.get(stopCodeKey).get.head
+      val referencePosition = result.get(referencePositionKey).get.head
+      val motorPosition = result.get(motorPositionKey).get.head
+      val positionError = result.get(positionErrorKey).get.head
+      val auxiliaryPosition = result.get(auxiliaryPositionKey).get.head
+      val velocity = result.get(velocityKey).get.head
+      val torque = result.get(torqueKey).get.head
+      val analogInput = result.get(analogInputKey).get.head
+      val hallInputStatus = result.get(hallInputStatusKey).get.head
+
+      GalilAxisStatus(status, switches, stopCode, referencePosition, motorPosition, positionError,
+        auxiliaryPosition, velocity, torque, analogInput, hallInputStatus)
+
+    }
+
   }
 
   private def getBit(num: Byte, i: Int): Boolean = (num & (1 << i)) != 0
@@ -501,10 +547,8 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
-    //println(s"XXX input len = ${bs.size}")
     val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
-    //println(s"XXX header = $header")
     val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.map { axis =>
       if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
@@ -512,6 +556,21 @@ object DataRecord {
     DataRecord(header, generalState, axisStatuses.toArray)
   }
 
+  /**
+    * Initialze the header from the result of a command (See CompletedWithResult)
+    */
+  def apply(result: Result): DataRecord = {
+    val header = Header(result)
+    val generalState = GeneralState(result)
+    val axisStatuses = axes.flatMap { axis =>
+      val axisKey = KeyType.StructKey.make(axis.toString)
+      result.get(axisKey)
+        .map(_.head.paramSet)
+        .map(Result(result.prefix, _))
+        .map(GalilAxisStatus(_))
+    }
+    DataRecord(header, generalState, axisStatuses.toArray)
+  }
 
   /**
     * Returns a command response for a QR (getDataRecord) command
@@ -522,7 +581,7 @@ object DataRecord {
     * @param dr         the parsed data record from the device
     * @return a CommandResponse containing values from the data record
     */
-  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): CommandResponse = {
+  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): SubmitResponse = {
     CompletedWithResult(runId, Result(prefix, dr.toParamSet))
   }
 

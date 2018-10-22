@@ -3,13 +3,15 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.ActorSystem
-import csw.messages.commands.CommandResponse.CompletedWithResult
-import csw.messages.params.generics.KeyType
-import csw.messages.params.models.Prefix
+import akka.stream.ActorMaterializer
+import akka.util.Timeout
+import csw.location.client.ActorSystemFactory
+import csw.location.client.scaladsl.HttpLocationServiceFactory
+import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.params.commands.CommandResponse.CompletedWithResult
+import csw.params.core.generics.KeyType
+import csw.params.core.models.Prefix
 import csw.proto.galil.io.DataRecord
-import csw.services.location.commons.ClusterAwareSettings
-import csw.services.location.scaladsl.LocationServiceFactory
-import csw.services.logging.scaladsl.LoggingSystemFactory
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
@@ -19,12 +21,18 @@ import scala.concurrent.duration._
   */
 object GalilHcdClientApp extends App {
 
-  private val system: ActorSystem = ClusterAwareSettings.system
-  private val locationService = LocationServiceFactory.withSystem(system)
-  private val galilHcdClient = GalilHcdClient("GalilHcd", Prefix("test.galil.client"), system, locationService)
+  implicit val system: ActorSystem = ActorSystemFactory.remote("TestAssemblyClient")
+  import system.dispatcher
+
+  implicit val mat: ActorMaterializer = ActorMaterializer()
+  private val locationService = HttpLocationServiceFactory.makeLocalClient(system, mat)
+  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), system, locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, system)
+  implicit val timeout: Timeout = Timeout(3.seconds)
+  private val log = GenericLoggerFactory.getLogger
+  log.info("Starting GalilHcdClientApp")
 
   val resp1 = Await.result(galilHcdClient.setRelTarget(maybeObsId, 'A', 3), 3.seconds)
   println(s"setRelTarget: $resp1")
@@ -90,5 +98,8 @@ object GalilHcdClientApp extends App {
     if (blocksPresent2.contains(p._1.toString))
       println(s"Axis ${p._1}: motor position: ${p._2.motorPosition}")
   }
+
+  import system.dispatcher
+  system.terminate().onComplete(_ => System.exit(0))
 }
 

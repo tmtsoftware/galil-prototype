@@ -6,20 +6,21 @@ import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.actor.typed
 import akka.util.{ByteString, Timeout}
-import csw.messages.location.ComponentType.HCD
-import csw.messages.location.Connection.AkkaConnection
-import csw.messages.location._
-import csw.messages.params.generics.{Key, KeyType}
-import csw.messages.params.models.{Id, ObsId, Prefix}
-import csw.services.location.scaladsl.LocationService
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import akka.actor.typed.scaladsl.adapter._
-import csw.messages.commands.CommandResponse.Error
-import csw.messages.commands.{CommandName, CommandResponse, Setup}
+import csw.command.api.scaladsl.CommandService
+import csw.command.client.CommandServiceFactory
+import csw.location.api.models.ComponentId
+import csw.location.api.models.ComponentType.HCD
+import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.scaladsl.LocationService
+import csw.params.commands.CommandResponse.Error
+import csw.params.commands.{CommandName, CommandResponse, Setup}
+import csw.params.core.generics.{Key, KeyType}
+import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.io.DataRecord
-import csw.services.command.scaladsl.CommandService
 
 /**
   * A client for locating and communicating with the Galil HCD
@@ -28,7 +29,9 @@ import csw.services.command.scaladsl.CommandService
   * @param system ActorSystem (must be created by ClusterAwareSettings.system - should be one per application)
   * @param locationService a reference to the location service created with LocationServiceFactory.withSystem(system)
   */
-case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, locationService: LocationService) {
+case class GalilHcdClient(source: Prefix,
+                          system: ActorSystem,
+                          locationService: LocationService) {
 
   import system._
 
@@ -37,33 +40,37 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   implicit def actorRefFactory: ActorRefFactory = system
   implicit val mat: ActorMaterializer = ActorMaterializer()
 
-  private val connection = AkkaConnection(ComponentId(hcdName, HCD))
+  private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
 
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
   private val countsKey: Key[Int] = KeyType.IntKey.make("counts")
   private val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
-  private val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus")
+  private val brushlessModulusKey: Key[Int] =
+    KeyType.IntKey.make("brushlessModulus")
   private val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
   private val speedKey: Key[Int] = KeyType.IntKey.make("speed")
-  
+
   /**
     * Gets a reference to the running Galil HCD from the location service, if found.
     */
   private def getGalilHcd: Future[Option[CommandService]] = {
     implicit val sys: typed.ActorSystem[Nothing] = system.toTyped
-    locationService.resolve(connection, 30.seconds).map(_.map(new CommandService(_)))
+    locationService
+      .resolve(connection, 30.seconds)
+      .map(_.map(CommandServiceFactory.make(_)))
   }
 
   /**
     * Sends a getDataRecord message to the HCD and returns the response
     */
-  def getDataRecord(obsId: Option[ObsId], axis: Option[Char] = None): Future[CommandResponse] = {
+  def getDataRecord(obsId: Option[ObsId],
+                    axis: Option[Char] = None): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val s = Setup(source, CommandName("getDataRecord"), obsId)
         // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -73,17 +80,20 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a getDataRecord message to the HCD and returns a DataRecord object
     */
-  def getDataRecordRaw(obsId: Option[ObsId], axis: Option[Char] = None): Future[DataRecord] = {
+  def getDataRecordRaw(obsId: Option[ObsId],
+                       axis: Option[Char] = None): Future[DataRecord] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val s = Setup(source, CommandName("getDataRecordRaw"), obsId)
         // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
-        hcd.submitAndSubscribe(setup).map {
-          case CommandResponse.CompletedWithResult(id, result) =>
+        hcd.complete(setup).map {
+          case CommandResponse.CompletedWithResult(_, result) =>
             val bytes = result.get(DataRecord.key).get.head.values
             DataRecord(ByteString(bytes))
-          case x => throw new IOException(s"Unexpected result from getDataRecordRaw command: $x")
+          case x =>
+            throw new IOException(
+              s"Unexpected result from getDataRecordRaw command: $x")
         }
 
       case None =>
@@ -94,14 +104,16 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setRelTarget message to the HCD and returns the response
     */
-  def setRelTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {
+  def setRelTarget(obsId: Option[ObsId],
+                   axis: Char,
+                   count: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setRelTarget"), obsId)
           .add(axisKey.set(axis))
           .add(countsKey.set(count))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -111,30 +123,33 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a getRelTarget message to the HCD and returns the response
     */
-  def getRelTarget(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
+  def getRelTarget(obsId: Option[ObsId],
+                   axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("getRelTarget"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
-  
+
   /**
     * Sends a setAbsTarget message to the HCD and returns the response
     */
-  def setAbsTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {
+  def setAbsTarget(obsId: Option[ObsId],
+                   axis: Char,
+                   count: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setAbsTarget"), obsId)
           .add(axisKey.set(axis))
           .add(countsKey.set(count))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -144,13 +159,14 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setBrushlessAxis message to the HCD and returns the response
     */
-  def setBrushlessAxis(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
+  def setBrushlessAxis(obsId: Option[ObsId],
+                       axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setBrushlessAxis"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -160,31 +176,35 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setAnalogFeedbackSelect message to the HCD and returns the response
     */
-  def setAnalogFeedbackSelect(obsId: Option[ObsId], axis: Char, interpCounts: Int): Future[CommandResponse] = {
+  def setAnalogFeedbackSelect(obsId: Option[ObsId],
+                              axis: Char,
+                              interpCounts: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setAnalogFeedbackSelect"), obsId)
           .add(axisKey.set(axis))
           .add(interpCountsKey.set(interpCounts))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
- 
+
   /**
     * Sends a setBrushlessModulus message to the HCD and returns the response
     */
-  def setBrushlessModulus(obsId: Option[ObsId], axis: Char, brushlessModulus: Int): Future[CommandResponse] = {
+  def setBrushlessModulus(obsId: Option[ObsId],
+                          axis: Char,
+                          brushlessModulus: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setBrushlessModulus"), obsId)
           .add(axisKey.set(axis))
           .add(brushlessModulusKey.set(brushlessModulus))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -194,14 +214,16 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a brushlessZero message to the HCD and returns the response
     */
-  def brushlessZero(obsId: Option[ObsId], axis: Char, volts: Double): Future[CommandResponse] = {
+  def brushlessZero(obsId: Option[ObsId],
+                    axis: Char,
+                    volts: Double): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("brushlessZero"), obsId)
           .add(axisKey.set(axis))
           .add(voltsKey.set(volts))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -217,7 +239,7 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
         val setup = Setup(source, CommandName("motorOn"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -233,7 +255,7 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
         val setup = Setup(source, CommandName("motorOff"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -243,13 +265,14 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setHomingMode message to the HCD and returns the response
     */
-  def setHomingMode(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
+  def setHomingMode(obsId: Option[ObsId],
+                    axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setHomingMode"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -265,7 +288,7 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
         val setup = Setup(source, CommandName("beginMotion"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -275,14 +298,16 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setJogSpeed message to the HCD and returns the response
     */
-  def setJogSpeed(obsId: Option[ObsId], axis: Char, speed: Int): Future[CommandResponse] = {
+  def setJogSpeed(obsId: Option[ObsId],
+                  axis: Char,
+                  speed: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setJogSpeed"), obsId)
           .add(axisKey.set(axis))
           .add(speedKey.set(speed))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -292,31 +317,18 @@ case class GalilHcdClient(hcdName: String, source: Prefix, system: ActorSystem, 
   /**
     * Sends a setFindIndexMode message to the HCD and returns the response
     */
-  def setFindIndexMode(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
+  def setFindIndexMode(obsId: Option[ObsId],
+                       axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setFindIndexMode"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submitAndSubscribe(setup)
+        hcd.complete(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
-
-
-
-
-
-
-
-
-
-
-
-  
-  
 }
-

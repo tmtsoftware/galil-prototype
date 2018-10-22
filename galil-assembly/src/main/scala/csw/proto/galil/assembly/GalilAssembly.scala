@@ -4,17 +4,15 @@ import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
+import csw.command.api.scaladsl.CommandService
+import csw.command.client.CommandServiceFactory
+import csw.command.client.internal.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers, CurrentStatePublisher}
-import csw.messages.commands.CommandResponse.Error
-import csw.messages.commands.{CommandResponse, ControlCommand, Setup}
-import csw.messages.framework.ComponentInfo
-import csw.messages.location.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.messages.scaladsl.TopLevelActorMessage
-import csw.services.command.scaladsl.{CommandResponseManager, CommandService}
-import csw.services.event.scaladsl.EventService
-import csw.services.location.scaladsl.LocationService
-import csw.services.logging.scaladsl.LoggerFactory
+import csw.framework.models.CswContext
+import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.params.commands.CommandResponse.{Error, SubmitResponse, ValidateCommandResponse}
+import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 
 import scala.async.Async._
 import scala.concurrent.duration._
@@ -24,26 +22,17 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 
 private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(
-                ctx: ActorContext[TopLevelActorMessage],
-                componentInfo: ComponentInfo,
-                commandResponseManager: CommandResponseManager,
-                currentStatePublisher: CurrentStatePublisher,
-                locationService: LocationService,
-                eventService: EventService,
-                loggerFactory: LoggerFactory
-              ): ComponentHandlers =
-    new GalilAssemblyHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher, locationService, eventService, loggerFactory)
+                         ctx: ActorContext[TopLevelActorMessage],
+                         cswCtx: CswContext
+  ): ComponentHandlers =
+    new GalilAssemblyHandlers(ctx, cswCtx)
 }
 
 private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
-                                    componentInfo: ComponentInfo,
-                                    commandResponseManager: CommandResponseManager,
-                                    currentStatePublisher: CurrentStatePublisher,
-                                    locationService: LocationService,
-                                    eventService: EventService,
-                                    loggerFactory: LoggerFactory)
-  extends ComponentHandlers(ctx, componentInfo, commandResponseManager, currentStatePublisher,
-    locationService, eventService, loggerFactory) {
+                                    cswServices: CswContext)
+    extends ComponentHandlers(ctx, cswServices) {
+
+  import cswServices._
 
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val log = loggerFactory.getLogger
@@ -53,13 +42,15 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug("Initialize called")
   }
 
-  override def validateCommand(controlCommand: ControlCommand): CommandResponse = {
+  override def validateCommand(
+      controlCommand: ControlCommand): ValidateCommandResponse = {
     CommandResponse.Accepted(controlCommand.runId)
   }
 
-  override def onSubmit(controlCommand: ControlCommand): Unit = {
+  override def onSubmit(controlCommand: ControlCommand): SubmitResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     forwardCommandToHcd(controlCommand)
+    CommandResponse.Started(controlCommand.runId)
   }
 
   override def onOneway(controlCommand: ControlCommand): Unit = {
@@ -78,7 +69,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
     trackingEvent match {
       case LocationUpdated(location) =>
-        galilHcd = Some(new CommandService(location.asInstanceOf[AkkaLocation])(ctx.system))
+        galilHcd = Some(
+          CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(ctx.system))
       case LocationRemoved(_) =>
         galilHcd = None
     }
@@ -89,23 +81,27 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     implicit val scheduler: Scheduler = ctx.system.scheduler
     implicit val timeout: Timeout = Timeout(3.seconds)
     galilHcd.foreach { hcd =>
-      val setup = Setup(controlCommand.source, controlCommand.commandName, controlCommand.maybeObsId, controlCommand.paramSet)
+      val setup = Setup(controlCommand.source,
+                        controlCommand.commandName,
+                        controlCommand.maybeObsId,
+                        controlCommand.paramSet)
       commandResponseManager.addSubCommand(controlCommand.runId, setup.runId)
 
       val f = for {
-        response <- hcd.submitAndSubscribe(setup)
+        response <- hcd.complete(setup)
       } yield {
         log.info(s"response = $response")
         commandResponseManager.updateSubCommand(setup.runId, response)
       }
       f.recover {
         case ex =>
-          commandResponseManager.updateSubCommand(setup.runId, Error(setup.runId, ex.toString))
+          commandResponseManager.updateSubCommand(setup.runId,
+                                                  Error(setup.runId,
+                                                        ex.toString))
       }
     }
   }
 }
-
 
 // Start assembly from the command line using GalilAssembly.conf resource file
 object GalilAssemblyApp extends App {

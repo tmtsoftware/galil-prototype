@@ -38,39 +38,17 @@ and installs the prototype applications in _./target/universal/stage/bin/_.
 ## Running the galil-prototype applications
 
 The tests and applications in this project require that the CSW location service cluster and config service are
-running. These can be found in _csw-prod/target/universal/stage/bin_.
+running. These can be started by running `csw-services.sh start` from the `csw` project.
 
-Make sure also that the necessary environment variables are set. For example:
+* Start the csw services: 
 
-* Set these environment variables (Replace interface name, IP address and port with your own values):
-```bash
-export interfaceName=enp0s31f6
-export clusterSeeds=192.168.178.77:7777
 ```
-for bash shell, or 
-```csh
-setenv interfaceName enp0s31f6
-setenv clusterSeeds 192.168.178.77:7777
-```
-
-for csh or tcsh. The list of available network interfaces can be found using the _ifconfig -a_ command.
-If you don't specify the network interface this way, a default will be chosen, which might sometimes not be
-the one you expect. 
-
-* Start the location service: 
-
-```bash
-csw-cluster-seed --clusterPort 7777
-```
-
-* Start the config service:
-```bash
-csw-config-server --initRepo
+csw-services.sh start
 ```
 
 To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
 ```
-galil-hcd --local GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
+galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
 ```
 
 An example GalilHcd.conf file can be found [here](galil-hcd/src/main/resources/GalilHcd.conf). 
@@ -79,7 +57,7 @@ If `--local` is not given, the file would be fetched from the Config Service, if
 To run using a Galil simulator:
 ```
 galil-simulator
-galil-hcd --local GalilHcd.conf
+galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf
 ```
 
 ## Loading the galil-prototype project in IntelliJ Idea
