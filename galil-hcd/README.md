@@ -4,7 +4,7 @@ This project implements a Galil HCD that accepts _Setup_ or _OneWay_ commands wi
 
 The HCD itself is configured in [resources/GalilHcd.conf](resources/GalilHcd.conf).
 
-See the [csw-prod documentation](https://tmtsoftware.github.io/csw-prod/) for how HCDs are defined and used.
+See the [csw documentation](https://tmtsoftware.github.io/csw/) for how HCDs are defined and used.
 
 The Galil HCD assumes that either the galil-simulator is running or that you have a Galil device connected to your network.
 To use a local device, either edit resources/application.conf:

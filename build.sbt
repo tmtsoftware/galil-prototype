@@ -48,7 +48,7 @@ lazy val `galil-commands` = project
   .settings(libraryDependencies ++= `galil-commands-deps`)
   .dependsOn(`galil-io`)
 
-// CSW-PROD style multiple container deployment
+// Container deployment
 lazy val `galil-deploy` = project
   .enablePlugins(DeployApp)
   .settings(defaultSettings: _*)
