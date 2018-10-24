@@ -19,7 +19,7 @@ The build is based on sbt and depends on libraries published from the
 [csw](https://github.com/tmtsoftware/csw) project. 
 
 Note: The version of csw used by this project is declared in the variable CSW.Version in the file [project/Libs.scala](project/Libs.scala).
-That value is a Git SHA for the commt that was last tested with this project. Use it in place of `$SHA` below.
+That value may be a Git SHA for the commt that was last tested with this project. If so, use it in place of `$SHA` below.
 
 See [here](https://www.scala-sbt.org/1.0/docs/Setup.html) for instructions on installing sbt.
 
@@ -27,7 +27,7 @@ Before building this project, make sure to checkout and build the csw project. F
 ```
 git clone https://github.com/tmtsoftware/csw.git
 cd csw
-git checkout $SHA         # Value of CSW.Version in project/Libs.scala
+git checkout $SHA         # Value of CSW.Version in project/Libs.scala, if not "0.1-SNAPSHOT"
 sbt publishLocal stage
 ```
 

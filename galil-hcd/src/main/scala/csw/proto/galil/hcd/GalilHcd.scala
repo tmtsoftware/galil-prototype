@@ -3,7 +3,7 @@ package csw.proto.galil.hcd
 import akka.actor.typed.ActorRef
 import akka.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
-import csw.command.client.internal.messages.TopLevelActorMessage
+import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}

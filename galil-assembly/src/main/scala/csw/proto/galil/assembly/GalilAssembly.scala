@@ -6,7 +6,7 @@ import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
-import csw.command.client.internal.messages.TopLevelActorMessage
+import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
@@ -88,7 +88,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
       commandResponseManager.addSubCommand(controlCommand.runId, setup.runId)
 
       val f = for {
-        response <- hcd.complete(setup)
+        response <- hcd.submit(setup)
       } yield {
         log.info(s"response = $response")
         commandResponseManager.updateSubCommand(setup.runId, response)

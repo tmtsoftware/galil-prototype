@@ -79,7 +79,7 @@ object GalilAssemblyClient extends App {
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
 
-    assembly.complete(setup).onComplete {
+    assembly.submit(setup).onComplete {
       case Success(resp) =>
         log.info(s"HCD responded with $resp")
       case Failure(ex) =>
