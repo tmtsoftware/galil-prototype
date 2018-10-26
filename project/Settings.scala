@@ -9,7 +9,7 @@ object Settings {
   val ScalaVersion = "2.12.7"
 
   val buildSettings = Seq(
-    organization := "org.tmt",
+    organization := "com.github.tmtsoftware.galil-prototype",
     organizationName := "TMT",
     organizationHomepage := Some(url("http://www.tmt.org")),
     version := Version,
