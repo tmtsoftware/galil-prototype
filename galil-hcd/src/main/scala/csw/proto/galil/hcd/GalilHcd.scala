@@ -110,6 +110,9 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
                                           setup.maybeObsId,
                                           cmdMapEntry.get)
         CommandResponse.Started(controlCommand.runId)
+      case x =>
+        // Should not happen after validation
+        CommandResponse.Error(controlCommand.runId, s"Unexpected submit: $x")
     }
   }
 
