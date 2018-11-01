@@ -10,8 +10,17 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.params.commands.CommandResponse.{Error, SubmitResponse, ValidateCommandResponse}
+import csw.location.api.models.{
+  AkkaLocation,
+  LocationRemoved,
+  LocationUpdated,
+  TrackingEvent
+}
+import csw.params.commands.CommandResponse.{
+  Error,
+  SubmitResponse,
+  ValidateCommandResponse
+}
 import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 
 import scala.async.Async._
@@ -22,8 +31,8 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 
 private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
   override def handlers(
-                         ctx: ActorContext[TopLevelActorMessage],
-                         cswCtx: CswContext
+      ctx: ActorContext[TopLevelActorMessage],
+      cswCtx: CswContext
   ): ComponentHandlers =
     new GalilAssemblyHandlers(ctx, cswCtx)
 }
@@ -70,7 +79,8 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     trackingEvent match {
       case LocationUpdated(location) =>
         galilHcd = Some(
-          CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(ctx.system))
+          CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(
+            ctx.system))
       case LocationRemoved(_) =>
         galilHcd = None
     }
@@ -91,13 +101,12 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
         response <- hcd.submit(setup)
       } yield {
         log.info(s"response = $response")
-        commandResponseManager.updateSubCommand(setup.runId, response)
+        commandResponseManager.updateSubCommand(response)
       }
       f.recover {
         case ex =>
-          commandResponseManager.updateSubCommand(setup.runId,
-                                                  Error(setup.runId,
-                                                        ex.toString))
+          commandResponseManager.updateSubCommand(
+            Error(setup.runId, ex.toString))
       }
     }
   }

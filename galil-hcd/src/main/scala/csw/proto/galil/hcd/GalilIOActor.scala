@@ -146,8 +146,7 @@ private[hcd] case class GalilIOActor(
     log.debug(s"handleDataRecordResponse $dr")
     val returnResponse =
       DataRecord.makeCommandResponse(prefix, runId, maybeObsId, dr)
-    commandResponseManager.addOrUpdateCommand(returnResponse.runId,
-                                              returnResponse)
+    commandResponseManager.addOrUpdateCommand(returnResponse)
   }
 
   private def handleDataRecordRawResponse(
@@ -159,8 +158,7 @@ private[hcd] case class GalilIOActor(
     val returnResponse = CompletedWithResult(
       runId,
       Result(prefix, Set(DataRecord.key.set(bs.toByteBuffer.array()))))
-    commandResponseManager.addOrUpdateCommand(returnResponse.runId,
-                                              returnResponse)
+    commandResponseManager.addOrUpdateCommand(returnResponse)
   }
 
   private def handleGalilResponse(response: String,
@@ -169,10 +167,8 @@ private[hcd] case class GalilIOActor(
                                   maybeObsId: Option[ObsId],
                                   cmdMapEntry: CommandMapEntry): Unit = {
     log.debug(s"handleGalilResponse $response")
-    val returnResponse =
-      adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
-    commandResponseManager.addOrUpdateCommand(returnResponse.runId,
-                                              returnResponse)
+    val returnResponse = adapter.makeResponse(prefix, runId, maybeObsId, cmdMapEntry, response)
+    commandResponseManager.addOrUpdateCommand(returnResponse)
   }
 
   private def galilSend(cmd: String): String = {
