@@ -44,6 +44,7 @@ private[hcd] object GalilIOActor {
   val publishDataRecord = "publishDataRecord"
 }
 
+// XXX TODO: Change to use immutable behavior, since there is no mutable state!
 private[hcd] case class GalilIOActor(
     ctx: ActorContext[GalilCommandMessage],
     galilConfig: GalilConfig,

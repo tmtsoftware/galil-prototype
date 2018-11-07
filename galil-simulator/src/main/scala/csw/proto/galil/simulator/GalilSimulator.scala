@@ -5,6 +5,7 @@ import java.net.{InetAddress, NetworkInterface}
 import akka.Done
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
+import akka.actor.typed.scaladsl.adapter.UntypedActorSystemOps
 import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
 import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
 import akka.util.ByteString
@@ -60,6 +61,10 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
   private var cmdMap: Map[String, Map[Char, Double]] =
     axixCmds.map(_ -> Map.empty[Char, Double]).toMap
 
+  // An actor that simulates the motor motion based on the setttings
+  private val simulatorActor = system.spawn(GalilSimulatorActor.simulate(), "GalilSimulatorActor")
+
+  // Handle tcp connections
   connections.runForeach { conn =>
     activeConnections += conn
     conn.handleWith(serverLogic(conn))
@@ -74,7 +79,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
                           allowTruncation = true))
       // handle multiple commands on a line separated by ";"
       .mapConcat(_.utf8String.split(";").map(ByteString(_)).toList)
-      .map(processCommand(_, conn))
+      .mapAsync(1)(processCommand(_, conn))
       .watchTermination() { (_, f) =>
         closeConnection(f, conn)
       }
@@ -106,7 +111,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
 
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString,
-                             conn: IncomingConnection): ByteString = {
+                             conn: IncomingConnection): Future[ByteString] = {
     val cmdString = cmd.utf8String
 
     println(cmdString)
@@ -120,23 +125,16 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
         else
           try {
             val cmd = cmdString.take(2)
-            if (cmdMap.contains(cmd)) formatReply(genericCmd(cmdString))
-            else
+            if (cmdMap.contains(cmd)) {
+              formatReply(genericCmd(cmdString))
+            } else
               cmd match { // basic commands are two upper case chars
-                case "" =>
-                  formatReply(None) // pressing return will return a ":"
-                case "BG" => formatReply(None)
-                case "MO" => formatReply(None)
-                case "NO" => formatReply(None) // no-op
-                case "SH" => formatReply(None)
-                case "ST" => formatReply(None)
-                case "BA" => formatReply(None)
-                case "BZ" => formatReply(None)
-                case "HM" => formatReply(None)
-                case "FI" => formatReply(None)
+                case "" | "BG" | "MO" | "NO" | "SH" | "ST" | "BA" | "BZ" |
+                    "HM" | "FI" | "TS" =>
+                  simulatorActor ! GalilSimulatorActor.Command()
+                  formatReply(None)
                 case "TC" => formatReply(tcCmd(cmdString))
                 case "TH" => formatReply(thCmd(conn))
-                case "TS" => formatReply(None)
                 case _    => formatReply(None, isError = true)
               }
           } catch {
@@ -263,6 +261,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
   // TODO: Support other variations of the syntax, such as where counts is ",,n,n,...".
   //
   // Command is the first two chars, axis should be the third.
+  // Return value is the Galil response.
   private def genericCmd(cmdString: String): String = {
     val cmd = cmdString.take(2)
     val map = cmdMap(cmd)
@@ -274,9 +273,50 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
       case _ =>
         val newMap = map + (axis -> value.toDouble)
         cmdMap = cmdMap + (cmd -> newMap)
+        simulateCmd(cmd, axis, value)
         ""
     }
   }
+
+  //      // MO
+  //      Setup(prefix, CommandName("motorOff"), None).add(axisKey.set(axis)),
+  //      // DP
+  //      Setup(prefix, CommandName("setMotorPosition"), None).add(axisKey.set(axis)).add(countsKey.set(0)),
+  //      // PT
+  //      Setup(prefix, CommandName("setPositionTracking"), None).add(axisKey.set(axis)).add(countsKey.set(0)),
+  //      // MT - Motor Type (stepper)
+  //      Setup(prefix, CommandName("setMotorType"), None).add(axisKey.set(axis)).add(countsKey.set(2)),
+  //      // AG - Amplifier Gain: Maximum current 1.4A
+  //      Setup(prefix, CommandName("setAmplifierGain"), None).add(axisKey.set(axis)).add(countsKey.set(2)),
+  //      // YB
+  //      Setup(prefix, CommandName("setStepMotorResolution"), None).add(axisKey.set(axis)).add(countsKey.set(200)),
+  //      // KS
+  //      Setup(prefix, CommandName("setMotorSmoothing"), None).add(axisKey.set(axis)).add(smoothKey.set(8)),
+  //      // AC
+  //      Setup(prefix, CommandName("setAcceleration"), None).add(axisKey.set(axis)).add(countsKey.set(1024)),
+  //      // DC
+  //      Setup(prefix, CommandName("setDeceleration"), None).add(axisKey.set(axis)).add(countsKey.set(1024)),
+  //      // LC - Low current mode.  setting is a guess.
+  //      Setup(prefix, CommandName("setLowCurrent"), None).add(axisKey.set(axis)).add(lcParamKey.set(2)),
+  //      // SH
+  //      Setup(prefix, CommandName("motorOn"), None).add(axisKey.set(axis)),
+  //      // SP - set speed in steps per second
+  //      Setup(prefix, CommandName("setMotorSpeed"), None).add(axisKey.set(axis)).add(speedKey.set(25)),
+  //  val MotorOff = "MO"
+  //  val MotorOn = "SH"
+  //  val MotorPosition = "DP"
+  //  val PositionTracking = "PT"
+  //  val MotorType = "MT"
+  //  val AmplifierGain = "AG"
+  //  val StepMotorResolution = "YB"
+  //  val MotorSmoothing = "KS"
+  //  val Acceleration = "AC"
+  //  val Deceleration = "DC"
+  //  val LowCurrent = "LC"
+  //  val MotorSpeed = "SP"
+  //  val AbsTarget = "PA"
+  //  val BeginMotion = "BG"
+
 
   // Simulates the TC command:
   private def tcCmd(cmdString: String): String = {
