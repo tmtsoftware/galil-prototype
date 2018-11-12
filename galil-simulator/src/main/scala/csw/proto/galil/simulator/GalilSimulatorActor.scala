@@ -1,8 +1,10 @@
 package csw.proto.galil.simulator
 
 import akka.actor.Cancellable
-import akka.actor.typed.Behavior
+import akka.actor.typed.{ActorRef, Behavior}
 import akka.actor.typed.scaladsl.Behaviors
+import csw.proto.galil.io.DataRecord
+import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState, Header, axes}
 
 import scala.concurrent.duration._
 
@@ -11,63 +13,70 @@ import scala.concurrent.duration._
   */
 object GalilSimulatorActor {
 
-  sealed trait Axis
-  case object S extends Axis
-  case object T extends Axis
-  case object I extends Axis
-  case object A extends Axis
-  case object B extends Axis
-  case object C extends Axis
-  case object D extends Axis
-  case object E extends Axis
-  case object F extends Axis
-  case object G extends Axis
-  case object H extends Axis
+  //  sealed trait Axis
+  //  case object S extends Axis
+  //  case object T extends Axis
+  //  case object I extends Axis
+  //  case object A extends Axis
+  //  case object B extends Axis
+  //  case object C extends Axis
+  //  case object D extends Axis
+  //  case object E extends Axis
+  //  case object F extends Axis
+  //  case object G extends Axis
+  //  case object H extends Axis
+  //
+  //  def axis(c: Char): Axis = c match {
+  //    case '
+  //  }
+
+  type Axis = Char
 
   // Commands received by this actor
   sealed trait GalilSimulatorCommand
 
   // Commands corresponding to the ones defined in GalilCommands.conf
-  case class MotorOff(axis: Axis) extends GalilSimulatorCommand
-  case class MotorOn(axis: Axis) extends GalilSimulatorCommand
-  case class SetMotorPosition(axis: Axis, value: Int) extends GalilSimulatorCommand
-  case class GetMotorPosition(axis: Axis) extends GalilSimulatorCommand
-  case class SetPositionTracking(axis: Axis, value: Int) extends GalilSimulatorCommand
-  case class GetPositionTracking(axis: Axis) extends GalilSimulatorCommand
-  case class SetMotorType(axis: Axis, value: Int) extends GalilSimulatorCommand
-  case class GetMotorType(axis: Axis) extends GalilSimulatorCommand
-  case class SetAmplifierGain(axis: Axis, value: Int) extends GalilSimulatorCommand
-  case class GetAmplifierGain(axis: Axis) extends GalilSimulatorCommand
+  // (XXX TODO: Add missing commands)
+  val MotorOff = "MO"
+  val MotorOn = "SH"
+  val MotorPosition = "DP"
+  val PositionTracking = "PT"
+  val MotorType = "MT"
+  val AmplifierGain = "AG"
   val StepMotorResolution = "YB"
   val MotorSmoothing = "KS"
   val Acceleration = "AC"
   val Deceleration = "DC"
   val LowCurrent = "LC"
   val MotorSpeed = "SP"
-
   val AbsTarget = "PA"
   val BeginMotion = "BG"
 
+  // A Galil command to set a value for a given axis
+  case class AxisSetCommand(cmd: String, axis: Axis, value: Int)
+    extends GalilSimulatorCommand
 
+  // A Galil command to get a value for a given axis
+  case class AxisGetCommand(cmd: String, axis: Axis, sender: ActorRef[Int])
+    extends GalilSimulatorCommand
 
-//  // A Galil command to set a value for a given axis
-//  case class AxisSetCommand(cmd: String, axis: Char, value: Int)
-//    extends GalilSimulatorCommand
-//
-//  // A Galil command for a given axis
-//  case class AxisCommand(cmd: String, axis: Char) extends GalilSimulatorCommand
-//
-//  // A Galil command with no args
-//  case class Command(cmd: String) extends GalilSimulatorCommand
+  // A Galil command for a given axis
+  case class AxisCommand(cmd: String, axis: Axis) extends GalilSimulatorCommand
+
+  // A Galil command with no args
+  case class Command(cmd: String) extends GalilSimulatorCommand
+
+  // Returns the current data record (for QR command)
+  case class GetDataRecord(sender: ActorRef[DataRecord]) extends GalilSimulatorCommand
 
   // Called periodically to simulate the motor motion for the given axis
-  case class SimulateMotion(axis: Char) extends GalilSimulatorCommand
+  case class SimulateMotion(axis: Axis) extends GalilSimulatorCommand
 
   // Holds the timer and current state for an axis
-  case class AxisContext(motorOnTimer: Option[Cancellable], motorPos: Int)
+  case class AxisContext(motorOnTimer: Option[Cancellable], settings: Map[String, Int])
 
   // Holds the current state of each axis
-  case class SimulatorContext(map: Map[Char, AxisContext])
+  case class SimulatorContext(map: Map[Axis, AxisContext])
 
   //      // MO
   //      Setup(prefix, CommandName("motorOff"), None).add(axisKey.set(axis)),
@@ -93,45 +102,36 @@ object GalilSimulatorActor {
   //      Setup(prefix, CommandName("motorOn"), None).add(axisKey.set(axis)),
   //      // SP - set speed in steps per second
   //      Setup(prefix, CommandName("setMotorSpeed"), None).add(axisKey.set(axis)).add(speedKey.set(25)),
-//  val MotorOff = "MO"
-//  val MotorOn = "SH"
-//  val MotorPosition = "DP"
-//  val PositionTracking = "PT"
-//  val MotorType = "MT"
-//  val AmplifierGain = "AG"
-//  val StepMotorResolution = "YB"
-//  val MotorSmoothing = "KS"
-//  val Acceleration = "AC"
-//  val Deceleration = "DC"
-//  val LowCurrent = "LC"
-//  val MotorSpeed = "SP"
-//  val AbsTarget = "PA"
-//  val BeginMotion = "BG"
 
   def simulate(simCtx: SimulatorContext = SimulatorContext(Map.empty))
   : Behavior[GalilSimulatorCommand] = Behaviors.receive { (ctx, msg) =>
-    // Simulate what happens when the Galil device receives the given command for the given axis and value
-    def handleCommand(cmd: String,
-                      axis: Char,
-                      value: Int): Behavior[GalilSimulatorCommand] = {
-      cmd match {
-        case `MotorOn` => motorOn(axis)
-        case `MotorOff` => motorOff(axis)
-        case `MotorPosition` => motorPosition(axis, value)
-        case x =>
-          println(s"Unsupported Galil simulator actor command: $x")
-          Behaviors.same
-      }
+
+    // --- Start actor behavior ---
+    msg match {
+      case SimulateMotion(axis) => simulateMotion(axis)
+
+      case Command(cmd) => Behavior.same
+
+      case AxisCommand(`MotorOn`, axis) => motorOn(axis)
+      case AxisCommand(`MotorOff`, axis) => motorOff(axis)
+      case AxisCommand(cmd, axis) => Behavior.same
+
+      case AxisSetCommand(cmd, axis, value) => setAxisValue(axis, cmd, value)
+
+      case AxisGetCommand(cmd, axis, sender) => getAxisValue(axis, cmd, sender)
+
+      case GetDataRecord(sender) => getDataRecord(sender)
     }
 
     // Simulate the motor motion based on the given commands
     def simulateMotion(axis: Char): Behavior[GalilSimulatorCommand] = {
+      // XXX TODO update values for motion
       simulate(simCtx)
     }
 
     // Gets the context for the given Galil axis
     def getAxisContext(axis: Char): AxisContext = {
-      simCtx.map.getOrElse(axis, AxisContext(None, 0))
+      simCtx.map.getOrElse(axis, AxisContext(None, Map.empty))
     }
 
     // Turn the motor for the give axis on
@@ -140,7 +140,7 @@ object GalilSimulatorActor {
       ac.motorOnTimer.foreach(_.cancel())
       val timer = ctx.schedule(100.millis, ctx.self, SimulateMotion(axis))
       val newAc = ac.copy(motorOnTimer = Some(timer))
-      SimulatorContext(simCtx.map + (axis -> newAc))
+      simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
     }
 
     // Turn the motor for the give axis off
@@ -148,26 +148,75 @@ object GalilSimulatorActor {
       val ac = getAxisContext(axis)
       ac.motorOnTimer.foreach(_.cancel())
       val newAc = ac.copy(motorOnTimer = None)
-      SimulatorContext(simCtx.map + (axis -> newAc))
+      simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
     }
 
-    // Turn the motor for the give axis off
-    def motorPosition(axis: Char,
-                      value: Int): Behavior[GalilSimulatorCommand] = {
+    // Set the value for a given command on the given axis
+    def setAxisValue(axis: Char, name: String, value: Int): Behavior[GalilSimulatorCommand] = {
       val ac = getAxisContext(axis)
-      val newAc = ac.copy(motorPos = value)
-      SimulatorContext(simCtx.map + (axis -> newAc))
+      val newSettings = ac.settings + (name -> value)
+      val newAc = ac.copy(settings = newSettings)
+      simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
     }
 
-    // --- Start actor behavior ---
-    msg match {
-      case SimulateMotion(axis) =>
-        simulateMotion(axis)
-
-      case SetCommand(cmd, axis, value) =>
-        handleCommand(cmd, axis, value)
-
+    // Gets the value for a given command on the given axis
+    def getAxisValue(axis: Char, name: String, replyTo: ActorRef[Int]): Behavior[GalilSimulatorCommand] = {
+      val ac = getAxisContext(axis)
+      replyTo ! ac.settings(name)
+      Behaviors.same
     }
+
+    // Sends the data record to the replyTo actor
+    def getDataRecord(replyTo: ActorRef[DataRecord]): Behavior[GalilSimulatorCommand] = {
+      val blocksPresent = List("S", "T", "I", "A", "B", "C", "D")
+
+      val recordSize = 226
+      val header = Header(blocksPresent, recordSize)
+
+      val sampleNumber = 28114.toShort
+      val inputs = (0 to 9).map(_ => 0.toByte).toArray
+      val outputs = (0 to 9).map(_ => 0.toByte).toArray
+      val ethernetHandleStatus = (0 to 8).map(_ => 0.toByte).toArray
+      val errorCode = 0.toByte
+      val threadStatus = 0.toByte
+      val amplifierStatus = 0
+      val contourModeSegmentCount = 0
+      val contourModeBufferSpaceRemaining = 0.toShort
+      val sPlaneSegmentCount = 0.toShort
+      val sPlaneMoveStatus = 0.toShort
+      val sPlaneDistanceTraveled = 0
+      val sPlaneBufferSpaceRemaining = 0.toShort
+      val tPlaneSegmentCount = 0.toShort
+      val tPlaneMoveStatus = 0.toShort
+      val tPlaneDistanceTraveled = 0
+      val tPlaneBufferSpaceRemaining = 0.toShort
+
+      val generalState = GeneralState(
+        sampleNumber,
+        inputs,
+        outputs,
+        ethernetHandleStatus,
+        errorCode,
+        threadStatus,
+        amplifierStatus,
+        contourModeSegmentCount,
+        contourModeBufferSpaceRemaining,
+        sPlaneSegmentCount,
+        sPlaneMoveStatus,
+        sPlaneDistanceTraveled,
+        sPlaneBufferSpaceRemaining,
+        tPlaneSegmentCount,
+        tPlaneMoveStatus,
+        tPlaneDistanceTraveled,
+        tPlaneBufferSpaceRemaining
+      )
+
+      val axisStatuses = axes.map(_ => GalilAxisStatus()).toArray
+
+      replyTo ! DataRecord(header, generalState, axisStatuses)
+      Behaviors.same
+    }
+
   }
 
 }

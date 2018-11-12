@@ -3,17 +3,19 @@ package csw.proto.galil.simulator
 import java.net.{InetAddress, NetworkInterface}
 
 import akka.Done
-import akka.actor.ActorSystem
+import akka.actor.{ActorSystem, Scheduler}
 import akka.stream.ActorMaterializer
 import akka.actor.typed.scaladsl.adapter.UntypedActorSystemOps
 import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
 import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
-import akka.util.ByteString
+import akka.util.{ByteString, Timeout}
 import csw.proto.galil.io.DataRecord
-import csw.proto.galil.io.DataRecord._
 
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
+import GalilSimulatorActor._
+import akka.actor.typed.scaladsl.AskPattern._
+import scala.concurrent.duration._
 
 /**
   * Simulates a Galil controller
@@ -26,6 +28,9 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
     mat: ActorMaterializer) {
 
   import system.dispatcher
+  implicit val timeout: Timeout = Timeout(3.seconds)
+  implicit val sched: Scheduler = system.scheduler
+
 
   // Keep track of current connections, needed to simulate TH command
   private var activeConnections: Set[IncomingConnection] = Set.empty
@@ -37,7 +42,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
   private var errorStatus = 0
   private val errorMessage = "Unrecognized command"
 
-  // Some commands that set a value for an axis
+  // Some commands that set a value for an axis (XXX TODO: Add to this list)
   private val axixCmds = Array("AC",
                                "AF",
                                "AG",
@@ -62,7 +67,8 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
     axixCmds.map(_ -> Map.empty[Char, Double]).toMap
 
   // An actor that simulates the motor motion based on the setttings
-  private val simulatorActor = system.spawn(GalilSimulatorActor.simulate(), "GalilSimulatorActor")
+  private val simulatorActor =
+    system.spawn(GalilSimulatorActor.simulate(), "GalilSimulatorActor")
 
   // Handle tcp connections
   connections.runForeach { conn =>
@@ -97,7 +103,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
   //just a question mark (?) and nothing else. If the command is not expected to
   //return a value, the response will be just the Colon (:)."
   private def formatReply(reply: Option[String],
-                          isError: Boolean = false): String = {
+                          isError: Boolean = false): Future[String] = {
     errorStatus = if (isError) 1 else 0
     if (isError) "?"
     else
@@ -107,26 +113,27 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
       }
   }
 
-  private def formatReply(reply: String): String = formatReply(Some(reply))
+  private def formatReply(reply: String): Future[String] = formatReply(Some(reply))
 
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString,
                              conn: IncomingConnection): Future[ByteString] = {
     val cmdString = cmd.utf8String
-
     println(cmdString)
 
     if (cmdString.startsWith("QR")) {
-      ByteString(getDataRecord.toByteBuffer)
+      // Get the data record from the simulator actor and convert it to a byte string for the response
+      val dataRecordF: Future[DataRecord] = simulatorActor ? (ref ⇒ GetDataRecord(ref))
+      dataRecordF.map(dr => ByteString(dr.toByteBuffer))
     } else {
       val reply =
         if (cmdString.startsWith("'"))
-          formatReply(None) // comment with "'"
+          formatReply(None) // ignore comment lines starting with with "'"
         else
           try {
             val cmd = cmdString.take(2)
             if (cmdMap.contains(cmd)) {
-              formatReply(genericCmd(cmdString))
+              formatReply(genericCmd(cmdString)) // XXX TODO change to future
             } else
               cmd match { // basic commands are two upper case chars
                 case "" | "BG" | "MO" | "NO" | "SH" | "ST" | "BA" | "BZ" |
@@ -144,56 +151,6 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
           }
       ByteString(reply)
     }
-  }
-
-  private def getDataRecord: DataRecord = {
-    // XXX dummy values
-    val blocksPresent = List("S", "T", "I", "A", "B", "C", "D")
-
-    val recordSize = 226
-    val header = Header(blocksPresent, recordSize)
-
-    val sampleNumber = 28114.toShort
-    val inputs = (0 to 9).map(_ => 0.toByte).toArray
-    val outputs = (0 to 9).map(_ => 0.toByte).toArray
-    val ethernetHandleStatus = (0 to 8).map(_ => 0.toByte).toArray
-    val errorCode = 0.toByte
-    val threadStatus = 0.toByte
-    val amplifierStatus = 0
-    val contourModeSegmentCount = 0
-    val contourModeBufferSpaceRemaining = 0.toShort
-    val sPlaneSegmentCount = 0.toShort
-    val sPlaneMoveStatus = 0.toShort
-    val sPlaneDistanceTraveled = 0
-    val sPlaneBufferSpaceRemaining = 0.toShort
-    val tPlaneSegmentCount = 0.toShort
-    val tPlaneMoveStatus = 0.toShort
-    val tPlaneDistanceTraveled = 0
-    val tPlaneBufferSpaceRemaining = 0.toShort
-
-    val generalState = GeneralState(
-      sampleNumber,
-      inputs,
-      outputs,
-      ethernetHandleStatus,
-      errorCode,
-      threadStatus,
-      amplifierStatus,
-      contourModeSegmentCount,
-      contourModeBufferSpaceRemaining,
-      sPlaneSegmentCount,
-      sPlaneMoveStatus,
-      sPlaneDistanceTraveled,
-      sPlaneBufferSpaceRemaining,
-      tPlaneSegmentCount,
-      tPlaneMoveStatus,
-      tPlaneDistanceTraveled,
-      tPlaneBufferSpaceRemaining
-    )
-
-    val axisStatuses = axes.map(_ => GalilAxisStatus()).toArray
-
-    DataRecord(header, generalState, axisStatuses)
   }
 
   // Receives a future indicating when the flow associated with a client connection completes.
@@ -248,33 +205,24 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
 
   // Simulates commands that let you set and get values, for example:
   //
-  // PR[A-z]=?
-  //  setRelTarget: {
-  //    command: "PR(axis)=(counts)"
-  //    responseFormat: ""
-  //  }
-  //  getRelTarget: {
-  //    command: "PR(axis)=?"
-  //    responseFormat: ".*?(counts)"
-  //  }
-  //
-  // TODO: Support other variations of the syntax, such as where counts is ",,n,n,...".
+  // PRA=?
+  // PRA=1
   //
   // Command is the first two chars, axis should be the third.
+  // If the next two chars are "=?", get the value, otehrwise set it.
   // Return value is the Galil response.
-  private def genericCmd(cmdString: String): String = {
+  private def genericCmd(cmdString: String): Future[String] = {
     val cmd = cmdString.take(2)
     val map = cmdMap(cmd)
     val axis = cmdString.drop(2).head
     val value = cmdString.drop(4)
     value match {
       case "?" =>
-        map(axis).toString
+        val intF: Future[Int] = simulatorActor ? (ref ⇒ AxisGetCommand(cmd, axis, ref))
+        intF.map(_.toString)
       case _ =>
-        val newMap = map + (axis -> value.toDouble)
-        cmdMap = cmdMap + (cmd -> newMap)
-        simulateCmd(cmd, axis, value)
-        ""
+        simulatorActor ! AxisSetCommand(cmd, axis, value.toInt)
+        Future.successful("")
     }
   }
 
@@ -316,7 +264,6 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
   //  val MotorSpeed = "SP"
   //  val AbsTarget = "PA"
   //  val BeginMotion = "BG"
-
 
   // Simulates the TC command:
   private def tcCmd(cmdString: String): String = {
