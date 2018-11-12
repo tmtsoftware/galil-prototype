@@ -138,7 +138,7 @@ object GalilSimulatorActor {
     def motorOn(axis: Char): Behavior[GalilSimulatorCommand] = {
       val ac = getAxisContext(axis)
       ac.motorOnTimer.foreach(_.cancel())
-      val timer = ctx.schedule(100.millis, ctx.self, SimulateMotion(axis))
+      val timer = ctx.scheduleOnce(100.millis, ctx.self, SimulateMotion(axis))
       val newAc = ac.copy(motorOnTimer = Some(timer))
       simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
     }
