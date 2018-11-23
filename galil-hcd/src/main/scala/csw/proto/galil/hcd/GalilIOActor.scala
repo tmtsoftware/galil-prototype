@@ -8,7 +8,8 @@ import akka.util.ByteString
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
-import akka.actor.typed.scaladsl.{ActorContext, AbstractBehavior}
+import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
+//import akka.actor.typed.scaladsl.{ActorContext, AbstractBehavior}
 import csw.command.client.CommandResponseManager
 import csw.framework.CurrentStatePublisher
 import csw.logging.scaladsl.LoggerFactory
@@ -53,14 +54,15 @@ private[hcd] case class GalilIOActor(
     loggerFactory: LoggerFactory,
     galilPrefix: Prefix,
     currentStatePublisher: CurrentStatePublisher)
-    extends AbstractBehavior[GalilCommandMessage] {
+    extends MutableBehavior[GalilCommandMessage] {
 
   private val log = loggerFactory.getLogger
 
   private val galilIo = connectToGalil()
   verifyGalil()
 
-  ctx.scheduleOnce(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
+//  ctx.scheduleOnce(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
+  ctx.schedule(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
 
   // Connect to Galikl device and throw error if that doesn't work
   private def connectToGalil(): GalilIo = {
@@ -107,7 +109,10 @@ private[hcd] case class GalilIOActor(
         log.debug(s"doing command: $commandString")
         if (commandString == GalilIOActor.publishDataRecord) {
           publishDataRecord()
-          ctx.scheduleOnce(1.second,
+//          ctx.scheduleOnce(1.second,
+//                       ctx.self,
+//                       GalilCommand(GalilIOActor.publishDataRecord))
+          ctx.schedule(1.second,
                        ctx.self,
                        GalilCommand(GalilIOActor.publishDataRecord))
         }

@@ -95,7 +95,7 @@ object GalilHcdClientApp extends App {
   val blocksPresent2 = dataRecord.header.blocksPresent
   // print the motor position for each axis that is present
   DataRecord.axes.zip(dataRecord.axisStatuses).foreach { p =>
-    if (blocksPresent2.contains(p._1.toString))
+    if (blocksPresent2.contains(p._1))
       println(s"Axis ${p._1}: motor position: ${p._2.motorPosition}")
   }
 

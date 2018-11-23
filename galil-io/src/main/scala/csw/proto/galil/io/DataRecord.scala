@@ -22,7 +22,7 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 
   override def toString: String = {
     val status = axes.zip(axisStatuses).flatMap { p =>
-      if (header.blocksPresent.contains(p._1.toString))
+      if (header.blocksPresent.contains(p._1))
         Some((p._1, p._2))
       else None
     }.map(p => s"\nAxis ${p._1} Status:${p._2.toString}").mkString("\n")
@@ -34,24 +34,21 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
     * returned by the device.
     */
   def toByteBuffer: ByteBuffer = {
-    val buffer = ByteBuffer.allocateDirect(header.recordSize + 1).order(ByteOrder.LITTLE_ENDIAN)
-
+    val buffer = ByteBuffer.allocateDirect(header.recordSize + 1)
+    buffer.order(ByteOrder.LITTLE_ENDIAN)
     header.write(buffer)
+//    buffer.order(ByteOrder.BIG_ENDIAN)
     generalState.write(buffer)
-
-    axes.zip(axisStatuses).foreach { p =>
-      if (header.blocksPresent.contains(p._1.toString))
-        p._2.write(buffer)
-    }
+    axisStatuses.foreach(_.write(buffer))
 
     buffer.flip().asInstanceOf[ByteBuffer]
   }
 
   def toParamSet: Set[Parameter[_]] = {
     val status = axes.zip(axisStatuses).flatMap { p =>
-      val axis = p._1.toString
+      val axis = p._1
       if (header.blocksPresent.contains(axis))
-        Some(KeyType.StructKey.make(axis).set(Struct(p._2.toParamSet)))
+        Some(KeyType.StructKey.make(axis.toString).set(Struct(p._2.toParamSet)))
       else None
     }
     header.toParamSet ++ generalState.toParamSet ++ status.toSet
@@ -71,27 +68,34 @@ object DataRecord {
   implicit val galilAxisStatusJsonFormat: OFormat[GalilAxisStatus] = Json.format[GalilAxisStatus]
   implicit val dataRecordJsonFormat: OFormat[DataRecord] = Json.format[DataRecord]
 
-
   /**
-    * Possible Galil Axis (may not all be present)
+    * In most cases only the axes A to H are used
     */
   val axes: List[Char] = ('A' to 'H').toList
 
   /**
+    * Possible Galil Axis for header (may not all be present)
+    */
+  val allAxes: List[Char] = List('S', 'T', 'I') ++ axes
+
+  /**
     * The 4 byte Galil header
     *
-    * @param blocksPresent Contains the char name of the block for each block present, or empty string if block not present
-    * @param recordSize    size of the data record, including the header
+    * @param blocks List of name of the block for each block present
     */
-  case class Header(blocksPresent: List[String], recordSize: Int) {
+  case class Header(blocks: List[String]) {
     import Header._
+
+    val blocksPresent: List[Char] = blocks.map(_.head)
+    // DataRecord size depends on the fixed size of the header + general state + each of the axis statuses
+    val recordSize: Int = 82 + blocksPresent.count(axes.contains(_)) * 36
 
     /**
       * Appends the header to the buffer in the documented Galil format
       */
     def write(buffer: ByteBuffer): Unit = {
-      val byte0 = blocksPresent.take(3).zipWithIndex.map(p => setBit(p._2, p._1.nonEmpty)).sum
-      val byte1 = blocksPresent.drop(3).zipWithIndex.map(p => setBit(p._2, p._1.nonEmpty)).sum
+      val byte0 = allAxes.take(3).zipWithIndex.map(p => setBit(p._2, blocksPresent.contains(p._1))).sum
+      val byte1 = axes.zipWithIndex.map(p => setBit(p._2, blocksPresent.contains(p._1))).sum
       buffer.put(byte0.asInstanceOf[Byte])
       buffer.put(byte1.asInstanceOf[Byte])
       buffer.putShort(recordSize.asInstanceOf[Short])
@@ -99,53 +103,55 @@ object DataRecord {
 
     override def toString: String =
       s"""
-         |Blocks present:   ${blocksPresent.mkString(" ")}
+         |Blocks present:    ${blocksPresent.mkString(" ")}
          |Data record size: $recordSize
        """.stripMargin
 
-    def toParamSet: Set[Parameter[_]] = {
-      Set(blocksPresentKey.set(blocksPresent.toArray),
-        recordSizeKey.set(recordSize))
-    }
+
+    def toParamSet: Set[Parameter[_]] =
+      Set(blocksPresentKey.set(blocksPresent.toArray))
 
   }
 
   object Header {
-    val recordSizeKey: Key[Int] = KeyType.IntKey.make("recordSize")
-    val blocksPresentKey: Key[String] = KeyType.StringKey.make("blocksPresent")
+    val blocksPresentKey: Key[Char] = KeyType.CharKey.make("blocksPresent")
 
     /**
       * Initialze the header from the given byte buffer
       */
     def apply(buffer: ByteBuffer): Header = {
+      // Note: The header information of the data records is formatted in little endian (reversed network byte order)
       val byte0 = buffer.get
       val byte1 = buffer.get
 
-      def getBlock(num: Byte, i: Int, s: String): String = if (getBit(num, i)) s else ""
+      def getBlock(num: Byte, i: Int, axis: Char): Option[Char] = if (getBit(num, i)) Some(axis) else None
 
       val blocksPresent = List(
-        getBlock(byte0, 0, "S"),
-        getBlock(byte0, 1, "T"),
-        getBlock(byte0, 2, "I"),
-        getBlock(byte1, 0, "A"),
-        getBlock(byte1, 1, "B"),
-        getBlock(byte1, 2, "C"),
-        getBlock(byte1, 3, "D"),
-        getBlock(byte1, 4, "E"),
-        getBlock(byte1, 5, "F"),
-        getBlock(byte1, 6, "G"),
-        getBlock(byte1, 7, "H"))
-      val recordSize = buffer.getShort() & 0xFFFF
-      Header(blocksPresent, recordSize)
+        getBlock(byte0, 0, 'S'),
+        getBlock(byte0, 1, 'T'),
+        getBlock(byte0, 2, 'I'),
+        getBlock(byte1, 0, 'A'),
+        getBlock(byte1, 1, 'B'),
+        getBlock(byte1, 2, 'C'),
+        getBlock(byte1, 3, 'D'),
+        getBlock(byte1, 4, 'E'),
+        getBlock(byte1, 5, 'F'),
+        getBlock(byte1, 6, 'G'),
+        getBlock(byte1, 7, 'H')).flatten
+
+      val recordSize = buffer.getShort() & 0x0FFFF
+      val header = Header(blocksPresent.map(_.toString))
+      // XXX TODO FIXME
+      if (recordSize != header.recordSize) println(s"Error: Wrong data record size in DataRecord.Header.apply: $recordSize != ${header.recordSize}")
+      header
     }
 
     /**
       * Initialze from the result of a command (See CompletedWithResult)
       */
     def apply(result: Result): Header = {
-      val blocksPresent = result.get(blocksPresentKey).get.values.toList
-      val recordSize = result.get(recordSizeKey).get.head
-      Header(blocksPresent, recordSize)
+      val blocks = result.get(blocksPresentKey).get.values.toList.map(_.toString)
+      Header(blocks)
     }
   }
 
@@ -168,6 +174,11 @@ object DataRecord {
                           tPlaneBufferSpaceRemaining: Short) {
 
     import GeneralState._
+
+    // XXX TODO FIXME
+    if (inputs.length != 10) println(s"Error: Wrong number of inputs: ${inputs.length}")
+    if (outputs.length != 10) println(s"Error: Wrong number of outputs: ${outputs.length}")
+    if (ethernetHandleStatus.length != 8) println(s"Error: Wrong number of ethernetHandleStatus: ${ethernetHandleStatus.length}")
 
     /**
       * Appends the GeneralState to the given ByteBuffer in the documented Galil format
@@ -281,15 +292,12 @@ object DataRecord {
         ar
       }
 
-      val numAxes = header.blocksPresent.size
-      val ioSize = if (numAxes > 4) 10 else 1
-
       // ADDR 04 - 05
       val sampleNumber = buffer.getShort()
       // ADDR 06 - 15
-      val inputs = getBytes(ioSize)
+      val inputs = getBytes(10)
       // ADDR 16 - 25
-      val outputs = getBytes(ioSize)
+      val outputs = getBytes(10)
 
       // ADDR 26 - 41 (reserved)
       buffer.position(buffer.position() + 16)
@@ -547,11 +555,13 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
-    val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = bs.toByteBuffer
+    buffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
+//    buffer.order(ByteOrder.BIG_ENDIAN)
     val generalState = GeneralState(buffer, header)
-    val axisStatuses = axes.map { axis =>
-      if (header.blocksPresent.contains(axis.toString)) GalilAxisStatus(buffer) else GalilAxisStatus()
+    val axisStatuses = axes.flatMap { axis =>
+      if (header.blocksPresent.contains(axis)) Some(GalilAxisStatus(buffer)) else None
     }
     DataRecord(header, generalState, axisStatuses.toArray)
   }
