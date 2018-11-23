@@ -323,7 +323,7 @@ object GalilSimulatorActor {
     val sampleNumber = 28114.toShort
     val inputs = (0 to 9).map(_ => 0.toByte).toArray
     val outputs = (0 to 9).map(_ => 0.toByte).toArray
-    val ethernetHandleStatus = (0 to 8).map(_ => 0.toByte).toArray
+    val ethernetHandleStatus = DataRecord.axes.map(_ => 0.toByte).toArray
     val errorCode = this.errorStatus.toByte
     val threadStatus = 0.toByte
     val amplifierStatus = 0

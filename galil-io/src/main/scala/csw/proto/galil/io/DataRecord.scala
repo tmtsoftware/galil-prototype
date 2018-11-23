@@ -1,5 +1,6 @@
 package csw.proto.galil.io
 
+import java.io.IOException
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
@@ -9,7 +10,6 @@ import csw.params.core.generics.{Key, KeyType, Parameter}
 import csw.params.core.models._
 import csw.proto.galil.io.DataRecord._
 import play.api.libs.json.{Json, OFormat}
-
 
 /**
   * The data record returned from the Galil QR command
@@ -34,10 +34,8 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
     * returned by the device.
     */
   def toByteBuffer: ByteBuffer = {
-    val buffer = ByteBuffer.allocateDirect(header.recordSize + 1)
-    buffer.order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = ByteBuffer.allocateDirect(header.recordSize + 1).order(ByteOrder.LITTLE_ENDIAN)
     header.write(buffer)
-//    buffer.order(ByteOrder.BIG_ENDIAN)
     generalState.write(buffer)
     axisStatuses.foreach(_.write(buffer))
 
@@ -141,8 +139,7 @@ object DataRecord {
 
       val recordSize = buffer.getShort() & 0x0FFFF
       val header = Header(blocksPresent.map(_.toString))
-      // XXX TODO FIXME
-      if (recordSize != header.recordSize) println(s"Error: Wrong data record size in DataRecord.Header.apply: $recordSize != ${header.recordSize}")
+      if (recordSize != header.recordSize) throw new IOException(s"Error: Wrong data record size in DataRecord.Header.apply: $recordSize != ${header.recordSize}")
       header
     }
 
@@ -175,10 +172,9 @@ object DataRecord {
 
     import GeneralState._
 
-    // XXX TODO FIXME
-    if (inputs.length != 10) println(s"Error: Wrong number of inputs: ${inputs.length}")
-    if (outputs.length != 10) println(s"Error: Wrong number of outputs: ${outputs.length}")
-    if (ethernetHandleStatus.length != 8) println(s"Error: Wrong number of ethernetHandleStatus: ${ethernetHandleStatus.length}")
+    if (inputs.length != 10) throw new IOException(s"Error: Wrong number of inputs: ${inputs.length}")
+    if (outputs.length != 10) throw new IOException(s"Error: Wrong number of outputs: ${outputs.length}")
+    if (ethernetHandleStatus.length != 8) throw new IOException(s"Error: Wrong number of ethernetHandleStatus: ${ethernetHandleStatus.length}")
 
     /**
       * Appends the GeneralState to the given ByteBuffer in the documented Galil format
@@ -555,10 +551,8 @@ object DataRecord {
     * Creates a DataRecord from the bytes returned from a Galil device
     */
   def apply(bs: ByteString): DataRecord = {
-    val buffer = bs.toByteBuffer
-    buffer.order(ByteOrder.LITTLE_ENDIAN)
+    val buffer = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header = Header(buffer)
-//    buffer.order(ByteOrder.BIG_ENDIAN)
     val generalState = GeneralState(buffer, header)
     val axisStatuses = axes.flatMap { axis =>
       if (header.blocksPresent.contains(axis)) Some(GalilAxisStatus(buffer)) else None
