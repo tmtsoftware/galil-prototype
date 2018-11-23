@@ -158,7 +158,6 @@ object GalilSimulatorActor {
                         steps: Int): Behavior[GalilSimulatorCommand] = {
 
     val ac = getAxisContext(simCtx, axis)
-    println(s"XXX ref pos = ${ac.referencePosition + steps}")
     val newAc = ac.copy(referencePosition = ac.referencePosition + steps)
     simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
   }
@@ -287,7 +286,6 @@ object GalilSimulatorActor {
     val motorSpeed =
       math.max(ac.settings.getOrElse(MotorSpeed, 25000.0), 1.0).toInt
     val delay = (1000000 / motorSpeed).microseconds
-    println(s"XXX motor speed = $motorSpeed, delay = ${delay.toMillis} ms")
     val timer = ctx.system.scheduler.schedule(delay, delay)(
       ctx.self ! SimulateMotion(axis))
     val newAc = ac.copy(motionTimer = Some(timer))
