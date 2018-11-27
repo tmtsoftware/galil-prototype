@@ -26,8 +26,8 @@ import csw.proto.galil.io.DataRecord
   * A client for locating and communicating with the Galil HCD
   *
   * @param source the client's prefix
-  * @param system ActorSystem (must be created by ClusterAwareSettings.system - should be one per application)
-  * @param locationService a reference to the location service created with LocationServiceFactory.withSystem(system)
+  * @param system ActorSystem
+  * @param locationService a reference to the location service
   */
 case class GalilHcdClient(source: Prefix,
                           system: ActorSystem,

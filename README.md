@@ -73,10 +73,3 @@ and then select this directory.
 
 To run or debug the Galil HCD from IntelliJ Idea, go to the GalilHcdApp class and select *Run GalilHcdApp*.
 Note that this assumes that the location service and config service are running as described above.
-If the environment variables are not set, you can configure Idea to use the VM Parameters under 
-GalilHcdApp => *Edit Configurations*. 
-
-For example: 
-```
-VM Parameters: -DinterfaceName=... -DclusterSeeds=host:port
-```

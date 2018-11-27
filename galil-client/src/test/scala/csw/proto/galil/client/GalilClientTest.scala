@@ -16,7 +16,7 @@ import org.scalatest.FunSuite
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-// Note: Test assumes that location service (csw-cluster-seed), galil-hcd and galil-simulator are running
+// Note: Test assumes that location service, galil-hcd and galil-simulator are running
 //@Ignore
 class GalilClientTest extends FunSuite {
   implicit val system: ActorSystem = ActorSystemFactory.remote("TestAssemblyClient")
