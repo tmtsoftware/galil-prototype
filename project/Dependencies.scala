@@ -20,7 +20,10 @@ object Dependencies {
   )
 
   val `galil-repl-deps` = Seq(
-    CSW.`csw-framework`
+    CSW.`csw-framework`,
+    CSW.`csw-config-client`,
+    CSW.`csw-aas-native`,
+    CSW.`csw-location-client`
   )
 
   val `galil-io-deps` = Seq(

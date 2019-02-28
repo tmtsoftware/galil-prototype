@@ -7,7 +7,7 @@ import akka.stream.ActorMaterializer
 import akka.util.Timeout
 import csw.location.client.ActorSystemFactory
 import csw.location.client.scaladsl.HttpLocationServiceFactory
-import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.logging.client.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 import csw.params.commands.CommandResponse.CompletedWithResult
 import csw.params.core.generics.KeyType
 import csw.params.core.models.Prefix

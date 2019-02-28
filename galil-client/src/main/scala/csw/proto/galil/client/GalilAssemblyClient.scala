@@ -15,7 +15,7 @@ import csw.location.api.models.Connection.AkkaConnection
 import csw.location.api.models._
 import csw.location.client.ActorSystemFactory
 import csw.location.client.scaladsl.HttpLocationServiceFactory
-import csw.logging.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
+import csw.logging.client.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 import csw.params.commands.{CommandName, Setup}
 import csw.params.core.generics.{Key, KeyType}
 import csw.params.core.models.Prefix

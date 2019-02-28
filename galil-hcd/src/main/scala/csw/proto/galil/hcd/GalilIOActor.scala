@@ -5,6 +5,7 @@ import java.io.IOException
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
 import akka.util.ByteString
+import csw.logging.client.scaladsl.LoggerFactory
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
@@ -12,7 +13,6 @@ import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import akka.actor.typed.scaladsl.{ActorContext, AbstractBehavior}
 import csw.command.client.CommandResponseManager
 import csw.framework.CurrentStatePublisher
-import csw.logging.scaladsl.LoggerFactory
 import csw.params.commands.CommandResponse.CompletedWithResult
 import csw.params.commands.Result
 import csw.params.core.models.{Id, ObsId, Prefix}

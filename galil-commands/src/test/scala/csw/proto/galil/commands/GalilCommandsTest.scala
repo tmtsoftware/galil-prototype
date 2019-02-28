@@ -4,7 +4,7 @@ import java.net.InetAddress
 
 import akka.actor.ActorSystem
 import csw.location.client.ActorSystemFactory
-import csw.logging.scaladsl.LoggingSystemFactory
+import csw.logging.client.scaladsl.LoggingSystemFactory
 import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
 import csw.params.commands.{CommandName, Setup}
 import csw.params.core.models.{ObsId, Prefix}
