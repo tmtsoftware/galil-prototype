@@ -65,7 +65,8 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val s = Setup(source, CommandName("getDataRecord"), obsId)
         // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
+
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -82,7 +83,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val s = Setup(source, CommandName("getDataRecordRaw"), obsId)
         // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
-        hcd.submit(setup).map {
+        hcd.submitAndWait(setup).map {
           case CommandResponse.CompletedWithResult(_, result) =>
             val bytes = result.get(DataRecord.key).get.head.values
             DataRecord(ByteString(bytes))
@@ -108,7 +109,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(countsKey.set(count))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -125,7 +126,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("getRelTarget"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -144,7 +145,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(countsKey.set(count))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -161,7 +162,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("setBrushlessAxis"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -180,7 +181,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(interpCountsKey.set(interpCounts))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -199,7 +200,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(brushlessModulusKey.set(brushlessModulus))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -218,7 +219,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(voltsKey.set(volts))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -234,7 +235,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("motorOn"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -250,7 +251,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("motorOff"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -267,7 +268,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("setHomingMode"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -283,7 +284,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("beginMotion"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -302,7 +303,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
           .add(axisKey.set(axis))
           .add(speedKey.set(speed))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
@@ -319,7 +320,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = Setup(source, CommandName("setFindIndexMode"), obsId)
           .add(axisKey.set(axis))
 
-        hcd.submit(setup)
+        hcd.submitAndWait(setup)
 
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))

@@ -29,7 +29,7 @@ import scala.util.{Failure, Success}
   */
 object GalilAssemblyClient extends App {
 
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "TestAssemblyClient")
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilAssemblyClient")
   implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   implicit val timeout: Timeout = Timeout(3.seconds)
@@ -77,7 +77,7 @@ object GalilAssemblyClient extends App {
     val axisKey: Key[Char] = KeyType.CharKey.make("axis")
     val countsKey: Key[Int] = KeyType.IntKey.make("counts")
 
-    val setup = Setup(Prefix("my.test.client"), CommandName("setRelTarget"), maybeObsId)
+    val setup = Setup(Prefix("csw.test.client"), CommandName("setRelTarget"), maybeObsId)
       .add(axisKey.set('A'))
       .add(countsKey.set(2))
 

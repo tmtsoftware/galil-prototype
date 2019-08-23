@@ -15,7 +15,7 @@ import org.scalatest.{BeforeAndAfterAll, FunSuite}
 import scala.concurrent.ExecutionContextExecutor
 
 class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "TestAssemblyClient")
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilCommandsTest")
   implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   private val localHost = InetAddress.getLocalHost.getHostName

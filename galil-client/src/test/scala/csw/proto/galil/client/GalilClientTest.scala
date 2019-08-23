@@ -19,13 +19,13 @@ import scala.concurrent.duration._
 // Note: Test assumes that location service, galil-hcd and galil-simulator are running
 //@Ignore
 class GalilClientTest extends FunSuite {
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "TestAssemblyClient")
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilClientTest")
   implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   implicit val timeout: Timeout = Timeout(3.seconds)
 
   private val locationService = HttpLocationServiceFactory.makeLocalClient(typedSystem, mat)
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), locationService)
+  private val galilHcdClient = GalilHcdClient(Prefix("csw.galil.client"), locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
 

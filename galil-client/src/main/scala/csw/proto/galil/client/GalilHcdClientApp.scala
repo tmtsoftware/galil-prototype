@@ -20,12 +20,12 @@ import scala.concurrent.duration._
   * A demo client to test locating and communicating with the Galil HCD
   */
 object GalilHcdClientApp extends App {
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "TestAssemblyClient")
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilHcdClientApp")
   implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
 
   private val locationService = HttpLocationServiceFactory.makeLocalClient(typedSystem, mat)
-  private val galilHcdClient = GalilHcdClient(Prefix("test.galil.client"), locationService)
+  private val galilHcdClient = GalilHcdClient(Prefix("csw.galil.client"), locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, typedSystem)
@@ -75,6 +75,7 @@ object GalilHcdClientApp extends App {
 
   // 1. getDataRecord sends QR and returns the parsed fields in the result (The keys are defined in the DataRecord object)
   val resp13 = Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
+
   println(s"getDataRecord: $resp13")
   val result = resp13.asInstanceOf[CompletedWithResult].result
 

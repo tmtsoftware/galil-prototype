@@ -2,23 +2,28 @@ package csw.proto.galil.io
 
 import java.net.InetAddress
 
-import akka.actor.ActorSystem
+import akka.actor.typed.{ActorSystem, SpawnProtocol}
+import akka.stream.Materializer
+import akka.stream.typed.scaladsl.ActorMaterializer
 import akka.util.ByteString
-import csw.location.client.ActorSystemFactory
 import csw.logging.client.scaladsl.LoggingSystemFactory
 import csw.params.commands.Result
 import csw.params.core.models.Prefix
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
+import scala.concurrent.ExecutionContextExecutor
+
 //noinspection ComparingLength
 // Note: Before running this test, start the galil "simulator" script
 class GalilIoTests extends FunSuite with BeforeAndAfterAll {
 
-  implicit val system: ActorSystem = ActorSystemFactory.remote
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilIoTests")
+  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   private val localHost = InetAddress.getLocalHost.getHostName
 
-  LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, system)
-  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888, can also use ssh tunnel to test on device
+  LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, typedSystem)
+  val galilIo: GalilIoTcp = GalilIoTcp() // default params: "127.0.0.1", 8888, can also use ssh tunnel to test on device
 
   override def beforeAll() {
   }
@@ -91,7 +96,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     // Test creating a DataRecord from a paramset (wrapped in a Result object, which contains a prefix and a param set)
     val paramSet = dr1.toParamSet
     println(s"DataRecord ParamSet: $paramSet\n")
-    val result = Result(Prefix("test.one"), paramSet)
+    val result = Result(Prefix("csw.one"), paramSet)
     val dr3 = DataRecord(result)
     assert(dr1.toString == dr3.toString)
   }
