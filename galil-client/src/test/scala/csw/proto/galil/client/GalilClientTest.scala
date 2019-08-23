@@ -49,9 +49,9 @@ class GalilClientTest extends FunSuite {
     val result = resp3.asInstanceOf[CompletedWithResult].result
 
     // Example of how you could extract the motor position for each axis
-    val blocksPresent = result.get(KeyType.StringKey.make("blocksPresent")).get.values
-    blocksPresent.filter(b => b >= "A" && b <= "F").foreach { axis =>
-      val struct = result.get(KeyType.StructKey.make(axis)).get.head
+    val blocksPresent = result.get(KeyType.CharKey.make("blocksPresent")).get.values
+    blocksPresent.filter(b => b >= 'A' && b <= 'F').foreach { axis =>
+      val struct = result.get(KeyType.StructKey.make(axis.toString)).get.head
       val motorPos = struct.get(KeyType.IntKey.make("motorPosition")).get.head
       println(s"Axis $axis: motor position: $motorPos")
     }
