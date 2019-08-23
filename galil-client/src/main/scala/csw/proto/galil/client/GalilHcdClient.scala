@@ -2,20 +2,19 @@ package csw.proto.galil.client
 
 import java.io.IOException
 
-import akka.actor.{ActorRefFactory, ActorSystem, Scheduler}
-import akka.stream.ActorMaterializer
-import akka.actor.typed
+import akka.stream.Materializer
+import akka.actor.Scheduler
+import akka.actor.typed.{ActorSystem, SpawnProtocol}
 import akka.util.{ByteString, Timeout}
 
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.concurrent.duration._
-import akka.actor.typed.scaladsl.adapter._
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
-import csw.location.api.models.ComponentId
-import csw.location.api.models.ComponentType.HCD
-import csw.location.api.models.Connection.AkkaConnection
 import csw.location.api.scaladsl.LocationService
+import csw.location.models.ComponentId
+import csw.location.models.ComponentType.HCD
+import csw.location.models.Connection.AkkaConnection
 import csw.params.commands.CommandResponse.Error
 import csw.params.commands.{CommandName, CommandResponse, Setup}
 import csw.params.core.generics.{Key, KeyType}
@@ -25,20 +24,17 @@ import csw.proto.galil.io.DataRecord
 /**
   * A client for locating and communicating with the Galil HCD
   *
-  * @param source the client's prefix
-  * @param system ActorSystem
+  * @param source          the client's prefix
   * @param locationService a reference to the location service
   */
-case class GalilHcdClient(source: Prefix,
-                          system: ActorSystem,
-                          locationService: LocationService) {
+case class GalilHcdClient(source: Prefix, locationService: LocationService)
+                         (implicit typedSystem: ActorSystem[SpawnProtocol],
+                          mat: Materializer,
+                          ec: ExecutionContextExecutor) {
 
-  import system._
 
   implicit val timeout: Timeout = Timeout(3.seconds)
-  implicit val scheduler: Scheduler = system.scheduler
-  implicit def actorRefFactory: ActorRefFactory = system
-  implicit val mat: ActorMaterializer = ActorMaterializer()
+  implicit val scheduler: Scheduler = typedSystem.scheduler
 
   private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
 
@@ -54,7 +50,6 @@ case class GalilHcdClient(source: Prefix,
     * Gets a reference to the running Galil HCD from the location service, if found.
     */
   private def getGalilHcd: Future[Option[CommandService]] = {
-    implicit val sys: typed.ActorSystem[Nothing] = system.toTyped
     locationService
       .resolve(connection, 30.seconds)
       .map(_.map(CommandServiceFactory.make(_)))

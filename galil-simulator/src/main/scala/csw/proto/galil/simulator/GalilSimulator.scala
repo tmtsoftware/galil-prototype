@@ -73,7 +73,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
       cmdString match {
         case "TH" =>
           Future.successful(GalilSimulatorActor.formatReply(thCmd(conn)))
-        case _ => simulatorActor ? (ref ⇒ Command(cmdString, ref))
+        case _ => simulatorActor ? (ref => Command(cmdString, ref))
       }
 
   }

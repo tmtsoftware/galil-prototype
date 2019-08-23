@@ -10,17 +10,8 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.location.api.models.{
-  AkkaLocation,
-  LocationRemoved,
-  LocationUpdated,
-  TrackingEvent
-}
-import csw.params.commands.CommandResponse.{
-  Error,
-  SubmitResponse,
-  ValidateCommandResponse
-}
+import csw.location.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.params.commands.CommandResponse.{Error, SubmitResponse, ValidateCommandResponse}
 import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 
 import scala.async.Async._

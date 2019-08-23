@@ -2,21 +2,26 @@ package csw.proto.galil.commands
 
 import java.net.InetAddress
 
-import akka.actor.ActorSystem
-import csw.location.client.ActorSystemFactory
-import csw.logging.scaladsl.LoggingSystemFactory
+import akka.actor.typed.{ActorSystem, SpawnProtocol}
+import akka.stream.Materializer
+import akka.stream.typed.scaladsl.ActorMaterializer
+import csw.logging.client.scaladsl.LoggingSystemFactory
 import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
 import csw.params.commands.{CommandName, Setup}
 import csw.params.core.models.{ObsId, Prefix}
 import csw.proto.galil.io.GalilIoTcp
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
+import scala.concurrent.ExecutionContextExecutor
+
 class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
-  implicit val system: ActorSystem = ActorSystemFactory.remote
+  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "TestAssemblyClient")
+  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   private val localHost = InetAddress.getLocalHost.getHostName
 
-  LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, system)
-  val galilIo = GalilIoTcp() // default params: "127.0.0.1", 8888
+  LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, typedSystem)
+  val galilIo: GalilIoTcp = GalilIoTcp() // default params: "127.0.0.1", 8888
 
   test("Test basic usage") {
     val cmds = GalilCommands(galilIo)

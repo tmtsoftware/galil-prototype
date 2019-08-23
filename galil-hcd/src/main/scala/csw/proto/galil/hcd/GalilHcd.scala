@@ -7,11 +7,8 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.location.api.models.TrackingEvent
-import csw.params.commands.CommandResponse.{
-  SubmitResponse,
-  ValidateCommandResponse
-}
+import csw.location.models.TrackingEvent
+import csw.params.commands.CommandResponse.{SubmitResponse, ValidateCommandResponse}
 import csw.params.commands._
 import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry

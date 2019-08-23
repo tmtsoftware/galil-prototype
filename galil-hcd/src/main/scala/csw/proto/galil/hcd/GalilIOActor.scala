@@ -8,11 +8,10 @@ import akka.util.ByteString
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
-//import akka.actor.typed.scaladsl.{ActorContext, MutableBehavior}
-import akka.actor.typed.scaladsl.{ActorContext, AbstractBehavior}
+import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext}
 import csw.command.client.CommandResponseManager
 import csw.framework.CurrentStatePublisher
-import csw.logging.scaladsl.LoggerFactory
+import csw.logging.client.scaladsl.LoggerFactory
 import csw.params.commands.CommandResponse.CompletedWithResult
 import csw.params.commands.Result
 import csw.params.core.models.{Id, ObsId, Prefix}
@@ -32,7 +31,7 @@ private[hcd] object GalilIOActor {
                currentStatePublisher: CurrentStatePublisher)
     : Behavior[GalilCommandMessage] =
     Behaviors.setup(
-      ctx ⇒
+      ctx =>
         GalilIOActor(ctx,
                      galilConfig,
                      commandResponseManager,
