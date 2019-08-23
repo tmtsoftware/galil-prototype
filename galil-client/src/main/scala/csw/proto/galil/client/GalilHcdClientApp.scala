@@ -81,9 +81,9 @@ object GalilHcdClientApp extends App {
 
   // Example of how you could extract the motor position for each axis.
   // The axis status for each axis is stored in a param set "struct" with tha name of the axis.
-  val blocksPresent = result.get(KeyType.StringKey.make("blocksPresent")).get.values
-  blocksPresent.filter(b => b >= "A" && b <= "F").foreach { axis =>
-    val struct = result.get(KeyType.StructKey.make(axis)).get.head
+  val blocksPresent = result.get(KeyType.CharKey.make("blocksPresent")).get.values
+  blocksPresent.filter(b => b >= 'A' && b <= 'F').foreach { axis =>
+    val struct = result.get(KeyType.StructKey.make(axis.toString)).get.head
     val motorPos = struct.get(KeyType.IntKey.make("motorPosition")).get.head
     println(s"Axis $axis: motor position: $motorPos")
   }
