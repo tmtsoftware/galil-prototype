@@ -6,12 +6,13 @@ import csw.params.commands.{Result, Setup}
 import csw.params.core.generics.{Key, KeyType, Parameter}
 import csw.params.core.models.{Id, ObsId, Prefix}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
 import scala.util.{Failure, Success, Try}
 
+//noinspection DuplicatedCode
 object CSWDeviceAdapter {
   case class CommandMapEntry(name: String, command: String, responseFormat: String)
   private type CommandMap = Map[String, CommandMapEntry]
@@ -44,6 +45,7 @@ object CSWDeviceAdapter {
   // Used to extract parameter names from command
   private val paramRegex = raw"\(([A-Za-z]*)\)".r
 }
+//noinspection DuplicatedCode
 class CSWDeviceAdapter(config: Config) {
   private val cmdConfig = config.getConfig("commandMap")
   private val cmdNames = cmdConfig.root.keySet().asScala.toList
