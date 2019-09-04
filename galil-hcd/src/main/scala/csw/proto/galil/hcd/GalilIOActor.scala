@@ -60,7 +60,7 @@ private[hcd] case class GalilIOActor(
   private val galilIo = connectToGalil()
   verifyGalil()
 
-  ctx.scheduleOnce(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
+//sm  ctx.scheduleOnce(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
 //  ctx.schedule(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
 
   // Connect to Galikl device and throw error if that doesn't work
