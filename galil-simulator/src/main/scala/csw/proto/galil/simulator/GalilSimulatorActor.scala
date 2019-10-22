@@ -39,6 +39,7 @@ object GalilSimulatorActor {
   val SetMotorPosition = "DP"
   val StepDriveResolution = "YA"
   val StepMotorResolution = "YB"
+  val MessageForwardLimit = "MG _LF"
 
   // Some commands that set a value for an axis (XXX TODO: Add to this list)
   private val axixCmds = Set(
@@ -116,8 +117,23 @@ object GalilSimulatorActor {
             (formatReply(getMotorPosition(simCtx, cmdString)), None)
           case `SetMotorPosition` =>
             (formatReply(None), Some(setMotorPosition(simCtx, cmdString)))
+
           case cmd if axixCmds.contains(cmd) => genericCmd(simCtx, cmdString)
-          case _                             => (formatReply(None), None)
+          case _                             => {
+
+            cmdString.take(6) match {
+              case `MessageForwardLimit` => {
+
+                println("processing message forward limit")
+
+                (formatReply(1), None)
+
+              }
+              case _ =>
+
+                (formatReply(None), None)
+            }
+          }
         }
       replyTo ! response
       maybeNewBehavior.getOrElse(Behaviors.same)

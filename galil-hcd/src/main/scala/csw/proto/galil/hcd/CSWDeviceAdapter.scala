@@ -30,6 +30,7 @@ object CSWDeviceAdapter {
   val smoothKey: Key[Double] = KeyType.DoubleKey.make("smooth")
   val speedKey: Key[Int] = KeyType.IntKey.make("speed")
   val countsKey: Key[Int] = KeyType.IntKey.make("counts")
+  val msgValueKey: Key[Int] = KeyType.IntKey.make("msgValue")
   val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
   val brushlessModulusKey: Key[Int] = KeyType.IntKey.make("brushlessModulus")
   val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
@@ -37,7 +38,7 @@ object CSWDeviceAdapter {
 
   // Map key name to key
   private val commandParamKeys: List[Key[_]] = List(axisKey, eDescKey, mTypeKey, eCodeKey,
-    swStatusKey, lcParamKey, smoothKey, speedKey, countsKey, interpCountsKey, brushlessModulusKey, voltsKey)
+    swStatusKey, lcParamKey, smoothKey, speedKey, countsKey, interpCountsKey, brushlessModulusKey, voltsKey, msgValueKey)
 
   private val commandParamKeyMap: Map[String, Key[_]] = commandParamKeys.map(k => k.keyName -> k).toMap
 
@@ -98,6 +99,9 @@ class CSWDeviceAdapter(config: Config) {
     paramDefs match {
       case h :: t =>
         val key = commandParamKeyMap(h.name)
+
+        println(s"key = $key, setup = $setup, setup.get(key) = ${setup.get(key)}")
+
         val param = setup.get(key).get
         val s = cmd.replace(s"(${key.keyName})", param.head.toString)
         insertParams(setup, s, t)
