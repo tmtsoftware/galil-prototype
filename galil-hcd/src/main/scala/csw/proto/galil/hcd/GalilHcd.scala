@@ -13,7 +13,7 @@ import csw.params.commands._
 import csw.params.core.models.{Id, ObsId, Prefix}
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
-
+import csw.proto.galil.hcd.StatePollerMessage.StartMessage
 
 import scala.async.Async._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -59,20 +59,20 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage],
         componentInfo.prefix,
         cswCtx.currentStatePublisher),
       "GalilIOActor")
-/*
+
   private val statePollerActor: ActorRef[StartMessage] =
     ctx.spawn(StatePollerActor.behavior(getGalilConfig,
         componentInfo,
         cswCtx.currentStatePublisher,
         loggerFactory),
       "StatePollerActor")
-*/
+
 
 
   override def initialize(): Future[Unit] = async {
     log.debug("Initialize called")
 
-    //statePollerActor ! StartMessage()
+    statePollerActor ! StartMessage()
   }
 
   override def onShutdown(): Future[Unit] = async {

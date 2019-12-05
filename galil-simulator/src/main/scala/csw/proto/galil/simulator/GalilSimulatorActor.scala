@@ -330,7 +330,7 @@ object GalilSimulatorActor {
 
   // Returns DataRecord based on current simulator context
   private def getDataRecord(simCtx: SimulatorContext): DataRecord = {
-    val blocksPresent = DataRecord.allAxes.take(7)
+    val blocksPresent = DataRecord.allAxes.take(10)
 
     val header = Header(blocksPresent.map(_.toString))
 
