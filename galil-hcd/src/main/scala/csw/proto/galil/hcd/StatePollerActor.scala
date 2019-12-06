@@ -13,6 +13,7 @@ import csw.framework.CurrentStatePublisher
 import csw.logging.client.scaladsl.LoggerFactory
 import csw.params.core.generics.KeyType
 import csw.params.core.states.{CurrentState, StateName}
+import csw.proto.galil.io.DataRecord.GalilAxisStatus
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 import csw.time.core.models.UTCTime
 
@@ -82,6 +83,7 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
 
   //keys
   val timestampKey = KeyType.UTCTimeKey.make("timestampKey")
+  val stepperPosKey = KeyType.IntKey.make("stepperPos")
 
 
 
@@ -118,13 +120,17 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
 
     val dataRecord = queryDataRecord()
 
+    val stepperPositions: Array[Int] = queryStepperPositions()
 
     val timestamp = timestampKey.set(UTCTime.now)
+
+    val stepperPosParam = stepperPosKey.set(stepperPositions)
 
 
 
     //create CurrentState and use sequential add
     val currentState = CurrentState(prefix, StatePollerActor.currentStateName, dataRecord.toParamSet)
+      .add(stepperPosParam)
       .add(timestamp)
 
     currentStatePublisher.publish(currentState)
@@ -143,8 +149,29 @@ case class StatePollerActor(timer: TimerScheduler[StatePollerMessage],
     if (responses.lengthCompare(1) != 0)
       throw new RuntimeException(s"Received ${responses.size} responses to Galil QR")
 
+
+
     dr
   }
+
+  private def queryStepperPositions(): Array[Int] = {
+
+    // add motor positions for the steppers
+    log.debug(s"Sending 'TD to Galil")
+    val tdResp = galilIo.send("TD")
+
+    val tdbs: ByteString = tdResp.head._2
+    val tdString = tdbs.utf8String
+
+    val tdArr: Array[Int] = tdString.replaceAll("\\s", "").split(",").map(_.toInt)
+
+    log.info("tdArr = " + tdArr);
+
+    tdArr
+  }
+
+
+
 
   private def galilSend(cmd: String): String = {
     //log.debug(s"Sending '$cmd' to Galil")
