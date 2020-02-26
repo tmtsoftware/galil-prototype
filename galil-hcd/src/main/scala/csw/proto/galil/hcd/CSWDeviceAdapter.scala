@@ -1,15 +1,14 @@
 package csw.proto.galil.hcd
 
 import com.typesafe.config.Config
-import csw.params.commands.CommandResponse.{Completed, CompletedWithResult, SubmitResponse}
+import csw.params.commands.CommandResponse.{Completed, SubmitResponse}
 import csw.params.commands.{Result, Setup}
 import csw.params.core.generics.{Key, KeyType, Parameter}
-import csw.params.core.models.{Id, ObsId, Prefix}
-
-import scala.jdk.CollectionConverters._
+import csw.params.core.models.{Id, ObsId}
 import csw.proto.galil.hcd.CSWDeviceAdapter.{CommandMapEntry, ParamDefEntry, commandParamKeyMap, paramRegex}
 
 import scala.annotation.tailrec
+import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
 //noinspection DuplicatedCode
@@ -106,7 +105,7 @@ class CSWDeviceAdapter(config: Config) {
   }
 
   // Parses and returns the command's response
-  def makeResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): SubmitResponse = {
+  def makeResponse(runId: Id, maybeObsId: Option[ObsId], cmdEntry: CommandMapEntry, responseStr: String): SubmitResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
       Completed(runId)
     } else {
@@ -120,7 +119,7 @@ class CSWDeviceAdapter(config: Config) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(runId, Result(prefix, resultParamSet))
+      Completed(runId, Result(resultParamSet))
     }
   }
 

@@ -2,23 +2,20 @@ package csw.proto.galil.client
 
 import java.net.InetAddress
 
-import akka.actor.Scheduler
-import csw.logging.client.commons.AkkaTypedExtension.UserActorFactory
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.{ActorSystem, Behavior, SpawnProtocol}
-import akka.stream.Materializer
-import akka.stream.typed.scaladsl.ActorMaterializer
 import akka.util.Timeout
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
+import csw.location.api.models.ComponentType.Assembly
+import csw.location.api.models.Connection.AkkaConnection
+import csw.location.api.models._
 import csw.location.client.scaladsl.HttpLocationServiceFactory
-import csw.location.models.ComponentType.Assembly
-import csw.location.models.Connection.AkkaConnection
-import csw.location.models.{AkkaLocation, ComponentId, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.logging.client.commons.AkkaTypedExtension.UserActorFactory
 import csw.logging.client.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 import csw.params.commands.{CommandName, Setup}
 import csw.params.core.generics.{Key, KeyType}
-import csw.params.core.models.Prefix
+import csw.prefix.models.Prefix
 
 import scala.concurrent.ExecutionContextExecutor
 import scala.concurrent.duration._
@@ -29,12 +26,11 @@ import scala.util.{Failure, Success}
   */
 object GalilAssemblyClient extends App {
 
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilAssemblyClient")
-  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilAssemblyClient")
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   implicit val timeout: Timeout = Timeout(3.seconds)
 
-  private val locationService = HttpLocationServiceFactory.makeLocalClient(typedSystem, mat)
+  private val locationService = HttpLocationServiceFactory.makeLocalClient
   private val host = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilAssemblyClientApp", "0.1", host, typedSystem)
 
@@ -45,7 +41,7 @@ object GalilAssemblyClient extends App {
 
   def initialBehavior: Behavior[TrackingEvent] =
     Behaviors.setup { ctx =>
-      val connection = AkkaConnection(ComponentId("GalilAssembly", Assembly))
+      val connection = AkkaConnection(ComponentId(Prefix("csw.galil.assembly.GalilAssembly"), Assembly))
       locationService.subscribe(connection, { loc =>
         ctx.self ! loc
       })
@@ -71,7 +67,6 @@ object GalilAssemblyClient extends App {
 
   private def interact(ctx: ActorContext[TrackingEvent], assembly: CommandService): Unit = {
     implicit val timeout: Timeout = Timeout(3.seconds)
-    implicit val scheduler: Scheduler = ctx.system.scheduler
     val maybeObsId = None
 
     val axisKey: Key[Char] = KeyType.CharKey.make("axis")

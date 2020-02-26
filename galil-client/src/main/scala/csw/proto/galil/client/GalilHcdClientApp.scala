@@ -3,28 +3,25 @@ package csw.proto.galil.client
 import java.net.InetAddress
 
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
-import akka.stream.Materializer
-import akka.stream.typed.scaladsl.ActorMaterializer
 import akka.util.Timeout
 import csw.location.client.scaladsl.HttpLocationServiceFactory
 import csw.logging.client.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
-import csw.params.commands.CommandResponse.CompletedWithResult
+import csw.params.commands.CommandResponse.Completed
 import csw.params.core.generics.KeyType
-import csw.params.core.models.Prefix
+import csw.prefix.models.Prefix
 import csw.proto.galil.io.DataRecord
 
-import scala.concurrent.{Await, ExecutionContextExecutor}
 import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContextExecutor}
 
 /**
   * A demo client to test locating and communicating with the Galil HCD
   */
 object GalilHcdClientApp extends App {
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilHcdClientApp")
-  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilHcdClientApp")
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
 
-  private val locationService = HttpLocationServiceFactory.makeLocalClient(typedSystem, mat)
+  private val locationService = HttpLocationServiceFactory.makeLocalClient
   private val galilHcdClient = GalilHcdClient(Prefix("csw.galil.client"), locationService)
   private val maybeObsId = None
   private val host = InetAddress.getLocalHost.getHostName
@@ -77,7 +74,7 @@ object GalilHcdClientApp extends App {
   val resp13 = Await.result(galilHcdClient.getDataRecord(maybeObsId), 3.seconds)
 
   println(s"getDataRecord: $resp13")
-  val result = resp13.asInstanceOf[CompletedWithResult].result
+  val result = resp13.asInstanceOf[Completed].result
 
   // Example of how you could extract the motor position for each axis.
   // The axis status for each axis is stored in a param set "struct" with tha name of the axis.

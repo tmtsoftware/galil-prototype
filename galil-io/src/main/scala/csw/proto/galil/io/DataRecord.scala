@@ -4,7 +4,7 @@ import java.io.IOException
 import java.nio.{ByteBuffer, ByteOrder}
 
 import akka.util.ByteString
-import csw.params.commands.CommandResponse.{CompletedWithResult, SubmitResponse}
+import csw.params.commands.CommandResponse.{Completed, SubmitResponse}
 import csw.params.commands.Result
 import csw.params.core.generics.{Key, KeyType, Parameter}
 import csw.params.core.models._
@@ -570,7 +570,7 @@ object DataRecord {
       val axisKey = KeyType.StructKey.make(axis.toString)
       result.get(axisKey)
         .map(_.head.paramSet)
-        .map(Result(result.prefix, _))
+        .map(Result(_))
         .map(GalilAxisStatus(_))
     }
     DataRecord(header, generalState, axisStatuses.toArray)
@@ -579,14 +579,13 @@ object DataRecord {
   /**
     * Returns a command response for a QR (getDataRecord) command
     *
-    * @param prefix     the component's prefix
     * @param runId      runId from the Setup command
     * @param maybeObsId optional observation id from the command
     * @param dr         the parsed data record from the device
     * @return a CommandResponse containing values from the data record
     */
-  def makeCommandResponse(prefix: Prefix, runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): SubmitResponse = {
-    CompletedWithResult(runId, Result(prefix, dr.toParamSet))
+  def makeCommandResponse(runId: Id, maybeObsId: Option[ObsId], dr: DataRecord): SubmitResponse = {
+    Completed(runId, Result(dr.toParamSet))
   }
 
 }

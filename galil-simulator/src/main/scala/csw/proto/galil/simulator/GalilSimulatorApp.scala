@@ -1,7 +1,6 @@
 package csw.proto.galil.simulator
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 
 /**
   * Simulates the protocol used to talk to the Galil hardware.
@@ -9,7 +8,6 @@ import akka.stream.ActorMaterializer
 object GalilSimulatorApp extends App {
 
   implicit val system: ActorSystem = ActorSystem()
-  implicit val mat: ActorMaterializer = ActorMaterializer()
 
   case class Options(host: String = "127.0.0.1", port: Int = 8888)
 

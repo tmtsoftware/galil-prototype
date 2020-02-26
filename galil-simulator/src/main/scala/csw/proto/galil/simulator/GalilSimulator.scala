@@ -3,18 +3,20 @@ package csw.proto.galil.simulator
 import java.net.{InetAddress, NetworkInterface}
 
 import akka.Done
-import akka.actor.{ActorSystem, Scheduler}
-import akka.stream.ActorMaterializer
-import akka.actor.typed.scaladsl.adapter.UntypedActorSystemOps
-import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
-import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
-import akka.util.{ByteString, Timeout}
-
-import scala.concurrent.Future
-import scala.util.{Failure, Success, Try}
-import GalilSimulatorActor._
+import akka.actor.ActorSystem
 import akka.actor.typed.scaladsl.AskPattern._
+import akka.actor.typed.scaladsl.Behaviors
+import akka.actor.typed.{ActorRef, SpawnProtocol}
+import akka.stream.Materializer
+import akka.stream.scaladsl.Tcp.{IncomingConnection, ServerBinding}
+import akka.stream.scaladsl.{Flow, Framing, Source, Tcp}
+import akka.util.{ByteString, Timeout}
+import csw.logging.client.commons.AkkaTypedExtension.UserActorFactory
+import csw.proto.galil.simulator.GalilSimulatorActor._
+
 import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContextExecutor, Future}
+import scala.util.{Failure, Success, Try}
 
 /**
   * Simulates a Galil controller
@@ -22,14 +24,12 @@ import scala.concurrent.duration._
   * @param host host to bind to listen for new client connections
   * @param port port to use to listen for new client connections
   */
-case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
-  implicit system: ActorSystem,
-  mat: ActorMaterializer) {
+case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit system: ActorSystem) {
 
-  import system.dispatcher
-
+  implicit val mat: Materializer = Materializer(system)
+  implicit lazy val ec: ExecutionContextExecutor = system.dispatcher
+  implicit lazy val typedSystem: akka.actor.typed.ActorSystem[SpawnProtocol.Command] = akka.actor.typed.ActorSystem(SpawnProtocol(), "typed-system")
   implicit val timeout: Timeout = Timeout(3.seconds)
-  implicit val sched: Scheduler = system.scheduler
 
   // Keep track of current connections, needed to simulate TH command
   private var activeConnections: Set[IncomingConnection] = Set.empty
@@ -38,8 +38,8 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
     Tcp().bind(host, port)
 
   // An actor that simulates the motor motion based on the setttings
-  private val simulatorActor =
-    system.spawn(GalilSimulatorActor.simulate(), "GalilSimulatorActor")
+  private val simulatorActor: ActorRef[GalilSimulatorCommand] =
+    typedSystem.spawn(Behaviors.withTimers[GalilSimulatorCommand](GalilSimulatorActor.simulate(_)), "GalilSimulatorActor")
 
   // Handle tcp connections
   connections.runForeach { conn =>
@@ -73,7 +73,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(
       cmdString match {
         case "TH" =>
           Future.successful(GalilSimulatorActor.formatReply(thCmd(conn)))
-        case _ => simulatorActor ? (ref => Command(cmdString, ref))
+        case _ => simulatorActor ? (Command(cmdString, _))
       }
 
   }

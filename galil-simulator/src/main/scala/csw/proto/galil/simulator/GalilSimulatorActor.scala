@@ -1,8 +1,7 @@
 package csw.proto.galil.simulator
 
-import akka.actor.Cancellable
+import akka.actor.typed.scaladsl.{ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
-import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.util.ByteString
 import csw.proto.galil.io.DataRecord
 import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState, Header}
@@ -74,22 +73,21 @@ object GalilSimulatorActor {
   // Holds the timer and current state for an axis
   case class AxisContext(motorOn: Boolean,
                          referencePosition: Int,
-                         motionTimer: Option[Cancellable],
                          settings: Map[String, Double])
 
   // Holds the current state of each axis
-  case class SimulatorContext(map: Map[Char, AxisContext])
+  case class SimulatorContext(motionTimerKey: String, map: Map[Char, AxisContext])
 
   // For TC command
   private var errorStatus = 0
   private val errorMessage = "Unrecognized command"
 
   // Defines the actor behavior
-  def simulate(simCtx: SimulatorContext = SimulatorContext(Map.empty))
+  def simulate(timer: TimerScheduler[GalilSimulatorCommand], simCtx: SimulatorContext = SimulatorContext("motion-timer", Map.empty))
     : Behavior[GalilSimulatorCommand] = Behaviors.receive { (ctx, msg) =>
     msg match {
-      case SimulateMotion(axis)  => simulateMotion(simCtx, axis)
-      case Command(cmd, replyTo) => processCommand(ctx, simCtx, cmd, replyTo)
+      case SimulateMotion(axis)  => simulateMotion(simCtx, timer, axis)
+      case Command(cmd, replyTo) => processCommand(ctx, simCtx, timer, cmd, replyTo)
     }
   }
 
@@ -97,6 +95,7 @@ object GalilSimulatorActor {
   private def processCommand(
       ctx: ActorContext[GalilSimulatorCommand],
       simCtx: SimulatorContext,
+      timer: TimerScheduler[GalilSimulatorCommand],
       cmdString: String,
       replyTo: ActorRef[ByteString]): Behavior[GalilSimulatorCommand] = {
 
@@ -107,16 +106,16 @@ object GalilSimulatorActor {
             (ByteString(getDataRecord(simCtx).toByteBuffer), None)
           case `ErrorCode` => (formatReply(tcCmd(cmdString)), None)
           case `BeginMotion` =>
-            (formatReply(None), Some(beginMotion(ctx, simCtx, cmdString)))
+            (formatReply(None), Some(beginMotion(ctx, simCtx, timer, cmdString)))
           case `MotorOn` =>
-            (formatReply(None), Some(motorOn(ctx, simCtx, cmdString)))
+            (formatReply(None), Some(motorOn(ctx, simCtx, timer, cmdString)))
           case `MotorOff` =>
-            (formatReply(None), Some(motorOff(simCtx, cmdString)))
+            (formatReply(None), Some(motorOff(simCtx, timer, cmdString)))
           case `GetMotorPosition` =>
             (formatReply(getMotorPosition(simCtx, cmdString)), None)
           case `SetMotorPosition` =>
-            (formatReply(None), Some(setMotorPosition(simCtx, cmdString)))
-          case cmd if axixCmds.contains(cmd) => genericCmd(simCtx, cmdString)
+            (formatReply(None), Some(setMotorPosition(simCtx, timer, cmdString)))
+          case cmd if axixCmds.contains(cmd) => genericCmd(simCtx, timer, cmdString)
           case _                             => (formatReply(None), None)
         }
       replyTo ! response
@@ -131,6 +130,7 @@ object GalilSimulatorActor {
 
   // Simulate the motor motion based on the given commands
   private def simulateMotion(simCtx: SimulatorContext,
+                             timer: TimerScheduler[GalilSimulatorCommand],
                              axis: Char): Behavior[GalilSimulatorCommand] = {
     val ac = getAxisContext(simCtx, axis)
     if (ac.motorOn) {
@@ -139,10 +139,10 @@ object GalilSimulatorActor {
         println(
           s"XXX absTarget = $absTarget, ref pos = ${ac.referencePosition}")
         val steps = if (absTarget > ac.referencePosition) 1 else -1
-        moveMotor(simCtx, axis, ac, steps)
+        moveMotor(simCtx, timer, axis, ac, steps)
       } else {
         // At reference position, so stop moving the motor
-        ac.motionTimer.foreach(_.cancel())
+        timer.cancel(simCtx.motionTimerKey)
         Behaviors.same
       }
     } else {
@@ -153,13 +153,14 @@ object GalilSimulatorActor {
 
   // Move the motor by the given number of steps
   private def moveMotor(simCtx: SimulatorContext,
+                        timer: TimerScheduler[GalilSimulatorCommand],
                         axis: Char,
                         ac: AxisContext,
                         steps: Int): Behavior[GalilSimulatorCommand] = {
 
     val ac = getAxisContext(simCtx, axis)
     val newAc = ac.copy(referencePosition = ac.referencePosition + steps)
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
   }
 
   // Gets the context for the given Galil axis
@@ -167,7 +168,7 @@ object GalilSimulatorActor {
                              axis: Char): AxisContext = {
     simCtx.map.getOrElse(
       axis,
-      AxisContext(motorOn = false, referencePosition = 0, None, Map.empty))
+      AxisContext(motorOn = false, referencePosition = 0, Map.empty))
   }
 
   // Simulates the TC command:
@@ -218,7 +219,7 @@ object GalilSimulatorActor {
   // Command is the first two chars, axis should be the third.
   // If the next two chars are "=?", get the value, otehrwise set it.
   // Return value is the Galil response.
-  private def genericCmd(simCtx: SimulatorContext, cmdString: String)
+  private def genericCmd(simCtx: SimulatorContext, timer: TimerScheduler[GalilSimulatorCommand], cmdString: String)
     : (ByteString, Option[Behavior[GalilSimulatorCommand]]) = {
     val cmd = cmdString.take(2)
     val axis = cmdString.drop(2).head
@@ -228,7 +229,7 @@ object GalilSimulatorActor {
         (formatReply(getAxisValue(simCtx, axis, cmd).toString), None)
       case _ =>
         (formatReply(None),
-         Some(setAxisValue(simCtx, axis, cmd, value.toDouble)))
+         Some(setAxisValue(simCtx, timer, axis, cmd, value.toDouble)))
     }
   }
 
@@ -243,13 +244,14 @@ object GalilSimulatorActor {
   // Sets the reference position for the given axis
   private def setMotorPosition(
       simCtx: SimulatorContext,
+      timer: TimerScheduler[GalilSimulatorCommand],
       cmdString: String): Behavior[GalilSimulatorCommand] = {
     val axis = cmdString.drop(2).head
     val ac = getAxisContext(simCtx, axis)
     val value = cmdString.drop(4).toInt
     val newSettings = ac.settings + (SetMotorPosition -> value.toDouble)
     val newAc = ac.copy(referencePosition = value, settings = newSettings)
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
   }
 
   // Turn the motor for the give axis on
@@ -257,50 +259,51 @@ object GalilSimulatorActor {
   // and to enable servo control at the current position".)
   private def motorOn(ctx: ActorContext[GalilSimulatorCommand],
                       simCtx: SimulatorContext,
+                      timer: TimerScheduler[GalilSimulatorCommand],
                       cmdString: String): Behavior[GalilSimulatorCommand] = {
     val axis = cmdString.drop(2).head
     val ac = getAxisContext(simCtx, axis)
     val newAc = ac.copy(motorOn = true)
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
   }
 
   // Turn the motor for the give axis off
   private def motorOff(simCtx: SimulatorContext,
+                       timer: TimerScheduler[GalilSimulatorCommand],
                        cmdString: String): Behavior[GalilSimulatorCommand] = {
     val axis = cmdString.drop(2).head
     val ac = getAxisContext(simCtx, axis)
-    ac.motionTimer.foreach(_.cancel())
-    val newAc = ac.copy(motorOn = false, motionTimer = None)
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    timer.cancel(simCtx.motionTimerKey)
+    val newAc = ac.copy(motorOn = false)
+    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
   }
 
   // Begin moving the motor for the give axis (Stop when it reaches the target)
   private def beginMotion(
       ctx: ActorContext[GalilSimulatorCommand],
       simCtx: SimulatorContext,
+      timer: TimerScheduler[GalilSimulatorCommand],
       cmdString: String): Behavior[GalilSimulatorCommand] = {
-    import ctx.executionContext
     val axis = cmdString.drop(2).head
     val ac = getAxisContext(simCtx, axis)
-    ac.motionTimer.foreach(_.cancel())
+    timer.cancel(simCtx.motionTimerKey)
     val motorSpeed =
       math.max(ac.settings.getOrElse(MotorSpeed, 25000.0), 1.0).toInt
     val delay = (1000000 / motorSpeed).microseconds
-    val timer = ctx.system.scheduler.schedule(delay, delay)(
-      ctx.self ! SimulateMotion(axis))
-    val newAc = ac.copy(motionTimer = Some(timer))
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    timer.startTimerAtFixedRate(simCtx.motionTimerKey, SimulateMotion(axis), delay)
+    simulate(timer, simCtx)
   }
 
   // Set the value for a given command on the given axis
   private def setAxisValue(simCtx: SimulatorContext,
+                           timer: TimerScheduler[GalilSimulatorCommand],
                            axis: Char,
                            name: String,
                            value: Double): Behavior[GalilSimulatorCommand] = {
     val ac = getAxisContext(simCtx, axis)
     val newSettings = ac.settings + (name -> value)
     val newAc = ac.copy(settings = newSettings)
-    simulate(SimulatorContext(simCtx.map + (axis -> newAc)))
+    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
   }
 
   // Gets the value for a given command on the given axis

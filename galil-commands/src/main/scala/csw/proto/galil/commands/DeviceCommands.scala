@@ -1,14 +1,14 @@
 package csw.proto.galil.commands
 
 import com.typesafe.config.Config
-
-import scala.collection.JavaConverters._
-import DeviceCommands._
-import csw.params.commands.CommandResponse.{Completed, CompletedWithResult, Error}
+import csw.params.commands.CommandResponse.{Completed, Error}
 import csw.params.commands.{CommandResponse, Result, Setup}
 import csw.params.core.generics.{Key, KeyType, Parameter}
+import csw.params.core.models.Id
+import csw.proto.galil.commands.DeviceCommands._
 
 import scala.annotation.tailrec
+import scala.jdk.CollectionConverters._
 
 object DeviceCommands {
   private case class CommandMapEntry(name: String, command: String, responseFormat: String)
@@ -87,7 +87,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
     // Check missing params
     val missing = paramDefs.flatMap { p =>
       val key = commandParamKeyMap(p.name)
-      if (setup.contains(key)) None else Some(Error(setup.runId, s"Missing ${key.keyName} parameter"))
+      if (setup.contains(key)) None else Some(Error(Id(), s"Missing ${key.keyName} parameter"))
     }
     if (missing.nonEmpty) missing.head else {
       val cmdString = insertParams(setup, cmdEntry.command, paramDefs)
@@ -112,7 +112,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
   // Parses and returns the command's response
   private def makeResponse(setup: Setup, cmdEntry: CommandMapEntry, responseStr: String): CommandResponse = {
     if (cmdEntry.responseFormat.isEmpty) {
-      Completed(setup.runId)
+      Completed(Id())
     } else {
       // Look up the paramDef entries defined in the response string
       val paramDefs = paramRegex.
@@ -124,7 +124,7 @@ case class DeviceCommands(config: Config, deviceIo: DeviceIo) {
       val responseFormat = insertResponseRegex(cmdEntry.responseFormat, paramDefs)
       val paramValues = responseFormat.r.findAllIn(responseStr).toList
       val resultParamSet = makeResultParamSet(paramValues, paramDefs, Nil).toSet
-      CompletedWithResult(setup.runId, Result(prefix = setup.source, resultParamSet))
+      Completed(Id(), Result(resultParamSet))
     }
   }
 

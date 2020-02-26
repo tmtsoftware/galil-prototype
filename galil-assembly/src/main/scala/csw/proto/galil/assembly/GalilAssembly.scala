@@ -1,6 +1,5 @@
 package csw.proto.galil.assembly
 
-import akka.actor.Scheduler
 import akka.actor.typed.scaladsl.ActorContext
 import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
@@ -10,9 +9,12 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
-import csw.location.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
-import csw.params.commands.CommandResponse.{Error, SubmitResponse, ValidateCommandResponse}
+import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
+import csw.params.commands.CommandResponse.{Completed, Error, SubmitResponse, ValidateCommandResponse}
 import csw.params.commands.{CommandResponse, ControlCommand, Setup}
+import csw.params.core.models.Id
+import csw.prefix.models.Subsystem.CSW
+import csw.time.core.models.UTCTime
 
 import scala.async.Async._
 import scala.concurrent.duration._
@@ -42,18 +44,24 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug("Initialize called")
   }
 
-  override def validateCommand(
-      controlCommand: ControlCommand): ValidateCommandResponse = {
-    CommandResponse.Accepted(controlCommand.runId)
+  override def validateCommand(runId: Id, controlCommand: ControlCommand): ValidateCommandResponse = {
+    CommandResponse.Accepted(runId)
   }
 
-  override def onSubmit(controlCommand: ControlCommand): SubmitResponse = {
+  override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
     log.debug(s"onSubmit called: $controlCommand")
-    forwardCommandToHcd(controlCommand)
-    CommandResponse.Started(controlCommand.runId)
+    forwardCommandToHcd(runId, controlCommand).map {
+      case c @ Completed(_, result) =>
+        log.info(s"submit Completed.  result = $result")
+        commandResponseManager.updateCommand(c)
+      case x =>
+        log.error(s"submit failed.")
+        commandResponseManager.updateCommand(x)
+    }
+    CommandResponse.Started(runId)
   }
 
-  override def onOneway(controlCommand: ControlCommand): Unit = {
+  override def onOneway(runId: Id, controlCommand: ControlCommand): Unit = {
     log.debug(s"onOneway called: $controlCommand")
   }
 
@@ -78,33 +86,25 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   }
 
   // For testing, forward command to HCD and complete this command when it completes
-  private def forwardCommandToHcd(controlCommand: ControlCommand): Unit = {
-    implicit val scheduler: Scheduler = ctx.system.scheduler
+  private def forwardCommandToHcd(runId: Id, controlCommand: ControlCommand): Future[SubmitResponse] = {
     implicit val timeout: Timeout = Timeout(3.seconds)
-    galilHcd.foreach { hcd =>
-      val setup = Setup(controlCommand.source,
-                        controlCommand.commandName,
-                        controlCommand.maybeObsId,
-                        controlCommand.paramSet)
-      commandResponseManager.addSubCommand(controlCommand.runId, setup.runId)
-
-      val f = for {
-        response <- hcd.submit(setup)
-      } yield {
-        log.info(s"response = $response")
-        commandResponseManager.updateSubCommand(response)
-      }
-      f.recover {
-        case ex =>
-          commandResponseManager.updateSubCommand(
-            Error(setup.runId, ex.toString))
-      }
+    val setup = Setup(componentInfo.prefix,
+      controlCommand.commandName,
+      controlCommand.maybeObsId,
+      controlCommand.paramSet)
+    galilHcd.get match {
+      case hcd: CommandService => hcd.submit(setup)
+      case _ => Future(Error(runId, "HCD not found"))
     }
   }
+
+  override def onDiagnosticMode(startTime: UTCTime, hint: String): Unit = {}
+
+  override def onOperationsMode(): Unit = {}
 }
 
 // Start assembly from the command line using GalilAssembly.conf resource file
 object GalilAssemblyApp extends App {
   val defaultConfig = ConfigFactory.load("GalilAssembly.conf")
-  ContainerCmd.start("GalilAssembly", args, Some(defaultConfig))
+  ContainerCmd.start("galil.assembly.GalilAssembly", CSW, args, Some(defaultConfig))
 }

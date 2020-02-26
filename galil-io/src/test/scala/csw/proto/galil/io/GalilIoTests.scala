@@ -3,12 +3,9 @@ package csw.proto.galil.io
 import java.net.InetAddress
 
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
-import akka.stream.Materializer
-import akka.stream.typed.scaladsl.ActorMaterializer
 import akka.util.ByteString
 import csw.logging.client.scaladsl.LoggingSystemFactory
 import csw.params.commands.Result
-import csw.params.core.models.Prefix
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 import scala.concurrent.ExecutionContextExecutor
@@ -17,8 +14,7 @@ import scala.concurrent.ExecutionContextExecutor
 // Note: Before running this test, start the galil "simulator" script
 class GalilIoTests extends FunSuite with BeforeAndAfterAll {
 
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilIoTests")
-  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilIoTests")
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   private val localHost = InetAddress.getLocalHost.getHostName
 
@@ -96,7 +92,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     // Test creating a DataRecord from a paramset (wrapped in a Result object, which contains a prefix and a param set)
     val paramSet = dr1.toParamSet
     println(s"DataRecord ParamSet: $paramSet\n")
-    val result = Result(Prefix("csw.one"), paramSet)
+    val result = Result(paramSet)
     val dr3 = DataRecord(result)
     assert(dr1.toString == dr3.toString)
   }

@@ -2,24 +2,24 @@ package csw.proto.galil.client
 
 import java.io.IOException
 
-import akka.stream.Materializer
-import akka.actor.Scheduler
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
+import akka.stream.Materializer
 import akka.util.{ByteString, Timeout}
-
-import scala.concurrent.{ExecutionContextExecutor, Future}
-import scala.concurrent.duration._
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
+import csw.location.api.models.ComponentId
+import csw.location.api.models.ComponentType.HCD
+import csw.location.api.models.Connection.AkkaConnection
 import csw.location.api.scaladsl.LocationService
-import csw.location.models.ComponentId
-import csw.location.models.ComponentType.HCD
-import csw.location.models.Connection.AkkaConnection
 import csw.params.commands.CommandResponse.Error
 import csw.params.commands.{CommandName, CommandResponse, Setup}
 import csw.params.core.generics.{Key, KeyType}
-import csw.params.core.models.{Id, ObsId, Prefix}
+import csw.params.core.models.{Id, ObsId}
+import csw.prefix.models.Prefix
 import csw.proto.galil.io.DataRecord
+
+import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContextExecutor, Future}
 
 /**
   * A client for locating and communicating with the Galil HCD
@@ -28,15 +28,14 @@ import csw.proto.galil.io.DataRecord
   * @param locationService a reference to the location service
   */
 case class GalilHcdClient(source: Prefix, locationService: LocationService)
-                         (implicit typedSystem: ActorSystem[SpawnProtocol],
+                         (implicit typedSystem: ActorSystem[SpawnProtocol.Command],
                           mat: Materializer,
                           ec: ExecutionContextExecutor) {
 
 
   implicit val timeout: Timeout = Timeout(3.seconds)
-  implicit val scheduler: Scheduler = typedSystem.scheduler
 
-  private val connection = AkkaConnection(ComponentId("GalilHcd", HCD))
+  private val connection = AkkaConnection(ComponentId(Prefix("csw.galil.hcd.GalilHcd"), HCD))
 
   private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
   private val countsKey: Key[Int] = KeyType.IntKey.make("counts")
@@ -84,7 +83,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         // FIXME: There are still problems parsing result when an axis argument is passed
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
         hcd.submitAndWait(setup).map {
-          case CommandResponse.CompletedWithResult(_, result) =>
+          case CommandResponse.Completed(_, result) =>
             val bytes = result.get(DataRecord.key).get.head.values
             DataRecord(ByteString(bytes))
           case x =>

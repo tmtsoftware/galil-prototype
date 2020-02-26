@@ -3,20 +3,18 @@ package csw.proto.galil.commands
 import java.net.InetAddress
 
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
-import akka.stream.Materializer
-import akka.stream.typed.scaladsl.ActorMaterializer
 import csw.logging.client.scaladsl.LoggingSystemFactory
-import csw.params.commands.CommandResponse.{Completed, CompletedWithResult}
+import csw.params.commands.CommandResponse.Completed
 import csw.params.commands.{CommandName, Setup}
-import csw.params.core.models.{ObsId, Prefix}
+import csw.params.core.models.ObsId
+import csw.prefix.models.Prefix
 import csw.proto.galil.io.GalilIoTcp
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 import scala.concurrent.ExecutionContextExecutor
 
 class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
-  implicit val typedSystem: ActorSystem[SpawnProtocol] = ActorSystem(SpawnProtocol.behavior, "GalilCommandsTest")
-  implicit lazy val mat: Materializer = ActorMaterializer()(typedSystem)
+  implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilCommandsTest")
   implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
   private val localHost = InetAddress.getLocalHost.getHostName
 
@@ -40,7 +38,7 @@ class GalilCommandsTest extends FunSuite with BeforeAndAfterAll {
         .add(DeviceCommands.axisKey.set('A')))
 
     response2 match {
-      case CompletedWithResult(_, result) =>
+      case Completed(_, result) =>
         val setup = Setup(prefix, CommandName("filter"), Some(obsId), result.paramSet)
         val x = setup.get(DeviceCommands.countsKey).get.head
         assert(x == 2)
