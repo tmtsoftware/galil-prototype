@@ -21,10 +21,10 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, typedSystem)
   val galilIo: GalilIoTcp = GalilIoTcp() // default params: "127.0.0.1", 8888, can also use ssh tunnel to test on device
 
-  override def beforeAll() {
+  override def beforeAll(): Unit = {
   }
 
-  override def afterAll() {
+  override def afterAll(): Unit = {
   }
 
   test("Test Galil commands") {

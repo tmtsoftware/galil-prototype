@@ -107,7 +107,7 @@ object DataRecord {
 
 
     def toParamSet: Set[Parameter[_]] =
-      Set(blocksPresentKey.set(blocksPresent.toArray))
+      Set(blocksPresentKey.setAll(blocksPresent.toArray))
 
   }
 
@@ -229,9 +229,9 @@ object DataRecord {
     def toParamSet: Set[Parameter[_]] = {
       Set(
         sampleNumberKey.set(sampleNumber),
-        inputsKey.set(inputs),
-        outputsKey.set(outputs),
-        ethernetHandleStatusKey.set(ethernetHandleStatus),
+        inputsKey.setAll(inputs),
+        outputsKey.setAll(outputs),
+        ethernetHandleStatusKey.setAll(ethernetHandleStatus),
         errorCodeKey.set(errorCode),
         threadStatusKey.set(threadStatus),
         amplifierStatusKey.set(amplifierStatus),
