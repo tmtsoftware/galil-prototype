@@ -18,12 +18,17 @@ the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw)) APIs.
 The build is based on sbt and depends on libraries published from the 
 [csw](https://github.com/tmtsoftware/csw) project. 
 
-Note: The version of csw used by this project is declared in the variable CSW.Version in the file [project/Libs.scala](project/Libs.scala).
-That value may be a Git SHA for the commt that was last tested with this project. If so, use it in place of `$SHA` below.
+Note: The version of CSW used by this project is declared in the variable CSW.Version in the file [project/Libs.scala](project/Libs.scala).
+That value may be a Git SHA for the commit that was last tested with this project, or the name of a
+git tag, e.g. for a release.
 
-See [here](https://www.scala-sbt.org/1.0/docs/Setup.html) for instructions on installing sbt.
+The CSW dependencies can be resolved using the jitpack plugin, and does not need to be checked out and built from
+github.  Note in this case, you will need to download the CSW applications to have access to the csw-services.sh 
+CSW start script.
 
-Before building this project, make sure to checkout and build the csw project. For example:
+However, if desired, it can be checked out and built locally if you want to work with the latest (albeit 
+possibly unstable) code.  If so, follow the directions below:
+
 ```
 git clone https://github.com/tmtsoftware/csw.git
 cd csw
@@ -36,6 +41,9 @@ The following command can be used to build and install the galil-prototype appli
 sbt publishLocal stage
 ```
 
+See [here](https://www.scala-sbt.org/1.0/docs/Setup.html) for instructions on installing sbt.
+
+
 This publishes the library jar files in the local [ivy](https://en.wikipedia.org/wiki/Apache_Ivy) repository 
 and installs the prototype applications in _./target/universal/stage/bin/_.
 
@@ -44,10 +52,17 @@ and installs the prototype applications in _./target/universal/stage/bin/_.
 The tests and applications in this project require that the CSW location service cluster and config service are
 running. These can be started by running `csw-services.sh start` from the `csw` project.
 
-* Start the csw services: 
+* Start the CSW services: 
+
+To use any CSW service or application, set the following environment variables:
+
+INTERFACE_NAME => name of your Internet interface (e.g. en0)
+TMT_LOG_HOME   => directory where log files are written
+
+Then start the services using:
 
 ```
-csw-services.sh start
+csw-services.sh start -a -i <INTERFACE_NAME>
 ```
 
 To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
@@ -63,6 +78,8 @@ To run using a Galil simulator:
 galil-simulator
 galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf
 ```
+
+The above two applications must be run to run the tests.
 
 ## Loading the galil-prototype project in IntelliJ Idea
 
