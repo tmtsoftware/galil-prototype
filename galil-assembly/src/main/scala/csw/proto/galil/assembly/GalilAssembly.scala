@@ -92,9 +92,9 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
       controlCommand.commandName,
       controlCommand.maybeObsId,
       controlCommand.paramSet)
-    galilHcd.get match {
-      case hcd: CommandService => hcd.submit(setup)
-      case _ => Future(Error(runId, "HCD not found"))
+    galilHcd match {
+      case Some(hcd) => hcd.submit(setup)
+      case None => Future(Error(runId, "HCD not found"))
     }
   }
 

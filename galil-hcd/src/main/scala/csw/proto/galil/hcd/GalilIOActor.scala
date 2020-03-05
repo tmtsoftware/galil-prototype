@@ -73,7 +73,6 @@ private[hcd] object GalilIOActor {
       verifyGalil()
 
       ctx.scheduleOnce(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
-      //  ctx.schedule(1.second, ctx.self, GalilCommand(GalilIOActor.publishDataRecord))
 
 
 

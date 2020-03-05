@@ -62,7 +62,7 @@ TMT_LOG_HOME   => directory where log files are written
 Then start the services using:
 
 ```
-csw-services.sh start -a -i <INTERFACE_NAME>
+csw-services.sh start
 ```
 
 To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
