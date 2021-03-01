@@ -5,26 +5,25 @@ import akka.util.ByteString
 import GalilIo._
 
 /**
-  * Based class for a TCP/UDP socket client talking to a Galil controller.
-  */
+ * Based class for a TCP/UDP socket client talking to a Galil controller.
+ */
 abstract class GalilIo {
 
   /**
-    * Writes the data to the socket
-    */
+   * Writes the data to the socket
+   */
   protected def write(sendBuf: Array[Byte]): Unit
 
   /**
-    * Reads the reply from the socket and returns it as a ByteString
-    */
+   * Reads the reply from the socket and returns it as a ByteString
+   */
   protected def read(): ByteString
 
   /**
-    * Closes the socket connection to the Galil controller
-    * (Do not use this object after closing the socket).
-    */
+   * Closes the socket connection to the Galil controller
+   * (Do not use this object after closing the socket).
+   */
   def close(): Unit
-
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -40,13 +39,13 @@ abstract class GalilIo {
   //return a value, the response will be just the Colon (:)."
 
   /**
-    * Sends a command to the controller and returns a list of responses
-    *
+   * Sends a command to the controller and returns a list of responses
+   *
     * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
-    * @return list of (command, reply) from the controller (one pair for each ";" separated command)
-    */
+   * @return list of (command, reply) from the controller (one pair for each ";" separated command)
+   */
   def send(cmd: String): List[(String, ByteString)] = {
-    val cmds = cmd.split(';')
+    val cmds    = cmd.split(';')
     val sendBuf = s"$cmd\r\n".getBytes()
     write(sendBuf)
     val result = for (c <- cmds) yield (c, receiveReplies())
@@ -58,7 +57,7 @@ abstract class GalilIo {
   // multiple responses, so we need to recurse until the whole response has been read.
   // ASCII responses end with "\r\n:", while binary responses end with ":".
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
-    val data = read()
+    val data   = read()
     val length = data.length
     if (length == 0) result
     else if (length == 1 && data.utf8String == "?")
@@ -69,7 +68,8 @@ abstract class GalilIo {
       result ++ data.dropRight(separator.length)
     else if (data.takeRight(1).utf8String == ":") {
       result ++ data.dropRight(1)
-    } else
+    }
+    else
       result ++ data // Should not happen?
   }
 }
@@ -88,13 +88,12 @@ object GalilIo {
   val bufSize: Int = 406
 }
 
-
 /**
-  * A UDP socket based client for talking to a Galil controller.
-  *
+ * A UDP socket based client for talking to a Galil controller.
+ *
   * @param host    the Galil controller host
-  * @param port    the Galil controller port
-  */
+ * @param port    the Galil controller port
+ */
 case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {
   import java.net.{DatagramPacket, DatagramSocket, InetSocketAddress}
 
@@ -102,13 +101,13 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
 
   override def write(sendBuf: Array[Byte]): Unit = {
     val galilDmcAddress = new InetSocketAddress(host, port)
-    val sendPacket = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
+    val sendPacket      = new DatagramPacket(sendBuf, sendBuf.length, galilDmcAddress)
     socket.send(sendPacket)
   }
 
   // Receives a single reply for the given command and returns the result
   override def read(): ByteString = {
-    val buf = Array.ofDim[Byte](bufSize)
+    val buf    = Array.ofDim[Byte](bufSize)
     val packet = new DatagramPacket(buf, bufSize)
     socket.receive(packet)
     ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
@@ -118,19 +117,19 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
 }
 
 /**
-  * A TCP socket based client for talking to a Galil controller.
-  *
+ * A TCP socket based client for talking to a Galil controller.
+ *
   * @param host    the Galil controller host
-  * @param port    the Galil controller port
-  */
+ * @param port    the Galil controller port
+ */
 case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {
   import java.net.InetAddress
   import java.net.InetSocketAddress
   import java.net.Socket
 
   private val socketAddress = new InetSocketAddress(InetAddress.getByName(host), port)
-  private val socket = new Socket()
-  private val timeoutInMs = 3*1000;   // 3 seconds
+  private val socket        = new Socket()
+  private val timeoutInMs   = 3 * 1000; // 3 seconds
 
   // XXX TODO: Error handling when there is no device available!
   socket.connect(socketAddress, timeoutInMs)
@@ -141,11 +140,10 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
 
   // Receives a single reply for the given command and returns the result
   override def read(): ByteString = {
-    val buf = Array.ofDim[Byte](bufSize)
+    val buf    = Array.ofDim[Byte](bufSize)
     val length = socket.getInputStream.read(buf)
     ByteString.fromArray(buf, 0, length)
   }
 
   override def close(): Unit = socket.close()
 }
-

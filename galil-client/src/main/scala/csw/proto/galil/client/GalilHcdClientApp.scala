@@ -15,19 +15,19 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContextExecutor}
 
 /**
-  * A demo client to test locating and communicating with the Galil HCD
-  */
+ * A demo client to test locating and communicating with the Galil HCD
+ */
 object GalilHcdClientApp extends App {
   implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilHcdClientApp")
-  implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
+  implicit lazy val ec: ExecutionContextExecutor               = typedSystem.executionContext
 
   private val locationService = HttpLocationServiceFactory.makeLocalClient
-  private val galilHcdClient = GalilHcdClient(Prefix("csw.galil.client"), locationService)
-  private val maybeObsId = None
-  private val host = InetAddress.getLocalHost.getHostName
+  private val galilHcdClient  = GalilHcdClient(Prefix("csw.galil.client"), locationService)
+  private val maybeObsId      = None
+  private val host            = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilHcdClientApp", "0.1", host, typedSystem)
   implicit val timeout: Timeout = Timeout(3.seconds)
-  private val log = GenericLoggerFactory.getLogger
+  private val log               = GenericLoggerFactory.getLogger
   log.info("Starting GalilHcdClientApp")
 
   val resp1 = Await.result(galilHcdClient.setRelTarget(maybeObsId, 'A', 3), 3.seconds)
@@ -35,10 +35,8 @@ object GalilHcdClientApp extends App {
   val resp2 = Await.result(galilHcdClient.getRelTarget(maybeObsId, 'A'), 3.seconds)
   println(s"getRelTarget: $resp2")
 
-
   val resp3 = Await.result(galilHcdClient.setBrushlessAxis(maybeObsId, 'A'), 3.seconds)
   println(s"setBrushlessAxis: $resp3")
-
 
   val resp4 = Await.result(galilHcdClient.setAnalogFeedbackSelect(maybeObsId, 'A', 6), 3.seconds)
   println(s"setAnalogFeedbackSelect: $resp4")
@@ -67,7 +65,6 @@ object GalilHcdClientApp extends App {
   val resp12 = Await.result(galilHcdClient.setFindIndexMode(maybeObsId, 'A'), 3.seconds)
   println(s"setFindIndexMode: $resp12")
 
-
   // --- Data Record Access ---
 
   // 1. getDataRecord sends QR and returns the parsed fields in the result (The keys are defined in the DataRecord object)
@@ -80,7 +77,7 @@ object GalilHcdClientApp extends App {
   // The axis status for each axis is stored in a param set "struct" with tha name of the axis.
   val blocksPresent = result.get(KeyType.CharKey.make("blocksPresent")).get.values
   blocksPresent.filter(b => b >= 'A' && b <= 'F').foreach { axis =>
-    val struct = result.get(KeyType.StructKey.make(axis.toString)).get.head
+    val struct   = result.get(KeyType.StructKey.make(axis.toString)).get.head
     val motorPos = struct.get(KeyType.IntKey.make("motorPosition")).get.head
     println(s"Axis $axis: motor position: $motorPos")
   }
@@ -99,4 +96,3 @@ object GalilHcdClientApp extends App {
   typedSystem.terminate()
   typedSystem.whenTerminated.onComplete(_ => System.exit(0))
 }
-

@@ -7,8 +7,8 @@ import csw.proto.galil.io.{DataRecord, GalilIoTcp, GalilIoUdp}
 import scala.io.StdIn
 
 /**
-  * A command line REPL for a Galil controller (or simulator).
-  */
+ * A command line REPL for a Galil controller (or simulator).
+ */
 object GalilRepl extends App {
   implicit val system: ActorSystem = ActorSystem()
 
@@ -39,7 +39,8 @@ object GalilRepl extends App {
     case Some(options) =>
       try {
         run(options)
-      } catch {
+      }
+      catch {
         case e: Throwable =>
           e.printStackTrace()
           System.exit(1)
@@ -56,11 +57,13 @@ object GalilRepl extends App {
       val cmd = StdIn.readLine(":")
       if (cmd == "q") {
         system.terminate()
-      } else {
+      }
+      else {
         try {
           val resultList = galilIo.send(cmd)
           resultList.foreach(r => println(formatResult(r._1, r._2)))
-        } catch {
+        }
+        catch {
           case ex: Exception =>
             println(s"error: $ex")
         }

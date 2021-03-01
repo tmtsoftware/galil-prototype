@@ -3,8 +3,8 @@ package csw.proto.galil.simulator
 import akka.actor.ActorSystem
 
 /**
-  * Simulates the protocol used to talk to the Galil hardware.
-  */
+ * Simulates the protocol used to talk to the Galil hardware.
+ */
 object GalilSimulatorApp extends App {
 
   implicit val system: ActorSystem = ActorSystem()
@@ -32,7 +32,8 @@ object GalilSimulatorApp extends App {
     case Some(options) =>
       try {
         run(options)
-      } catch {
+      }
+      catch {
         case e: Throwable =>
           e.printStackTrace()
           System.exit(1)

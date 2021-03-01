@@ -1,31 +1,30 @@
 package csw.proto.galil.io
 
 import java.net.InetAddress
-
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
 import akka.util.ByteString
 import csw.logging.client.scaladsl.LoggingSystemFactory
 import csw.params.commands.Result
-import org.scalatest.{BeforeAndAfterAll, FunSuite}
+import org.scalatest.{BeforeAndAfterAll, Ignore}
+import org.scalatest.funsuite.AnyFunSuite
 
 import scala.concurrent.ExecutionContextExecutor
 
 //noinspection ComparingLength
 // Note: Before running this test, start the galil "simulator" script
-class GalilIoTests extends FunSuite with BeforeAndAfterAll {
+//@Ignore
+class GalilIoTests extends AnyFunSuite with BeforeAndAfterAll {
 
   implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilIoTests")
-  implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
-  private val localHost = InetAddress.getLocalHost.getHostName
+  implicit lazy val ec: ExecutionContextExecutor               = typedSystem.executionContext
+  private val localHost                                        = InetAddress.getLocalHost.getHostName
 
   LoggingSystemFactory.start("GalilIoTests", "0.1", localHost, typedSystem)
   val galilIo: GalilIoTcp = GalilIoTcp() // default params: "127.0.0.1", 8888, can also use ssh tunnel to test on device
 
-  override def beforeAll(): Unit = {
-  }
+  override def beforeAll(): Unit = {}
 
-  override def afterAll(): Unit = {
-  }
+  override def afterAll(): Unit = {}
 
   test("Test Galil commands") {
 
@@ -77,7 +76,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
   }
 
   test("Test DataRecord generation and parsing") {
-    val r = galilIo.send("QR")
+    val r   = galilIo.send("QR")
     val bs1 = r.head._2
 
     // Test creating a DataRecord from the bytes returned from the Galil device
@@ -93,7 +92,7 @@ class GalilIoTests extends FunSuite with BeforeAndAfterAll {
     val paramSet = dr1.toParamSet
     println(s"DataRecord ParamSet: $paramSet\n")
     val result = Result(paramSet)
-    val dr3 = DataRecord(result)
+    val dr3    = DataRecord(result)
     assert(dr1.toString == dr3.toString)
   }
 }

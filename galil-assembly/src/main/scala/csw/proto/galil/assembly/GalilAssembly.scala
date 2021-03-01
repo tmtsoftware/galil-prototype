@@ -1,7 +1,6 @@
 package csw.proto.galil.assembly
 
 import akka.actor.typed.scaladsl.ActorContext
-import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
@@ -16,8 +15,6 @@ import csw.params.core.models.Id
 import csw.prefix.models.Subsystem.CSW
 import csw.time.core.models.UTCTime
 
-import scala.async.Async._
-import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 // Add messages here...
@@ -30,17 +27,16 @@ private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
     new GalilAssemblyHandlers(ctx, cswCtx)
 }
 
-private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
-                                    cswServices: CswContext)
+private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswServices: CswContext)
     extends ComponentHandlers(ctx, cswServices) {
 
   import cswServices._
 
-  implicit val ec: ExecutionContextExecutor = ctx.executionContext
-  private val log = loggerFactory.getLogger
+  implicit val ec: ExecutionContextExecutor    = ctx.executionContext
+  private val log                              = loggerFactory.getLogger
   private var galilHcd: Option[CommandService] = None
 
-  override def initialize(): Future[Unit] = async {
+  override def initialize(): Unit = {
     log.debug("Initialize called")
   }
 
@@ -65,7 +61,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug(s"onOneway called: $controlCommand")
   }
 
-  override def onShutdown(): Future[Unit] = async {
+  override def onShutdown(): Unit = {
     log.debug("onShutdown called")
   }
 
@@ -77,9 +73,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
     trackingEvent match {
       case LocationUpdated(location) =>
-        galilHcd = Some(
-          CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(
-            ctx.system))
+        galilHcd = Some(CommandServiceFactory.make(location.asInstanceOf[AkkaLocation])(ctx.system))
       case LocationRemoved(_) =>
         galilHcd = None
     }
@@ -87,14 +81,10 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
 
   // For testing, forward command to HCD and complete this command when it completes
   private def forwardCommandToHcd(runId: Id, controlCommand: ControlCommand): Future[SubmitResponse] = {
-    implicit val timeout: Timeout = Timeout(3.seconds)
-    val setup = Setup(componentInfo.prefix,
-      controlCommand.commandName,
-      controlCommand.maybeObsId,
-      controlCommand.paramSet)
+    val setup = Setup(componentInfo.prefix, controlCommand.commandName, controlCommand.maybeObsId, controlCommand.paramSet)
     galilHcd match {
       case Some(hcd) => hcd.submit(setup)
-      case None => Future(Error(runId, "HCD not found"))
+      case None      => Future(Error(runId, "HCD not found"))
     }
   }
 

@@ -3,7 +3,6 @@ package csw.proto.galil.client
 import java.io.IOException
 
 import akka.actor.typed.{ActorSystem, SpawnProtocol}
-import akka.stream.Materializer
 import akka.util.{ByteString, Timeout}
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
@@ -22,32 +21,31 @@ import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
 /**
-  * A client for locating and communicating with the Galil HCD
-  *
+ * A client for locating and communicating with the Galil HCD
+ *
   * @param source          the client's prefix
-  * @param locationService a reference to the location service
-  */
-case class GalilHcdClient(source: Prefix, locationService: LocationService)
-                         (implicit typedSystem: ActorSystem[SpawnProtocol.Command],
-                          mat: Materializer,
-                          ec: ExecutionContextExecutor) {
-
+ * @param locationService a reference to the location service
+ */
+case class GalilHcdClient(source: Prefix, locationService: LocationService)(implicit
+    typedSystem: ActorSystem[SpawnProtocol.Command],
+    ec: ExecutionContextExecutor
+) {
 
   implicit val timeout: Timeout = Timeout(3.seconds)
 
   private val connection = AkkaConnection(ComponentId(Prefix("csw.galil.hcd.GalilHcd"), HCD))
 
-  private val axisKey: Key[Char] = KeyType.CharKey.make("axis")
-  private val countsKey: Key[Int] = KeyType.IntKey.make("counts")
+  private val axisKey: Key[Char]        = KeyType.CharKey.make("axis")
+  private val countsKey: Key[Int]       = KeyType.IntKey.make("counts")
   private val interpCountsKey: Key[Int] = KeyType.IntKey.make("interpCounts")
   private val brushlessModulusKey: Key[Int] =
     KeyType.IntKey.make("brushlessModulus")
   private val voltsKey: Key[Double] = KeyType.DoubleKey.make("volts")
-  private val speedKey: Key[Int] = KeyType.IntKey.make("speed")
+  private val speedKey: Key[Int]    = KeyType.IntKey.make("speed")
 
   /**
-    * Gets a reference to the running Galil HCD from the location service, if found.
-    */
+   * Gets a reference to the running Galil HCD from the location service, if found.
+   */
   private def getGalilHcd: Future[Option[CommandService]] = {
     locationService
       .resolve(connection, 30.seconds)
@@ -55,10 +53,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a getDataRecord message to the HCD and returns the response
-    */
-  def getDataRecord(obsId: Option[ObsId],
-                    axis: Option[Char] = None): Future[CommandResponse] = {
+   * Sends a getDataRecord message to the HCD and returns the response
+   */
+  def getDataRecord(obsId: Option[ObsId], axis: Option[Char] = None): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val s = Setup(source, CommandName("getDataRecord"), obsId)
@@ -66,17 +63,15 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
         val setup = if (axis.isDefined) s.add(axisKey.set(axis.get)) else s
         hcd.submitAndWait(setup)
 
-
       case None =>
         Future.successful(Error(Id(), "Can't locate Galil HCD"))
     }
   }
 
   /**
-    * Sends a getDataRecord message to the HCD and returns a DataRecord object
-    */
-  def getDataRecordRaw(obsId: Option[ObsId],
-                       axis: Option[Char] = None): Future[DataRecord] = {
+   * Sends a getDataRecord message to the HCD and returns a DataRecord object
+   */
+  def getDataRecordRaw(obsId: Option[ObsId], axis: Option[Char] = None): Future[DataRecord] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val s = Setup(source, CommandName("getDataRecordRaw"), obsId)
@@ -87,8 +82,7 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
             val bytes = result.get(DataRecord.key).get.head.values
             DataRecord(ByteString(bytes))
           case x =>
-            throw new IOException(
-              s"Unexpected result from getDataRecordRaw command: $x")
+            throw new IOException(s"Unexpected result from getDataRecordRaw command: $x")
         }
 
       case None =>
@@ -97,11 +91,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setRelTarget message to the HCD and returns the response
-    */
-  def setRelTarget(obsId: Option[ObsId],
-                   axis: Char,
-                   count: Int): Future[CommandResponse] = {
+   * Sends a setRelTarget message to the HCD and returns the response
+   */
+  def setRelTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setRelTarget"), obsId)
@@ -116,10 +108,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a getRelTarget message to the HCD and returns the response
-    */
-  def getRelTarget(obsId: Option[ObsId],
-                   axis: Char): Future[CommandResponse] = {
+   * Sends a getRelTarget message to the HCD and returns the response
+   */
+  def getRelTarget(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("getRelTarget"), obsId)
@@ -133,11 +124,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setAbsTarget message to the HCD and returns the response
-    */
-  def setAbsTarget(obsId: Option[ObsId],
-                   axis: Char,
-                   count: Int): Future[CommandResponse] = {
+   * Sends a setAbsTarget message to the HCD and returns the response
+   */
+  def setAbsTarget(obsId: Option[ObsId], axis: Char, count: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setAbsTarget"), obsId)
@@ -152,10 +141,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setBrushlessAxis message to the HCD and returns the response
-    */
-  def setBrushlessAxis(obsId: Option[ObsId],
-                       axis: Char): Future[CommandResponse] = {
+   * Sends a setBrushlessAxis message to the HCD and returns the response
+   */
+  def setBrushlessAxis(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setBrushlessAxis"), obsId)
@@ -169,11 +157,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setAnalogFeedbackSelect message to the HCD and returns the response
-    */
-  def setAnalogFeedbackSelect(obsId: Option[ObsId],
-                              axis: Char,
-                              interpCounts: Int): Future[CommandResponse] = {
+   * Sends a setAnalogFeedbackSelect message to the HCD and returns the response
+   */
+  def setAnalogFeedbackSelect(obsId: Option[ObsId], axis: Char, interpCounts: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setAnalogFeedbackSelect"), obsId)
@@ -188,11 +174,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setBrushlessModulus message to the HCD and returns the response
-    */
-  def setBrushlessModulus(obsId: Option[ObsId],
-                          axis: Char,
-                          brushlessModulus: Int): Future[CommandResponse] = {
+   * Sends a setBrushlessModulus message to the HCD and returns the response
+   */
+  def setBrushlessModulus(obsId: Option[ObsId], axis: Char, brushlessModulus: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setBrushlessModulus"), obsId)
@@ -207,11 +191,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a brushlessZero message to the HCD and returns the response
-    */
-  def brushlessZero(obsId: Option[ObsId],
-                    axis: Char,
-                    volts: Double): Future[CommandResponse] = {
+   * Sends a brushlessZero message to the HCD and returns the response
+   */
+  def brushlessZero(obsId: Option[ObsId], axis: Char, volts: Double): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("brushlessZero"), obsId)
@@ -226,8 +208,8 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a motorOn message to the HCD and returns the response
-    */
+   * Sends a motorOn message to the HCD and returns the response
+   */
   def motorOn(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
@@ -242,8 +224,8 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a motorOff message to the HCD and returns the response
-    */
+   * Sends a motorOff message to the HCD and returns the response
+   */
   def motorOff(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
@@ -258,10 +240,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setHomingMode message to the HCD and returns the response
-    */
-  def setHomingMode(obsId: Option[ObsId],
-                    axis: Char): Future[CommandResponse] = {
+   * Sends a setHomingMode message to the HCD and returns the response
+   */
+  def setHomingMode(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setHomingMode"), obsId)
@@ -275,8 +256,8 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a beginMotion message to the HCD and returns the response
-    */
+   * Sends a beginMotion message to the HCD and returns the response
+   */
   def beginMotion(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
@@ -291,11 +272,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setJogSpeed message to the HCD and returns the response
-    */
-  def setJogSpeed(obsId: Option[ObsId],
-                  axis: Char,
-                  speed: Int): Future[CommandResponse] = {
+   * Sends a setJogSpeed message to the HCD and returns the response
+   */
+  def setJogSpeed(obsId: Option[ObsId], axis: Char, speed: Int): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setJogSpeed"), obsId)
@@ -310,10 +289,9 @@ case class GalilHcdClient(source: Prefix, locationService: LocationService)
   }
 
   /**
-    * Sends a setFindIndexMode message to the HCD and returns the response
-    */
-  def setFindIndexMode(obsId: Option[ObsId],
-                       axis: Char): Future[CommandResponse] = {
+   * Sends a setFindIndexMode message to the HCD and returns the response
+   */
+  def setFindIndexMode(obsId: Option[ObsId], axis: Char): Future[CommandResponse] = {
     getGalilHcd.flatMap {
       case Some(hcd) =>
         val setup = Setup(source, CommandName("setFindIndexMode"), obsId)

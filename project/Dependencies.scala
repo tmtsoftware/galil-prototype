@@ -2,39 +2,48 @@ import sbt._
 
 object Dependencies {
 
-  val `galil-hcd-deps` = Seq(
-    CSW.`csw-framework`
-  )
-
-  val `galil-assembly-deps` = Seq(
-    CSW.`csw-framework`
-  )
-
-  val `galil-client-deps` = Seq(
+  val GalilHcd = Seq(
     CSW.`csw-framework`,
-    Libs.scalaTest % Test
+    CSW.`csw-testkit` % Test,
+    Libs.`scalatest` % Test,
+    Libs.`junit` % Test,
+    Libs.`junit-interface` % Test
   )
 
-  val `galil-simulator-deps` = Seq(
+  val GalilAssembly = Seq(
+    CSW.`csw-framework`,
+    CSW.`csw-testkit` % Test,
+    Libs.`scalatest` % Test,
+    Libs.`junit` % Test,
+    Libs.`junit-interface` % Test
+  )
+
+  val GalilClient = Seq(
+    CSW.`csw-framework`,
+    Libs.scalatest % Test
+  )
+
+  val GalilDeploy = Seq(
+    CSW.`csw-framework`,
+    Libs.scalatest % Test
+  )
+
+  val GalilSimulator = Seq(
     CSW.`csw-framework`
   )
 
-  val `galil-repl-deps` = Seq(
+  val GalilRepl = Seq(
     CSW.`csw-framework`
   )
 
-  val `galil-io-deps` = Seq(
+  val GalilIo = Seq(
     CSW.`csw-framework`,
     Libs.playJson,
-    Libs.scalaTest % Test
+    Libs.scalatest % Test
   )
 
-  val `galil-commands-deps` = Seq(
+  val GalilCommands = Seq(
     CSW.`csw-framework`,
-    Libs.scalaTest % Test
-  )
-
-  val `galil-deploy-deps` = Seq(
-    CSW.`csw-framework`
+    Libs.scalatest % Test
   )
 }

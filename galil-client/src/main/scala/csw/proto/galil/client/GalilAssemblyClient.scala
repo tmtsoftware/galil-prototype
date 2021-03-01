@@ -22,16 +22,16 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
 /**
-  * A client to test locating and communicating with the Galil assembly
-  */
+ * A client to test locating and communicating with the Galil assembly
+ */
 object GalilAssemblyClient extends App {
 
   implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilAssemblyClient")
-  implicit lazy val ec: ExecutionContextExecutor = typedSystem.executionContext
-  implicit val timeout: Timeout = Timeout(3.seconds)
+  implicit lazy val ec: ExecutionContextExecutor               = typedSystem.executionContext
+  implicit val timeout: Timeout                                = Timeout(3.seconds)
 
   private val locationService = HttpLocationServiceFactory.makeLocalClient
-  private val host = InetAddress.getLocalHost.getHostName
+  private val host            = InetAddress.getLocalHost.getHostName
   LoggingSystemFactory.start("GalilAssemblyClientApp", "0.1", host, typedSystem)
 
   private val log = GenericLoggerFactory.getLogger
@@ -42,9 +42,12 @@ object GalilAssemblyClient extends App {
   def initialBehavior: Behavior[TrackingEvent] =
     Behaviors.setup { ctx =>
       val connection = AkkaConnection(ComponentId(Prefix("csw.galil.assembly.GalilAssembly"), Assembly))
-      locationService.subscribe(connection, { loc =>
-        ctx.self ! loc
-      })
+      locationService.subscribe(
+        connection,
+        { loc =>
+          ctx.self ! loc
+        }
+      )
       subscriberBehavior
     }
 
@@ -66,10 +69,9 @@ object GalilAssemblyClient extends App {
   }
 
   private def interact(ctx: ActorContext[TrackingEvent], assembly: CommandService): Unit = {
-    implicit val timeout: Timeout = Timeout(3.seconds)
     val maybeObsId = None
 
-    val axisKey: Key[Char] = KeyType.CharKey.make("axis")
+    val axisKey: Key[Char]  = KeyType.CharKey.make("axis")
     val countsKey: Key[Int] = KeyType.IntKey.make("counts")
 
     val setup = Setup(Prefix("csw.test.client"), CommandName("setRelTarget"), maybeObsId)
@@ -85,4 +87,3 @@ object GalilAssemblyClient extends App {
     }
   }
 }
-
