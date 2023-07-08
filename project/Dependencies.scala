@@ -1,21 +1,22 @@
 import sbt._
 
+//noinspection TypeAnnotation
 object Dependencies {
 
   val GalilHcd = Seq(
     CSW.`csw-framework`,
     CSW.`csw-testkit` % Test,
     Libs.`scalatest` % Test,
-    Libs.`junit` % Test,
-    Libs.`junit-interface` % Test
+//    Libs.`junit` % Test,
+//    Libs.`junit-interface` % Test
   )
 
   val GalilAssembly = Seq(
     CSW.`csw-framework`,
     CSW.`csw-testkit` % Test,
     Libs.`scalatest` % Test,
-    Libs.`junit` % Test,
-    Libs.`junit-interface` % Test
+//    Libs.`junit` % Test,
+//    Libs.`junit-interface` % Test
   )
 
   val GalilClient = Seq(

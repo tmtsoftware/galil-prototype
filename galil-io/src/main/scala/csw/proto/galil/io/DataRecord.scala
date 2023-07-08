@@ -14,10 +14,11 @@ import play.api.libs.json.{Json, OFormat}
 /**
  * The data record returned from the Galil QR command
  *
-  * @param header       the parsed data from the 4 byte header
+ * @param header       the parsed data from the 4 byte header
  * @param generalState data from byte 4 to 55 (sample number to amplifier status)
  * @param axisStatuses an array of axis status, one for each value of axes ('A' to 'H'), Use default (0) values if axis not present
  */
+//noinspection ScalaUnusedSymbol
 case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: Array[GalilAxisStatus]) {
 
   override def toString: String = {
@@ -43,17 +44,19 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
     generalState.write(buffer)
     axisStatuses.foreach(_.write(buffer))
 
-    buffer.flip().asInstanceOf[ByteBuffer]
+    buffer.flip()
   }
 
   def toParamSet: Set[Parameter[_]] = {
-    val status = axes.zip(axisStatuses).flatMap { p =>
-      val axis = p._1
+    val axisStatus = axes.zip(axisStatuses).flatMap { p =>
+      // Since the "struct" type is no longer supported, use the implicit "axis" char to build a unique name for
+      // the axis parameters
+      implicit val axis: Char = p._1
       if (header.blocksPresent.contains(axis))
-        Some(KeyType.StructKey.make(axis.toString).set(Struct(p._2.toParamSet)))
+        Some(p._2.toParamSet)
       else None
     }
-    header.toParamSet ++ generalState.toParamSet ++ status.toSet
+    header.toParamSet ++ generalState.toParamSet ++ axisStatus.toSet.flatten
   }
 }
 
@@ -83,9 +86,10 @@ object DataRecord {
   /**
    * The 4 byte Galil header
    *
-    * @param blocks List of name of the block for each block present
+   * @param blocks List of name of the block for each block present
    */
   case class Header(blocks: List[String]) {
+
     import Header._
 
     val blocksPresent: List[Char] = blocks.map(_.head)
@@ -114,11 +118,12 @@ object DataRecord {
 
   }
 
+  // noinspection ScalaWeakerAccess
   object Header {
     val blocksPresentKey: Key[Char] = KeyType.CharKey.make("blocksPresent")
 
     /**
-     * Initialze the header from the given byte buffer
+     * Initialize the header from the given byte buffer
      */
     def apply(buffer: ByteBuffer): Header = {
       // Note: The header information of the data records is formatted in little endian (reversed network byte order)
@@ -149,7 +154,7 @@ object DataRecord {
     }
 
     /**
-     * Initialze from the result of a command (See CompletedWithResult)
+     * Initialize from the result of a command (See CompletedWithResult)
      */
     def apply(result: Result): Header = {
       val blocks = result.get(blocksPresentKey).get.values.toList.map(_.toString)
@@ -260,6 +265,7 @@ object DataRecord {
 
   }
 
+  // noinspection ScalaWeakerAccess,SpellCheckingInspection,DuplicatedCode
   object GeneralState {
     val sampleNumberKey: Key[Short]                    = KeyType.ShortKey.make("sampleNumber")
     val inputsKey: Key[Byte]                           = KeyType.ByteKey.make("inputs")
@@ -282,14 +288,14 @@ object DataRecord {
     /**
      * Initializes from the given ByteBuffer in the documented Galil data record format
      */
-    def apply(buffer: ByteBuffer, header: Header): GeneralState = {
+    def apply(buffer: ByteBuffer): GeneralState = {
 
       // QZ
       // 4, 52, 26, 36
-      //Number of axes present
-      //number of bytes in general block of data record
-      //number of bytes in coordinate plane block of data record
-      //Number of Bytes in each axis block of data record
+      // Number of axes present
+      // number of bytes in general block of data record
+      // number of bytes in coordinate plane block of data record
+      // Number of Bytes in each axis block of data record
 
       def getBytes(numBytes: Int): Array[Byte] = {
         val ar = Array.fill(numBytes)(0.toByte)
@@ -321,7 +327,7 @@ object DataRecord {
       val amplifierStatus = buffer.getInt()
 
       // ADDR 56-59
-      val countourModeSegmentCount = buffer.getInt()
+      val contourModeSegmentCount = buffer.getInt()
 
       // ADDR 60-61
       val contourModeBufferSpaceRemaining = buffer.getShort()
@@ -362,7 +368,7 @@ object DataRecord {
         errorCode,
         threadStatus,
         amplifierStatus,
-        countourModeSegmentCount,
+        contourModeSegmentCount,
         contourModeBufferSpaceRemaining,
         sPlaneSegmentCount,
         sPlaneMoveStatus,
@@ -386,7 +392,7 @@ object DataRecord {
       val errorCode                       = result.get(errorCodeKey).get.head
       val threadStatus                    = result.get(threadStatusKey).get.head
       val amplifierStatus                 = result.get(amplifierStatusKey).get.head
-      val countourModeSegmentCount        = result.get(contourModeSegmentCountKey).get.head
+      val contourModeSegmentCount         = result.get(contourModeSegmentCountKey).get.head
       val contourModeBufferSpaceRemaining = result.get(contourModeBufferSpaceRemainingKey).get.head
       val sPlaneSegmentCount              = result.get(sPlaneSegmentCountKey).get.head.toShort
       val sPlaneMoveStatus                = result.get(sPlaneMoveStatusKey).get.head.toShort
@@ -405,7 +411,7 @@ object DataRecord {
         errorCode,
         threadStatus,
         amplifierStatus,
-        countourModeSegmentCount,
+        contourModeSegmentCount,
         contourModeBufferSpaceRemaining,
         sPlaneSegmentCount,
         sPlaneMoveStatus,
@@ -422,7 +428,7 @@ object DataRecord {
 
   case class GalilAxisStatus(
       status: Short = 0,  // unsigned
-      switches: Byte = 0, //unsigned
+      switches: Byte = 0, // unsigned
       stopCode: Byte = 0, // unsigned
       referencePosition: Int = 0,
       motorPosition: Int = 0,
@@ -432,9 +438,10 @@ object DataRecord {
       torque: Int = 0,
       analogInput: Short = 0,
       hallInputStatus: Byte = 0, // unsigned
-      reservedByte: Byte = 0,    //unsigned
+      reservedByte: Byte = 0,    // unsigned
       userDefinedVariable: Int = 0
   ) {
+
     import GalilAxisStatus._
 
     /**
@@ -475,7 +482,7 @@ object DataRecord {
        """.stripMargin
     }
 
-    def toParamSet: Set[Parameter[_]] = {
+    def toParamSet(implicit axis: Char): Set[Parameter[_]] = {
       Set(
         statusKey.set(status),
         switchesKey.set(switches),
@@ -493,21 +500,33 @@ object DataRecord {
 
   }
 
+  // noinspection ScalaWeakerAccess,DuplicatedCode
   object GalilAxisStatus {
-    val statusKey: Key[Short]          = KeyType.ShortKey.make("status")
-    val switchesKey: Key[Byte]         = KeyType.ByteKey.make("switches")
-    val stopCodeKey: Key[Byte]         = KeyType.ByteKey.make("stopCode")
-    val referencePositionKey: Key[Int] = KeyType.IntKey.make("referencePosition")
-    val motorPositionKey: Key[Int]     = KeyType.IntKey.make("motorPosition")
-    val positionErrorKey: Key[Int]     = KeyType.IntKey.make("positionError")
-    val auxiliaryPositionKey: Key[Int] = KeyType.IntKey.make("auxiliaryPosition")
-    val velocityKey: Key[Int]          = KeyType.IntKey.make("velocity")
-    val torqueKey: Key[Int]            = KeyType.IntKey.make("torque")
-    val analogInputKey: Key[Short]     = KeyType.ShortKey.make("analogInput")
-    val hallInputStatusKey: Key[Byte]  = KeyType.ByteKey.make("hallInputStatus")
+    // Note: Each key is prefixed with "axis-a" for axis "a"
+    def statusKey(implicit axis: Char): Key[Short] = KeyType.ShortKey.make(s"axis-$axis-status")
+
+    def switchesKey(implicit axis: Char): Key[Byte] = KeyType.ByteKey.make(s"axis-$axis-switches")
+
+    def stopCodeKey(implicit axis: Char): Key[Byte] = KeyType.ByteKey.make(s"axis-$axis-stopCode")
+
+    def referencePositionKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-referencePosition")
+
+    def motorPositionKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-motorPosition")
+
+    def positionErrorKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-positionError")
+
+    def auxiliaryPositionKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-auxiliaryPosition")
+
+    def velocityKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-velocity")
+
+    def torqueKey(implicit axis: Char): Key[Int] = KeyType.IntKey.make(s"axis-$axis-torque")
+
+    def analogInputKey(implicit axis: Char): Key[Short] = KeyType.ShortKey.make(s"axis-$axis-analogInput")
+
+    def hallInputStatusKey(implicit axis: Char): Key[Byte] = KeyType.ByteKey.make(s"axis-$axis-hallInputStatus")
 
     /**
-     * Initialzie from the given bytes
+     * Initialize from the given bytes
      */
     def apply(buffer: ByteBuffer): GalilAxisStatus = {
       val status              = buffer.getShort()
@@ -541,9 +560,10 @@ object DataRecord {
     }
 
     /**
-     * Initialze from the result of a command (See CompletedWithResult)
+     * Initialize from the result of a command (See CompletedWithResult)
      */
-    def apply(result: Result): GalilAxisStatus = {
+    def apply(axis: Char, result: Result): GalilAxisStatus = {
+      implicit val a: Char  = axis
       val status            = result.get(statusKey).get.head
       val switches          = result.get(switchesKey).get.head
       val stopCode          = result.get(stopCodeKey).get.head
@@ -578,6 +598,7 @@ object DataRecord {
 
   private def setBit(i: Int, b: Boolean): Int = if (b) 1 << i else 0
 
+  // noinspection ScalaUnusedSymbol
   object AxisStatusBits {
     val MotorOff                                 = 0
     val ThirdPhaseOfHMInProgress                 = 1
@@ -597,6 +618,7 @@ object DataRecord {
     val MoveInProgress                           = 15
   }
 
+  // noinspection ScalaUnusedSymbol
   object AxisSwitchesBits {
     val StepperMode         = 0
     val StateOfHomeInput    = 1
@@ -618,7 +640,7 @@ object DataRecord {
   def apply(bs: ByteString): DataRecord = {
     val buffer       = bs.toByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
     val header       = Header(buffer)
-    val generalState = GeneralState(buffer, header)
+    val generalState = GeneralState(buffer)
     val axisStatuses = axes.flatMap { axis =>
       if (header.blocksPresent.contains(axis)) Some(GalilAxisStatus(buffer)) else None
     }
@@ -626,26 +648,21 @@ object DataRecord {
   }
 
   /**
-   * Initialze the header from the result of a command (See CompletedWithResult)
+   * Initialize the header from the result of a command (See CompletedWithResult)
    */
   def apply(result: Result): DataRecord = {
     val header       = Header(result)
     val generalState = GeneralState(result)
-    val axisStatuses = axes.flatMap { axis =>
-      val axisKey = KeyType.StructKey.make(axis.toString)
-      result
-        .get(axisKey)
-        .map(_.head.paramSet)
-        .map(Result(_))
-        .map(GalilAxisStatus(_))
-    }
+    val axisStatuses = axes
+      .filter(header.blocksPresent.contains)
+      .map(GalilAxisStatus(_, result))
     DataRecord(header, generalState, axisStatuses.toArray)
   }
 
   /**
    * Returns a command response for a QR (getDataRecord) command
    *
-    * @param runId      runId from the Setup command
+   * @param runId      runId from the Setup command
    * @param maybeObsId optional observation id from the command
    * @param dr         the parsed data record from the device
    * @return a CommandResponse containing values from the data record

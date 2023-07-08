@@ -2,6 +2,7 @@
 
 This project implements an HCD (Hardware Control Daemon) that talks to a Galil controller using 
 the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw)) APIs. 
+An example device might be the DMC-50040(DIN, ISCNTL)-C023-I000-D4020.
 
 ## Subprojects
 
@@ -21,19 +22,23 @@ See [here](https://www.scala-sbt.org/1.0/docs/Setup.html) for instructions on in
 
 Note: The version of CSW used by this project is declared in [project/build.properties](project/build.properties).
 
+Run:
+
+    sbt stage
+
+to compile everything and create the start scripts for the components.
+
 ## Prerequisites for running Components
 
-The CSW services need to be running before starting the components.
-This is done by starting the `csw-services.sh` script which is present inside `scripts` directory.
-Follow below instructions to run CSW services:
+The CSW services need to be running before starting the components. 
+See [here](https://tmtsoftware.github.io/csw/apps/csinstallation.html) for how to install csw-services using coursier (cs).
 
-* Run `./scripts/csw-services.sh start` command to start all the CSW services i.e. Location, Config, Event, Alarm and Database Service
-* Run `./csw_services.sh start --help` to get more information.
-
-Note:
-`csw-services.sh` script reads `csw.version` property from `project/build.properties` file and uses that version for starting CSW services.
+* Run `csw-services start -e` command to start all the CSW services i.e. Location, Config, Event, Alarm and Database Service
 
 See [csw-services](https://tmtsoftware.github.io/csw/apps/cswservices.html) for more information.
+
+Alternatively, you can run `scripts/csw-services.sh start -e`, which uses coursier to run the version 
+of csw-services declared by this project in project/build.properties.
 
 ## Running the galil-prototype applications
 
@@ -45,7 +50,7 @@ galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.host=myhost
 An example GalilHcd.conf file can be found [here](galil-hcd/src/main/resources/GalilHcd.conf). 
 If `--local` is not given, the file would be fetched from the Config Service, if available.
 
-To run using a Galil simulator:
+To run using a Galil simulator, run these commands in separate terminal windows:
 ```
 galil-simulator
 galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf

@@ -61,10 +61,9 @@ object GalilAssemblyClient extends App {
           log.info(s"LocationRemoved: $loc")
       }
       Behaviors.same
-    } receiveSignal {
-      case (ctx, x) =>
-        log.info(s"${ctx.self} received signal $x")
-        Behaviors.stopped
+    } receiveSignal { case (ctx, x) =>
+      log.info(s"${ctx.self} received signal $x")
+      Behaviors.stopped
     }
   }
 

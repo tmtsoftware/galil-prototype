@@ -7,7 +7,7 @@ import csw.command.client.CommandServiceFactory
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.framework.scaladsl.ComponentHandlers
 import csw.location.api.models.{AkkaLocation, LocationRemoved, LocationUpdated, TrackingEvent}
 import csw.params.commands.CommandResponse.{Completed, Error, SubmitResponse, ValidateCommandResponse}
 import csw.params.commands.{CommandResponse, ControlCommand, Setup}
@@ -16,16 +16,6 @@ import csw.prefix.models.Subsystem.CSW
 import csw.time.core.models.UTCTime
 
 import scala.concurrent.{ExecutionContextExecutor, Future}
-
-// Add messages here...
-
-private class GalilAssemblyBehaviorFactory extends ComponentBehaviorFactory {
-  override def handlers(
-      ctx: ActorContext[TopLevelActorMessage],
-      cswCtx: CswContext
-  ): ComponentHandlers =
-    new GalilAssemblyHandlers(ctx, cswCtx)
-}
 
 private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cswServices: CswContext)
     extends ComponentHandlers(ctx, cswServices) {

@@ -8,6 +8,7 @@ import csw.logging.client.scaladsl.{GenericLoggerFactory, LoggingSystemFactory}
 import csw.params.commands.CommandResponse.Completed
 import csw.params.core.generics.KeyType
 import csw.prefix.models.Prefix
+import csw.proto.galil.io.DataRecord.GalilAxisStatus
 import org.scalatest.funsuite.AnyFunSuite
 
 import scala.concurrent.duration._
@@ -44,12 +45,15 @@ class GalilClientTest extends AnyFunSuite {
 
     val result = resp3.asInstanceOf[Completed].result
 
-    // Example of how you could extract the motor position for each axis
+    // Example of how you could extract the motor position for each axis.
+    // The axis status parameters for each axis are stored in params with the key name axis-$axis-$paramName
+    // (For example, "axis-A-motorPosition").
     val blocksPresent = result.get(KeyType.CharKey.make("blocksPresent")).get.values
     blocksPresent.filter(b => b >= 'A' && b <= 'F').foreach { axis =>
-      val struct   = result.get(KeyType.StructKey.make(axis.toString)).get.head
-      val motorPos = struct.get(KeyType.IntKey.make("motorPosition")).get.head
+      implicit val a: Char = axis
+      val motorPos         = result.get(GalilAxisStatus.motorPositionKey)
       println(s"Axis $axis: motor position: $motorPos")
     }
+
   }
 }

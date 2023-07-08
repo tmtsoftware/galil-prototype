@@ -89,7 +89,12 @@ private[hcd] object GalilIOActor {
         commandResponseManager.updateCommand(returnResponse)
       }
 
-      def handleDataRecordRawResponse(bs: ByteString, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
+      def handleDataRecordRawResponse(
+          bs: ByteString,
+          runId: Id,
+          maybeObsId: Option[ObsId],
+          cmdMapEntry: CommandMapEntry
+      ): Unit = {
         val returnResponse = Completed(runId, new Result().add(DataRecord.key.set(bs.toByteBuffer.array())))
         commandResponseManager.updateCommand(returnResponse)
       }

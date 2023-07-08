@@ -21,7 +21,7 @@ import scala.util.{Failure, Success, Try}
 /**
  * Simulates a Galil controller
  *
-  * @param host host to bind to listen for new client connections
+ * @param host host to bind to listen for new client connections
  * @param port port to use to listen for new client connections
  */
 case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit system: ActorSystem) {

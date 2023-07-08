@@ -6,7 +6,7 @@ import com.typesafe.config.ConfigFactory
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
-import csw.framework.scaladsl.{ComponentBehaviorFactory, ComponentHandlers}
+import csw.framework.scaladsl.ComponentHandlers
 import csw.location.api.models.TrackingEvent
 import csw.params.commands.CommandResponse.{SubmitResponse, ValidateCommandResponse}
 import csw.params.commands._
@@ -30,12 +30,8 @@ object GalilCommandMessage {
 
 }
 
-private class GalilHcdBehaviorFactory extends ComponentBehaviorFactory {
-  override def handlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext): ComponentHandlers =
-    new GalilHcdHandlers(ctx, cswCtx)
-}
-
-private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext) extends ComponentHandlers(ctx, cswCtx) {
+private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+    extends ComponentHandlers(ctx, cswCtx) {
 
   import cswCtx._
 
@@ -46,7 +42,14 @@ private class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: 
   private val galilIoActor: ActorRef[GalilCommandMessage] =
     ctx.spawn(
       GalilIOActor
-        .behavior(getGalilConfig, commandResponseManager, adapter, loggerFactory, componentInfo.prefix, cswCtx.currentStatePublisher),
+        .behavior(
+          getGalilConfig,
+          commandResponseManager,
+          adapter,
+          loggerFactory,
+          componentInfo.prefix,
+          cswCtx.currentStatePublisher
+        ),
       "GalilIOActor"
     )
 

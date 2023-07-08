@@ -23,7 +23,7 @@ import scala.concurrent.{ExecutionContextExecutor, Future}
 /**
  * A client for locating and communicating with the Galil HCD
  *
-  * @param source          the client's prefix
+ * @param source          the client's prefix
  * @param locationService a reference to the location service
  */
 case class GalilHcdClient(source: Prefix, locationService: LocationService)(implicit

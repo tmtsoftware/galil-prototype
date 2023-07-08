@@ -31,17 +31,17 @@ abstract class GalilIo {
   // the controller (via the opened socket) followed by a Carriage return (0x0D).
   // 3) Receiving a Response
   // "The controller will respond to that command with a string. The response of the
-  //command depends on which command was sent. In general, if there is a
-  //response expected such as the "TP" Tell Position command. The response will
-  //be in the form of the expected value(s) followed by a Carriage return (0x0D), Line
-  //Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
-  //just a question mark (?) and nothing else. If the command is not expected to
-  //return a value, the response will be just the Colon (:)."
+  // command depends on which command was sent. In general, if there is a
+  // response expected such as the "TP" Tell Position command. The response will
+  // be in the form of the expected value(s) followed by a Carriage return (0x0D), Line
+  // Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
+  // just a question mark (?) and nothing else. If the command is not expected to
+  // return a value, the response will be just the Colon (:)."
 
   /**
    * Sends a command to the controller and returns a list of responses
    *
-    * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
+   * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
    * @return list of (command, reply) from the controller (one pair for each ";" separated command)
    */
   def send(cmd: String): List[(String, ByteString)] = {
@@ -91,7 +91,7 @@ object GalilIo {
 /**
  * A UDP socket based client for talking to a Galil controller.
  *
-  * @param host    the Galil controller host
+ * @param host    the Galil controller host
  * @param port    the Galil controller port
  */
 case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {
@@ -119,7 +119,7 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
 /**
  * A TCP socket based client for talking to a Galil controller.
  *
-  * @param host    the Galil controller host
+ * @param host    the Galil controller host
  * @param port    the Galil controller port
  */
 case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends GalilIo {

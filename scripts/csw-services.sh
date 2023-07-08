@@ -2,6 +2,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+# DO NOT CHANGE THIS => this string is used in publishing.scala file
 DEFAULT_CSW_VERSION="master-SNAPSHOT"
 SCRIPT_NAME=$0
 
@@ -21,7 +22,7 @@ CSW_SERVICES_LIB=com.github.tmtsoftware.csw:csw-services_2.13
 
 function run_csw_services() {
     echo "====== CSW Version [$CSW_VERSION] ====="
-    "$SCRIPT_DIR"/coursier launch -r jitpack $CSW_SERVICES_LIB:"$CSW_VERSION" com.typesafe.akka:akka-http-spray-json_2.13:10.1.11 -- "$@"
+    "$SCRIPT_DIR"/coursier launch -r jitpack $CSW_SERVICES_LIB:"$CSW_VERSION" -- "$@"
 }
 
 function usage() {
@@ -32,8 +33,8 @@ function usage() {
     echo "  --version | -v <CSW_VERSION> Optional CSW version number used to start services"
     echo
     echo "Commands:"
-    echo "  start      Starts all CSW services if no options provided"
-    echo "  stop       Stops all CSW services, use this only when script is started in the background"
+    echo "  start      Starts all csw services if no options provided"
+    echo "  stop       Stops all csw services, use this only when script is started in the background"
     echo
     echo "Note: for more information, run $SCRIPT_NAME start --help"
 
