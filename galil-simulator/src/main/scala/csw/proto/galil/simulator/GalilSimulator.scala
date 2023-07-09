@@ -48,7 +48,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit
     conn.handleWith(parseLines(conn))
   }
 
-  // Parses the incomming lines and process the Galil commands
+  // Parses the incoming lines and process the Galil commands
   private def parseLines(conn: IncomingConnection) =
     Flow[ByteString]
       .via(Framing.delimiter(ByteString("\r\n"), maximumFrameLength = 256, allowTruncation = true))

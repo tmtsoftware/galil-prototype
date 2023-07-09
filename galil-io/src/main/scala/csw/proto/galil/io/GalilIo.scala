@@ -52,7 +52,7 @@ abstract class GalilIo {
     result.toList
   }
 
-  // Receives a replies (up to endMarker) for the given command and returns the result
+  // Receives a reply (up to endMarker) for the given command and returns the result
   // Note: Replies that are longer than bufSize (406 bytes) are broken into
   // multiple responses, so we need to recurse until the whole response has been read.
   // ASCII responses end with "\r\n:", while binary responses end with ":".

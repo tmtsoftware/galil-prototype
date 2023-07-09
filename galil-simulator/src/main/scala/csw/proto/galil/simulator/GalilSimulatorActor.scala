@@ -220,7 +220,7 @@ object GalilSimulatorActor {
   // PRA=1
   //
   // Command is the first two chars, axis should be the third.
-  // If the next two chars are "=?", get the value, otehrwise set it.
+  // If the next two chars are "=?", get the value, otherwise set it.
   // Return value is the Galil response.
   private def genericCmd(
       simCtx: SimulatorContext,
