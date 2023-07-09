@@ -27,13 +27,14 @@ Run:
     sbt stage
 
 to compile everything and create the start scripts for the components.
+After this command, you can find the start scripts in ./target/universal/stage/bin.
 
 ## Prerequisites for running Components
 
 The CSW services need to be running before starting the components. 
 See [here](https://tmtsoftware.github.io/csw/apps/csinstallation.html) for how to install csw-services using coursier (cs).
 
-* Run `csw-services start -e` command to start all the CSW services i.e. Location, Config, Event, Alarm and Database Service
+* Run `csw-services start -e` command to start the CSW services: i.e. Location, Event Service.
 
 See [csw-services](https://tmtsoftware.github.io/csw/apps/cswservices.html) for more information.
 
