@@ -1,6 +1,7 @@
 package csw.proto.galil.assembly
 
 import akka.actor.typed.scaladsl.ActorContext
+import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import csw.command.api.scaladsl.CommandService
 import csw.command.client.CommandServiceFactory
@@ -14,6 +15,7 @@ import csw.params.commands.{CommandResponse, ControlCommand, Setup}
 import csw.params.core.models.Id
 import csw.prefix.models.Subsystem.CSW
 import csw.time.core.models.UTCTime
+import scala.concurrent.duration._
 
 import scala.concurrent.{ExecutionContextExecutor, Future}
 
@@ -25,6 +27,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], csw
   implicit val ec: ExecutionContextExecutor    = ctx.executionContext
   private val log                              = loggerFactory.getLogger
   private var galilHcd: Option[CommandService] = None
+  implicit val timeout: Timeout                = Timeout(3.seconds)
 
   override def initialize(): Unit = {
     log.debug("Initialize called")
@@ -73,7 +76,7 @@ private class GalilAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], csw
   private def forwardCommandToHcd(runId: Id, controlCommand: ControlCommand): Future[SubmitResponse] = {
     val setup = Setup(componentInfo.prefix, controlCommand.commandName, controlCommand.maybeObsId, controlCommand.paramSet)
     galilHcd match {
-      case Some(hcd) => hcd.submit(setup)
+      case Some(hcd) => hcd.submitAndWait(setup)
       case None      => Future(Error(runId, "HCD not found"))
     }
   }
