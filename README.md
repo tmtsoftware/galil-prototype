@@ -1,58 +1,96 @@
-# Prototype Galil Controller HCD Implementation
+# Galil Motion HCD Prototype
 
-This project implements an HCD (Hardware Control Daemon) that talks to a Galil controller using 
-the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw)) APIs. 
-An example device might be the DMC-50040(DIN, ISCNTL)-C023-I000-D4020.
+A prototype Hardware Control Daemon (HCD) for Galil motion controllers, built with
+the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw)) framework.
+
+This is a working prototype for the TMT Alignment and Phasing System (APS)
+Instrument Control Software (ICS), implementing the CSW interface to Galil DMC-500 controllers.
+
+## Architecture
+
+The HCD is a **thin orchestrator** — motion algorithms live in embedded DMC programs
+on the Galil controller, not in the HCD. The HCD's responsibilities are:
+
+- Load and verify embedded programs on the controller
+- Execute programs by name (`XQ`) with dynamic thread allocation
+- Monitor controller state via QR binary data records (adaptive polling)
+- Publish CSW CurrentState events for Assemblies to observe
+
+The HCD actor architecture consists of a ControllerInterfaceActor (all Galil I/O),
+InternalStateActor (central state repository with dual-channel pub/sub),
+StatusMonitor (adaptive-rate QR polling), CommandHandlerActor (command dispatch with
+per-command CommandWatcherActors), and CurrentStatePublisherActor (CSW event publishing
+with reactive state-transition notifications).
+
+Hardware details (motor type, limit switches, position source) are read directly from
+the controller during initialization.
 
 ## Subprojects
 
-* galil-assembly - an assembly that talks to the Galil HCD
-* galil-client - client applications that talk to the Galil assembly or HCD
-* galil-hcd - an HCD that talks to the Galil hardware
-* galil-io - library implementing the communication with the Galil hardware
-* galil-repl - a command line client for a Galil device where you can enter Galil commands and see the responses
-* galil-simulator - implements a simulator for a Galil device (Only a small subset of Galil commands are simulated)
+| Module | Description |
+|--------|-------------|
+| **galil-hcd** | HCD implementation — actor architecture, command handling, state management, embedded program verification |
+| **galil-io** | Low-level Galil communication library (TCP, binary QR DataRecord parsing) |
+| **galil-assembly** | Assembly that talks to the Galil HCD |
+| **galil-client** | Client applications for the Galil assembly or HCD |
+| **galil-simulator** | Galil device simulator (subset of commands) |
+| **galil-repl** | Interactive command-line client for direct Galil commands |
+| **galil-deploy** | Deployment configuration (HostConfig, ContainerCmd) |
 
-## Build Instructions
+## Technology Stack
 
-The build is based on sbt and depends on libraries generated from the
-[csw](https://github.com/tmtsoftware/csw) project.
+- **Scala 3** (3.6.4)
+- **CSW 6.0.0** (Common Software for TMT)
+- **Apache Pekko 1.1.3** (actor framework)
+- **sbt 1.10.6** (build system)
+- **Java 21** (required)
 
-See [here](https://www.scala-sbt.org/1.0/docs/Setup.html) for instructions on installing sbt.
+## Prerequisites
 
-Note: The version of CSW used by this project is declared in [project/build.properties](project/build.properties).
+- **Java 21** — `java -version` to verify
+- **sbt** — See [sbt setup](https://www.scala-sbt.org/1.0/docs/Setup.html)
+- **CSW Services** — Required for running the HCD standalone (not needed for unit tests).
+  See [CSW installation](https://tmtsoftware.github.io/csw/apps/csinstallation.html).
 
-Run:
+## Building
 
-    sbt stage
-
-to compile everything and create the start scripts for the components.
-After this command, you can find the start scripts in ./target/universal/stage/bin.
-
-## Prerequisites for running Components
-
-The CSW services need to be running before starting the components.
-(They are started automatically for the tests.)
-See [here](https://tmtsoftware.github.io/csw/apps/csinstallation.html) for how to install csw-services using coursier (cs).
-
-* Run `csw-services start -e` command to start the CSW services: i.e. Location, Event Service.
-
-See [csw-services](https://tmtsoftware.github.io/csw/apps/cswservices.html) for more information.
-
-## Running the galil-prototype applications
-
-To run the Galil HCD using an actual Galil device, run the `galil-hcd` command with the options:
-```
-galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.host=myhost -Dgalil.port=23
+```bash
+sbt clean compile
+sbt stage
 ```
 
-An example GalilHcd.conf file can be found [here](galil-hcd/src/main/resources/GalilHcd.conf). 
-If `--local` is not given, the file would be fetched from the Config Service, if available.
+After `sbt stage`, start scripts are generated in `./target/universal/stage/bin/`.
 
-To run using a Galil simulator, run these commands in separate terminal windows:
+## Running the HCD
+
+### With Simulator
+
+Start the simulator and HCD in separate terminals:
+
+```bash
+# Terminal 1: Start the Galil simulator
+sbt "galil-simulator/run"
+
+# Terminal 2: Start CSW services, then the HCD
+csw-services start -e
+sbt "galil-deploy/runMain csw.proto.galil.deploy.GalilContainerCmdApp --local galil-hcd/src/main/resources/GalilHcd.conf"
 ```
-galil-simulator
-galil-hcd --local galil-hcd/src/main/resources/GalilHcd.conf
+
+### With Hardware
+
+Ensure the Galil controller is powered on and network-accessible, then:
+
+```bash
+csw-services start -e
+sbt "galil-deploy/runMain csw.proto.galil.deploy.GalilContainerCmdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Hardware.conf"
 ```
 
+See the [galil-hcd README](galil-hcd/) for configuration details, test instructions, and
+command documentation.
 
+## References
+
+- [CSW Documentation](https://tmtsoftware.github.io/csw/6.0.0/)
+- [CSW Source](https://github.com/tmtsoftware/csw)
+- [CSW Example Components](https://github.com/tmtsoftware/csw-vslice-example)
+- [Galil DMC Programming Reference](https://www.galil.com/downloads/manuals-and-data-sheets)
