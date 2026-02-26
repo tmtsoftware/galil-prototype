@@ -112,6 +112,18 @@ class CurrentStatePublisherActor(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case StateUpdate(InternalStateActor.StateChanged(newState, changedFields, changedAxes)) =>
       latestState = Some(newState)
+      
+      // Publish immediately when axisState changes so that every state transition
+      // (e.g. Idle→Homing→Idle) is captured in CSP regardless of poll timer phase.
+      // Without this, fast-completing commands (~100ms) can skip transient states
+      // because the 10Hz timer hasn't fired between the state changes.
+      if changedFields.contains("axisState") then
+        changedAxes.foreach { axis =>
+          newState.getAxis(axis).foreach { axisState =>
+            publishAxisState(axis, axisState)
+          }
+        }
+      
       this
       
     case Publish1Hz =>
@@ -267,6 +279,7 @@ class CurrentStatePublisherActor(
     // Map internal enum to ICD choice string
     val stateValue = axisState.axisState match
       case AxisStateEnum.Lost => "lost"
+      case AxisStateEnum.Homing => "homing"
       case AxisStateEnum.Idle => "idle"
       case AxisStateEnum.Moving => "moving"
       case AxisStateEnum.Tracking => "tracking"
@@ -289,19 +302,21 @@ class CurrentStatePublisherActor(
   
   /**
    * Publish CommandStateAxis[A-H] for all active axes (10 Hz)
+   * Now reads from AxisCmdState (separate from AxisState).
    */
   private def publishAllCommandStates(hcdState: HcdState): Unit =
     Axis.values.foreach { axis =>
-      hcdState.getAxis(axis).foreach { axisState =>
-        publishCommandState(axis, axisState)
+      hcdState.getCmdState(axis).foreach { cmdState =>
+        publishCommandState(axis, cmdState)
       }
     }
   
   /**
    * Publish CommandStateAxis for a single axis (10 Hz)
    * Uses keys from CommandStateAxis[A-H]CurrentState
+   * Now reads directly from AxisCmdState fields.
    */
-  private def publishCommandState(axis: Axis, axisState: AxisState): Unit =
+  private def publishCommandState(axis: Axis, cmdState: AxisCmdState): Unit =
     // Get keys and eventKey based on axis letter
     // Note: We need to extract both eventKey and parameter keys to avoid union type issues
     val (eventKey, threadKey, errKey, inPosKey, movKey) = axis match
@@ -362,22 +377,14 @@ class CurrentStatePublisherActor(
         CommandStateAxisHCurrentState.movingKey
       )
     
-    // Thread is -1 for no thread, but ICD says 0
-    val threadValue = if axisState.thread == -1 then 0 else axisState.thread
-    
-    // Determine if moving based on axis state
-    val isMoving = axisState.axisState match
-      case AxisStateEnum.Moving | AxisStateEnum.Tracking => true
-      case _ => false
-    
     val cs = CurrentState(
       eventKey.source,
       StateName(eventKey.eventName.name),
       Set(
-        threadKey.set(threadValue),
-        errKey.set(axisState.axisError),
-        inPosKey.set(axisState.inPosition),
-        movKey.set(isMoving)
+        threadKey.set(cmdState.activeThread),
+        errKey.set(cmdState.axisErrorMsg),
+        inPosKey.set(cmdState.inPosition),
+        movKey.set(cmdState.moving)
       )
     )
     

@@ -20,6 +20,8 @@ class GalilHcdConfigTest extends AnyFunSuite {
     assert(hcdConfig.controller.port == 8888)
     assert(hcdConfig.controller.id == 1)
     assert(hcdConfig.controller.embeddedProgram == "galil_embedded_v1.dmc")
+    assert(hcdConfig.controller.standbyPollingRateHz == 1.0)
+    assert(hcdConfig.controller.actionPollingRateHz == 10.0)
     
     // Simulation mode
     assert(hcdConfig.simulate == true)

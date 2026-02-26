@@ -53,6 +53,39 @@ object GalilCommandMessage {
   case class SendCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
   case class SendCommandResult(response: String, error: Option[String] = None)
 
+  /**
+   * Execute an embedded program with automatic thread allocation.
+   *
+   * The CI actor queries MG _NO to find a free thread (1-7), sends
+   * "XQ #label,thread", then queries MG _NO again to confirm the thread
+   * started. Both MG _NO results update IS threadStatus in real-time.
+   * The allocated thread number is returned in the result.
+   *
+   * Thread management uses the hardware as the source of truth — no
+   * separate pool bookkeeping. The controller's _NO bitmask is always
+   * authoritative for thread availability.
+   *
+   * @param label   Program label without # prefix (e.g. "MoveA", "HomeB")
+   * @param replyTo Actor to receive the result
+   */
+  case class ExecuteProgram(
+    label: String,
+    replyTo: ActorRef[ExecuteProgramResult]
+  ) extends GalilCommandMessage
+
+  /**
+   * Result of ExecuteProgram.
+   *
+   * @param thread           Thread number that was allocated and used
+   * @param threadWasActive  true if MG _NO confirmed the thread was running after XQ
+   * @param error            None on success, Some(message) if XQ was rejected or no threads available
+   */
+  case class ExecuteProgramResult(
+    thread: Int,
+    threadWasActive: Boolean,
+    error: Option[String] = None
+  )
+
 }
 
 class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
@@ -176,7 +209,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         adapter,
         loggerFactory,
         componentInfo.prefix,
-        cswCtx.currentStatePublisher
+        cswCtx.currentStatePublisher,
+        internalStateActor
       ),
       "ControllerInterfaceActor"
     )
@@ -186,17 +220,36 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val identity = Await.result(identityFuture, 5.seconds)
     log.info(s"Controller ready: firmware=${identity.firmware}, model=DMC-${identity.model}, axes=${identity.axisCount}")
     
-    // Phase 3: Start status monitoring (1 Hz idle rate; increased to 10 Hz when motors are moving)
+    // Phase 3: Start status monitoring with adaptive polling rate
+    // Motor type (stepper vs servo) is read from the QR DataRecord switches byte,
+    // not from config — the embedded code sets this during axis Setup.
+    // Polling rate adapts automatically based on axis states:
+    //   standby rate: all axes idle/lost/error
+    //   action rate:  any axis homing/moving/tracking
+    val standbyRate = hcdConfig.controller.standbyPollingRateHz
+    val actionRate = hcdConfig.controller.actionPollingRateHz
+    
     statusMonitor = ctx.spawn(
       StatusMonitor.apply(
         controllerInterfaceActor,
         internalStateActor,
-        pollingRateHz = 1.0
+        standbyPollingRateHz = standbyRate,
+        actionPollingRateHz = actionRate
       ),
       "StatusMonitor"
     )
     statusMonitor ! StatusMonitor.SetPolling(enabled = true)
-    log.info("StatusMonitor created - polling at 1Hz")
+    log.info(s"StatusMonitor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz")
+    
+    // Store configured polling rates in IS
+    internalStateActor ! InternalStateActor.UpdateHcdState(
+      Map(
+        "standbyPollingRateHz" -> standbyRate,
+        "actionPollingRateHz" -> actionRate,
+        "currentPollingRateHz" -> standbyRate
+      ),
+      ctx.system.ignoreRef
+    )
 
     // Phase 3b: Create CommandHandlerActor
     commandHandlerActor = ctx.spawn(
@@ -204,11 +257,39 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         controllerInterfaceActor,
         internalStateActor,
         commandResponseManager,
-        loggerFactory
+        loggerFactory,
+        statusMonitor
       ),
       "CommandHandlerActor"
     )
     log.info("CommandHandlerActor created")
+
+    // Phase 3c: Initialize InternalState with per-axis config values
+    // This ensures thresholds, mechanism types, etc. are set before any commands arrive
+    for ((axisChar, axisConfig) <- hcdConfig.axes) {
+      val axis = Axis.fromChar(axisChar.head)
+      internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+        Map(
+          "inPositionThreshold" -> axisConfig.inPositionThreshold,
+          "mechanismType" -> (axisConfig.mechanismType match {
+            case "rotating" => MechanismType.Rotating
+            case "linear"   => MechanismType.Linear
+            case _          => MechanismType.Linear
+          }),
+          "algorithm" -> (axisConfig.algorithm match {
+            case "shortest" => RotatingAlgorithm.Shortest
+            case "forward"  => RotatingAlgorithm.Forward
+            case "reverse"  => RotatingAlgorithm.Reverse
+            case _          => RotatingAlgorithm.Forward
+          }),
+          "upperLimit" -> axisConfig.upperLimit,
+          "lowerLimit" -> axisConfig.lowerLimit
+        ),
+        ctx.system.ignoreRef
+      )
+      log.info(s"Axis $axisChar config applied: threshold=${axisConfig.inPositionThreshold}, " +
+        s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}")
+    }
 
     // Phase 4: Hardware-specific initialization
     if (hcdConfig.simulate) {
@@ -219,13 +300,21 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // Hardware mode - verify embedded program and initialize
       val initFuture = for {
         _ <- verifyEmbeddedProgram()
+        // Brief pause to allow QR polling to resume and produce at least one
+        // threadStatus update before we start monitoring threads for completion.
+        // verifyEmbeddedProgram pauses QR during UL download, then resumes.
+        _ = Thread.sleep(1200) // > 1 standby poll cycle (1Hz)
         _ <- initController()
-        _ <- initializeAxes()
+        _ <- setupAxes()
+        // Read motion config AFTER setupAxes — #SetupX programs set SP, AC, DC
+        // which override the EEPROM defaults that #Init read into speed[], accel[], etc.
+        // Reading now captures the post-setup values (e.g. SPA=10000 from #SetupA).
+        _ <- readMotionConfig()
         _ = log.info("Galil HCD initialized successfully")
       } yield ()
       
       try {
-        Await.result(initFuture, 10.seconds)
+        Await.result(initFuture, 30.seconds)
       } catch {
         case ex: Exception =>
           log.error("Initialization failed", ex = ex)
@@ -386,29 +475,90 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
   
   /**
-   * Find differences between two programs
-   * 
-   * Returns a summary of what differs
+   * Produce a unified-style diff between two normalized programs.
+   *
+   * Shows all lines with markers:
+   *   lines only in expected (resource):  "- <line>"
+   *   lines only in actual (controller):  "+ <line>"
+   *   matching lines (context):           "  <line>"
+   *
+   * Also writes three files to /tmp for offline review:
+   *   embedded_expected.dmc  — normalized resource program
+   *   embedded_actual.dmc    — normalized controller program
+   *   embedded_diff.txt      — the full diff output
    */
   private def findDifferences(expected: String, actual: String): String = {
-    val expectedLines = expected.split("\n")
-    val actualLines = actual.split("\n")
-    
-    if (expectedLines.length != actualLines.length) {
-      s"Line count differs: expected ${expectedLines.length}, actual ${actualLines.length}"
-    } else {
-      // Find first differing line
-      val differingLine = expectedLines.zip(actualLines).zipWithIndex.find {
-        case ((exp, act), _) => exp != act
-      }
-      
-      differingLine match {
-        case Some(((exp, act), lineNum)) =>
-          s"First difference at line ${lineNum + 1}:\n  Expected: $exp\n  Actual:   $act"
-        case None =>
-          "Programs differ but lines are identical (unexpected)"
+    val expectedLines = expected.split("\n").toIndexedSeq
+    val actualLines = actual.split("\n").toIndexedSeq
+
+    // Simple LCS-based diff
+    val diff = computeDiff(expectedLines, actualLines)
+
+    // Write files for offline review
+    try {
+      val dir = java.nio.file.Paths.get("/tmp")
+      java.nio.file.Files.writeString(dir.resolve("embedded_expected.dmc"), expected)
+      java.nio.file.Files.writeString(dir.resolve("embedded_actual.dmc"), actual)
+      java.nio.file.Files.writeString(dir.resolve("embedded_diff.txt"), diff)
+      log.info("Diff files written to /tmp/embedded_expected.dmc, /tmp/embedded_actual.dmc, /tmp/embedded_diff.txt")
+    } catch {
+      case e: Exception =>
+        log.warn(s"Could not write diff files to /tmp: ${e.getMessage}")
+    }
+
+    // Return a summary for the log — first few differences + counts
+    val removedCount = diff.linesIterator.count(_.startsWith("- "))
+    val addedCount = diff.linesIterator.count(_.startsWith("+ "))
+    val summary = new StringBuilder()
+    summary.append(s"Line count: expected ${expectedLines.length}, actual ${actualLines.length}\n")
+    summary.append(s"Differences: $removedCount lines only in resource, $addedCount lines only in controller\n")
+    summary.append("First differences:\n")
+
+    // Show up to 10 diff lines
+    var shown = 0
+    for (line <- diff.linesIterator if shown < 10) {
+      if (line.startsWith("- ") || line.startsWith("+ ")) {
+        summary.append(s"  $line\n")
+        shown += 1
       }
     }
+    if (shown >= 10) summary.append("  ... (see /tmp/embedded_diff.txt for full diff)\n")
+
+    summary.toString()
+  }
+
+  /**
+   * Compute a unified-style diff between two line sequences using LCS.
+   * Returns the full diff text with "- ", "+ ", "  " prefixes.
+   */
+  private def computeDiff(expected: IndexedSeq[String], actual: IndexedSeq[String]): String = {
+    // Build LCS table
+    val m = expected.length
+    val n = actual.length
+    val lcs = Array.ofDim[Int](m + 1, n + 1)
+    for (i <- 1 to m; j <- 1 to n) {
+      lcs(i)(j) = if (expected(i - 1) == actual(j - 1)) lcs(i - 1)(j - 1) + 1
+                  else math.max(lcs(i - 1)(j), lcs(i)(j - 1))
+    }
+
+    // Backtrack to produce diff
+    val result = scala.collection.mutable.ArrayBuffer[String]()
+    var i = m
+    var j = n
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && expected(i - 1) == actual(j - 1)) {
+        result.prepend(s"  ${expected(i - 1)}")
+        i -= 1; j -= 1
+      } else if (j > 0 && (i == 0 || lcs(i)(j - 1) >= lcs(i - 1)(j))) {
+        result.prepend(s"+ ${actual(j - 1)}")
+        j -= 1
+      } else {
+        result.prepend(s"- ${expected(i - 1)}")
+        i -= 1
+      }
+    }
+
+    result.mkString("\n")
   }
   
   /**
@@ -433,103 +583,201 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
   
   // ========================================
-  // Phase 2: Controller Initialization
+  // Phase 4b: Controller Init and Axis Setup
   // ========================================
   
   /**
-   * Initialize controller - execute #Init program
+   * Initialize controller - execute #Init program on thread 0.
+   *
+   * #Init declares and initializes all embedded variables (arrays, defaults).
+   * Thread 0 is the general-purpose thread; threads 1-7 are reserved for
+   * per-axis operations. #Init completes quickly (<1s).
    */
   private def initController(): Future[Unit] = {
-    log.info("Executing #Init program")
+    import scala.concurrent.duration._
     
-    // TODO: Send XQ#Init command and wait for completion
-    // For now, just log
-    // Real implementation will:
-    // 1. Send command via ControllerInterfaceActor
-    // 2. Monitor thread status via StatusMonitor
-    // 3. Wait for thread completion
-    log.info("Sent XQ#Init command to controller")
-    Future.successful(())
+    val thread = 0
+    log.info(s"Executing #Init on thread $thread")
+    
+    val result = sendAndWaitForThread(s"XQ #Init,$thread", thread, timeout = 5.seconds)
+    result match {
+      case scala.util.Success(_) =>
+        log.info("#Init completed successfully")
+        Future.successful(())
+      case scala.util.Failure(e) =>
+        log.error(s"#Init failed: ${e.getMessage}")
+        Future.failed(e)
+    }
   }
-  
+
   /**
-   * Initialize all active axes
+   * Read motion configuration from controller after #Init and store in InternalState.
+   *
+   * After #Init runs, the embedded variables (speed[], accel[], decel[], hspd[], hoff[], mdelay[])
+   * are initialized from the controller's flash EEPROM defaults. Reading them now seeds the IS
+   * with the actual working values so the HCD can:
+   *   - Calculate realistic timeouts for long-running commands
+   *   - Report current configuration to Assemblies (future ICD extension)
+   *   - Operate correctly in stand-alone testing before an Assembly calls configAxis
    */
-  private def initializeAxes(): Future[Unit] = {
-    log.info("Initializing active axes")
-    
+  private def readMotionConfig(): Future[Unit] = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    log.info("Reading motion configuration from controller")
+
     val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
     val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
-    
-    log.info(s"Active axes: ${activeAxes.mkString(", ")}")
-    
-    // Initialize each axis sequentially
-    activeAxes.foldLeft(Future.successful(())) { (future, axisName) =>
-      future.flatMap { _ =>
-        initializeAxis(axisName)
+
+    activeAxes.foreach { axisName =>
+      val axis = Axis.fromChar(axisName.head)
+      val idx = axis.index
+
+      // Query all 6 embedded motion variables for this axis
+      val varNames = Seq(
+        ("speed", "maxSpeed"),
+        ("accel", "acceleration"),
+        ("decel", "deceleration"),
+        ("hspd", "indexSpeed"),
+        ("hoff", "indexOffset"),
+        ("mdelay", "motionDelay")
+      )
+
+      val stateUpdates = scala.collection.mutable.Map[String, Any]()
+
+      varNames.foreach { case (embeddedName, isFieldName) =>
+        try {
+          val queryCmd = s"MG $embeddedName[$idx]"
+          val future = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+            ref => GalilCommandMessage.SendCommand(queryCmd, ref)
+          )
+          val result = Await.result(future, 2.seconds)
+          result.error match {
+            case Some(err) =>
+              log.warn(s"Failed to read $embeddedName[$idx]: $err")
+            case None =>
+              // Parse the numeric response
+              val valueStr = result.response.trim
+              try {
+                val value = valueStr.toDouble
+                stateUpdates(isFieldName) = value
+              } catch {
+                case _: NumberFormatException =>
+                  log.warn(s"Non-numeric response for $embeddedName[$idx]: '$valueStr'")
+              }
+          }
+        } catch {
+          case ex: Exception =>
+            log.warn(s"Exception reading $embeddedName[$idx]: ${ex.getMessage}")
+        }
+      }
+
+      if (stateUpdates.nonEmpty) {
+        internalStateActor ! InternalStateActor.UpdateAxisState(
+          axis, stateUpdates.toMap, ctx.system.ignoreRef)
+        log.info(s"Axis $axisName motion config: ${stateUpdates.map { case (k, v) => s"$k=$v" }.mkString(", ")}")
       }
     }
+
+    Future.successful(())
   }
-  
+
   /**
-   * Initialize a single axis
+   * Set up all active axes on the controller.
+   *
+   * This is the motor/hardware setup phase of HCD initialization.
+   * Each #SetupX program configures motor type, feedback, amplifier limits,
+   * and safety parameters for its axis. Motors must be off before setup
+   * (MO command), and setups run in parallel on per-axis threads (A=1, B=2, etc.).
    */
-  private def initializeAxis(axisName: String): Future[Unit] = {
-    log.info(s"Initializing axis $axisName")
-    
-    hcdConfig.axes.get(axisName) match {
-      case Some(axisConfig) =>
-        for {
-          // Step 1: Execute #Setup{axis} program
-          _ <- executeSetupProgram(axisName)
-          
-          // Step 2: Apply soft limits from config
-          _ <- applySoftLimits(axisName, axisConfig)
-          
-          // Step 3: Store mechanism type and algorithm for command handlers
-          _ = storeMechanismConfig(axisName, axisConfig)
-          
-          _ = log.info(s"Axis $axisName initialized successfully")
-        } yield ()
-        
-      case None =>
-        log.error(s"No configuration found for active axis $axisName")
-        Future.failed(new RuntimeException(s"Missing config for axis $axisName"))
+  private def setupAxes(): Future[Unit] = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    log.info("Initializing active axes")
+
+    val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
+    val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
+
+    log.info(s"Active axes: ${activeAxes.mkString(", ")}")
+
+    // 1. Ensure all motors are off before setup.
+    //    Many embedded setup commands (MT, CE, TL, etc.) require the motor to be off.
+    //    This is safe on first power-up (#Init does MO), but required if re-initializing
+    //    after motors have been enabled by motion commands.
+    activeAxes.foreach { axisName =>
+      val moCmd = s"MO$axisName"
+      log.info(s"Motor off before setup: $moCmd")
+      val moFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand(moCmd, ref)
+      )
+      val moResult = Await.result(moFuture, 5.seconds)
+      moResult.error.foreach { err =>
+        throw new RuntimeException(s"$moCmd failed: $err")
+      }
     }
-  }
-  
-  /**
-   * Execute #Setup{X} program for an axis
-   */
-  private def executeSetupProgram(axisName: String): Future[Unit] = {
-    val cmd = s"XQ#Setup$axisName"
-    log.info(s"Executing: $cmd")
-    
-    // TODO: Send command and wait for completion
-    // Real implementation will:
-    // 1. Send command via ControllerInterfaceActor
-    // 2. Monitor thread status via StatusMonitor
-    // 3. Wait for thread completion
-    log.info(s"Sent $cmd command to controller")
-    Future.successful(())
-  }
-  
-  /**
-   * Apply soft limits from configuration
-   */
-  private def applySoftLimits(axisName: String, axisConfig: AxisConfig): Future[Unit] = {
-    // NOTE: Hardware rotating motors use max/min int32 limits (2147483647/-2147483648)
-    // Setting limits is not meaningful for this hardware
-    // This method is a placeholder for mechanisms that do need soft limits
-    
-    val flCmd = s"FL$axisName=${axisConfig.upperLimit}"
-    val blCmd = s"BL$axisName=${axisConfig.lowerLimit}"
-    
-    log.debug(s"Soft limits for $axisName: [${axisConfig.lowerLimit}, ${axisConfig.upperLimit}]")
-    log.debug(s"(Hardware uses max/min int32, so limits not set)")
-    
-    // TODO: For hardware that needs limits, send FL and BL commands
-    Future.successful(())
+
+    // 2. Send all #SetupX commands — each on its own thread
+    val threads = activeAxes.map { axisName =>
+      val axis = Axis.fromChar(axisName.head)
+      val thread = axis.index + 1
+      val cmd = s"XQ #Setup$axisName,$thread"
+      log.info(s"Sending: $cmd")
+
+      val cmdFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand(cmd, ref)
+      )
+      val cmdResult = Await.result(cmdFuture, 5.seconds)
+      cmdResult.error.foreach { err =>
+        throw new RuntimeException(s"$cmd failed: $err")
+      }
+      (axisName, thread)
+    }
+
+    // 3. Poll until all setup threads have completed
+    val threadMask = threads.map(_._2).foldLeft(0)((mask, t) => mask | (1 << t))
+    log.info(s"Waiting for setup threads to complete (mask=0x${threadMask.toHexString})")
+
+    val deadline = 5.seconds.fromNow
+    var completed = false
+    while (deadline.hasTimeLeft() && !completed) {
+      Thread.sleep(100)
+
+      val hcdStateFuture = internalStateActor.ask[HcdState](
+        ref => InternalStateActor.GetHcdState(ref)
+      )
+      val hcdState = Await.result(hcdStateFuture, 2.seconds)
+      val activeThreads = hcdState.threadStatus & threadMask
+
+      if (activeThreads == 0) {
+        log.info("All setup threads completed")
+        completed = true
+      } else {
+        log.debug(s"Setup threads still active: 0x${activeThreads.toHexString}")
+      }
+    }
+
+    if (completed) {
+      // 4. Apply per-axis config (mechanism type)
+      activeAxes.foreach { axisName =>
+        hcdConfig.axes.get(axisName).foreach { axisConfig =>
+          storeMechanismConfig(axisName, axisConfig)
+          log.info(s"Axis $axisName setup complete")
+        }
+      }
+      Future.successful(())
+    } else {
+      Future.failed(new RuntimeException(
+        s"Setup threads timed out (still active: 0x${threadMask.toHexString})"))
+    }
   }
   
   /**
@@ -539,6 +787,98 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // Store in axisInfo map for use by command handlers
     // This information is used to implement proper positioning behavior
     log.debug(s"Stored mechanism config for $axisName: ${axisConfig.mechanismType}, ${axisConfig.algorithm}")
+  }
+
+  // ========================================
+  // Init-time program execution helper
+  // ========================================
+
+  /**
+   * Send a command to the controller and block until the specified thread completes.
+   *
+   * Used during initialization to execute embedded programs (#Init, #SetupX) and
+   * wait for them to finish. This is different from the command-time flow which
+   * uses CommandWatcherActor — during init, we're blocking in initialize() and
+   * there's no CRM or external caller to notify.
+   *
+   * The StatusMonitor is already running and updating threadStatus in the IS actor
+   * from QR polling. We query IS.HcdState.threadStatus to check if the target
+   * thread bit has cleared.
+   *
+   * @param cmd The Galil command string (e.g. "XQ #Init,7")
+   * @param thread The thread number to monitor (0-7)
+   * @param timeout Maximum time to wait for thread completion
+   * @return Success(()) if thread completed, Failure if timeout or error
+   */
+  private def sendAndWaitForThread(
+    cmd: String,
+    thread: Int,
+    timeout: scala.concurrent.duration.FiniteDuration
+  ): scala.util.Try[Unit] = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    scala.util.Try {
+      // 1. Send the XQ command via CI actor
+      val cmdFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand(cmd, ref)
+      )
+      val cmdResult = Await.result(cmdFuture, 5.seconds)
+      cmdResult.error.foreach { err =>
+        throw new RuntimeException(s"Command '$cmd' failed: $err")
+      }
+      log.debug(s"Command sent: $cmd")
+
+      // 2. Poll IS for threadStatus until the target thread bit clears.
+      //    The thread may not even appear active on the first poll if the
+      //    program is very fast, so we also accept "never saw it active" as
+      //    completion (the program ran and finished between QR polls).
+      val deadline = timeout.fromNow
+      val pollInterval = 100 // ms
+      var sawActive = false
+      var completed = false
+
+      while (deadline.hasTimeLeft() && !completed) {
+        Thread.sleep(pollInterval)
+
+        val hcdStateFuture = internalStateActor.ask[HcdState](
+          ref => InternalStateActor.GetHcdState(ref)
+        )
+        val hcdState = Await.result(hcdStateFuture, 2.seconds)
+        val threadActive = (hcdState.threadStatus & (1 << thread)) != 0
+
+        if (threadActive) {
+          sawActive = true
+          log.debug(s"Thread $thread active (threadStatus=0x${hcdState.threadStatus.toHexString})")
+        } else if (sawActive) {
+          // Thread was active and is now released — program completed
+          log.info(s"Thread $thread completed (was active, now released)")
+          completed = true
+        } else {
+          // Thread not active yet — may not have started, or may have already finished.
+          // Give it a few polls to start before assuming it already completed.
+          // After 500ms, if we never saw it active, assume it ran and finished.
+          if (deadline.timeLeft < (timeout - 500.millis)) {
+            log.info(s"Thread $thread completed (never observed active — finished between polls)")
+            completed = true
+          }
+        }
+      }
+
+      if (!completed) {
+        // If we saw the thread active but it never cleared, that's a timeout
+        if (sawActive) {
+          throw new RuntimeException(s"Thread $thread timed out after $timeout (still active)")
+        } else {
+          // Never saw it active at all within the full timeout — assume it finished
+          log.info(s"Thread $thread completed (program likely finished very quickly)")
+        }
+      }
+    }
   }
 
   override def onShutdown(): Unit = {
@@ -567,7 +907,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         
         // Immediate commands handled by CommandHandlerActor use ICD keys directly
         if (CommandHandlerActor.isImmediate(commandName)) {
-          validateImmediateCommand(runId, setup) 
+          validateImmediateCommand(runId, setup)
+        } else if (CommandHandlerActor.isLongRunning(commandName)) {
+          validateLongRunningCommand(runId, setup)
         } else {
           // Legacy path: validate through CSWDeviceAdapter command map
           val cmdMapEntry = adapter.getCommandMapEntry(setup)
@@ -641,18 +983,115 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     }
   }
 
+  /**
+   * Validate long-running commands using ICD key definitions.
+   * Checks required parameters are present for motion commands,
+   * then validates the command is permitted in the current axis state (SDD Figure 4-2).
+   */
+  private def validateLongRunningCommand(runId: Id, setup: Setup): ValidateCommandResponse = {
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+
+    try {
+      // Phase 1: Parameter validation (required keys present)
+      val axisChoice = setup.commandName.name match {
+        case "positionAxis" =>
+          setup(PositionAxisCommand.axisKey).head
+          setup(PositionAxisCommand.targetKey)
+          setup(PositionAxisCommand.axisKey).head
+          
+        case "homeAxis" =>
+          setup(HomeAxisCommand.axisKey).head
+          
+        case "stopAxis" =>
+          setup(StopAxisCommand.axisKey).head
+          
+        case "offsetAxis" =>
+          setup(OffsetAxisCommand.axisKey).head
+          setup(OffsetAxisCommand.distanceKey)
+          setup(OffsetAxisCommand.axisKey).head
+          
+        case "selectWheel" =>
+          setup(SelectWheelCommand.axisKey).head
+          setup(SelectWheelCommand.positionKey)
+          setup(SelectWheelCommand.axisKey).head
+          
+        case "trackAxis" =>
+          setup(TrackAxisCommand.axisKey).head
+          setup(TrackAxisCommand.target1Key)
+          // target2 is optional per ICD
+          setup(TrackAxisCommand.axisKey).head
+          
+        case other =>
+          return CommandResponse.Invalid(runId,
+            CommandIssue.UnsupportedCommandIssue(s"Unknown long-running command: $other"))
+      }
+
+      // Phase 2: Axis state machine validation (SDD Figure 4-2)
+      val commandName = setup.commandName.name
+      val axis = Axis.fromChar(axisChoice.name.head)
+      
+      validateAxisState(runId, axis, commandName)
+      
+    } catch {
+      case _: NoSuchElementException =>
+        CommandResponse.Invalid(runId, CommandIssue.MissingKeyIssue("Required parameter missing"))
+    }
+  }
+
+  /**
+   * Validate that the given command is permitted in the axis's current state.
+   * Queries InternalState for the axis's axisState and checks against Figure 4-2 transitions.
+   */
+  private def validateAxisState(runId: Id, axis: Axis, commandName: String): ValidateCommandResponse = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(2.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    try {
+      val future = internalStateActor.ask[Option[AxisState]](
+        ref => InternalStateActor.GetAxisState(axis, ref)
+      )
+      val maybeState = Await.result(future, askTimeout.duration)
+
+      maybeState match {
+        case Some(axisState) =>
+          axisState.axisState.validateCommand(commandName) match {
+            case None =>
+              // Transition is valid
+              CommandResponse.Accepted(runId)
+            case Some(reason) =>
+              log.warn(s"Command rejected: $commandName on axis $axis — $reason")
+              CommandResponse.Invalid(runId, CommandIssue.OtherIssue(reason))
+          }
+        case None =>
+          // Axis not initialized in IS — reject (axis should be initialized during HCD init)
+          CommandResponse.Invalid(runId,
+            CommandIssue.OtherIssue(s"Axis $axis not initialized"))
+      }
+    } catch {
+      case ex: Exception =>
+        log.error(s"Failed to query axis state for validation: ${ex.getMessage}")
+        // On failure to query state, allow the command through rather than blocking
+        // (the CommandHandler will catch errors during execution)
+        CommandResponse.Accepted(runId)
+    }
+  }
+
   override def onSubmit(runId: Id, controlCommand: ControlCommand): SubmitResponse = {
     log.debug(s"onSubmit called: $controlCommand")
     controlCommand match {
       case setup: Setup =>
         val commandName = setup.commandName.name
         
-        // Route immediate commands to CommandHandlerActor
-        if (CommandHandlerActor.isImmediate(commandName)) {
+        // Route immediate and long-running commands to CommandHandlerActor
+        if (CommandHandlerActor.isImmediate(commandName) || CommandHandlerActor.isLongRunning(commandName)) {
           commandHandlerActor ! CommandHandlerActor.HandleCommand(setup, runId, setup.maybeObsId)
           CommandResponse.Started(runId)
         } else {
-          // Existing path for non-immediate commands (file ops, data record, etc.)
+          // Legacy path for non-immediate commands (file ops, data record, etc.)
           val cmdMapEntry = adapter.getCommandMapEntry(setup)
           val cmdString   = adapter.validateSetup(setup, cmdMapEntry.get)
         

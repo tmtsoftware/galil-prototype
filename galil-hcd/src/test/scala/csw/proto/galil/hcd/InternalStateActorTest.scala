@@ -12,11 +12,13 @@ import scala.concurrent.duration._
  * Tests for Internal State Actor and State Model.
  * 
  * Validates:
- * - State model update logic
- * - InPosition calculation
- * - Actor state management
+ * - State model update logic (AxisState + AxisCmdState)
+ * - InPosition calculation and mirroring to AxisCmdState
+ * - Actor state management for both operational and command channels
  * - Query operations
- * - Subscription mechanism
+ * - Subscription mechanism (StateChanged for CSP, CmdStateChanged for CommandWatchers)
+ * - Named switch fields
+ * - Thread status tracking
  */
 class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   
@@ -26,7 +28,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     testKit.shutdownTestKit()
   
   // ========================================
-  // State Model Tests
+  // State Model Tests — AxisState
   // ========================================
   
   test("AxisState should calculate inPosition correctly") {
@@ -51,14 +53,12 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val updated = initial.update(Map(
       "position" -> 123.45,
       "velocity" -> 10.0,
-      "axisState" -> AxisStateEnum.Moving,
-      "activeCommand" -> ActiveCommand.Move
+      "axisState" -> AxisStateEnum.Moving
     ))
     
     updated.position should be (123.45)
     updated.velocity should be (10.0)
     updated.axisState should be (AxisStateEnum.Moving)
-    updated.activeCommand should be (Some(ActiveCommand.Move))
   }
   
   test("AxisState.update should recalculate inPosition when position changes") {
@@ -75,7 +75,207 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     updated.inPosition should be (true)
   }
   
-  test("HcdState should initialize axes correctly") {
+  test("AxisState should have correct defaults") {
+    val state = AxisState()
+    
+    state.axisState shouldBe AxisStateEnum.Lost
+    state.axisError shouldBe ""
+    state.position shouldBe 0.0
+    state.velocity shouldBe 0.0
+    state.inPosition shouldBe false
+    // Named switch defaults
+    state.forwardLimit shouldBe false
+    state.reverseLimit shouldBe false
+    state.homeSwitch shouldBe false
+    state.isStepper shouldBe false
+    state.negativeDirection shouldBe false
+    state.motorOff shouldBe true   // Default: amplifier off
+    state.mechanismType shouldBe MechanismType.Linear
+    // Motion config defaults (None until configAxis or controller query)
+    state.maxSpeed shouldBe None
+    state.acceleration shouldBe None
+    state.deceleration shouldBe None
+    state.indexOffset shouldBe None
+    state.indexSpeed shouldBe None
+    state.motionDelay shouldBe None
+  }
+
+  test("AxisState.update should handle named switch fields") {
+    val updated = AxisState().update(Map(
+      "forwardLimit" -> true,
+      "reverseLimit" -> true,
+      "homeSwitch" -> true,
+      "motorOff" -> false
+    ))
+    
+    updated.forwardLimit shouldBe true
+    updated.reverseLimit shouldBe true
+    updated.homeSwitch shouldBe true
+    updated.motorOff shouldBe false
+    // Unchanged fields retain defaults
+    updated.isStepper shouldBe false
+    updated.negativeDirection shouldBe false
+  }
+
+  test("AxisState should have correct motion config defaults (all None)") {
+    val state = AxisState()
+
+    state.maxSpeed shouldBe None
+    state.acceleration shouldBe None
+    state.deceleration shouldBe None
+    state.indexOffset shouldBe None
+    state.indexSpeed shouldBe None
+    state.motionDelay shouldBe None
+  }
+
+  test("AxisState.update should handle motion config fields") {
+    val updated = AxisState().update(Map(
+      "maxSpeed" -> 50000.0,
+      "acceleration" -> 100000.0,
+      "deceleration" -> 100000.0,
+      "indexOffset" -> 10.0,
+      "indexSpeed" -> 5000.0,
+      "motionDelay" -> 100.0
+    ))
+
+    updated.maxSpeed shouldBe Some(50000.0)
+    updated.acceleration shouldBe Some(100000.0)
+    updated.deceleration shouldBe Some(100000.0)
+    updated.indexOffset shouldBe Some(10.0)
+    updated.indexSpeed shouldBe Some(5000.0)
+    updated.motionDelay shouldBe Some(100.0)
+  }
+
+  test("AxisState.update should allow partial motion config updates") {
+    // Only set maxSpeed — others remain None
+    val partial = AxisState().update(Map("maxSpeed" -> 25000.0))
+    partial.maxSpeed shouldBe Some(25000.0)
+    partial.acceleration shouldBe None
+    partial.deceleration shouldBe None
+
+    // Update existing — maxSpeed changes, acceleration added
+    val updated = partial.update(Map(
+      "maxSpeed" -> 30000.0,
+      "acceleration" -> 80000.0
+    ))
+    updated.maxSpeed shouldBe Some(30000.0)
+    updated.acceleration shouldBe Some(80000.0)
+    updated.deceleration shouldBe None
+  }
+
+  // ========================================
+  // State Model Tests — AxisCmdState
+  // ========================================
+  // State Machine Tests — AxisStateEnum (SDD Figure 4-2)
+  // ========================================
+
+  test("Lost state should only accept homeAxis") {
+    import AxisStateEnum._
+    Lost.validateCommand("homeAxis") shouldBe None
+    Lost.validateCommand("positionAxis") shouldBe defined
+    Lost.validateCommand("offsetAxis") shouldBe defined
+    Lost.validateCommand("selectWheel") shouldBe defined
+    Lost.validateCommand("trackAxis") shouldBe defined
+    Lost.validateCommand("stopAxis") shouldBe defined
+  }
+
+  test("Homing state should only accept stopAxis") {
+    import AxisStateEnum._
+    Homing.validateCommand("stopAxis") shouldBe None
+    Homing.validateCommand("homeAxis") shouldBe defined
+    Homing.validateCommand("positionAxis") shouldBe defined
+    Homing.validateCommand("trackAxis") shouldBe defined
+  }
+
+  test("Idle state should accept homeAxis, motion commands, and trackAxis") {
+    import AxisStateEnum._
+    Idle.validateCommand("homeAxis") shouldBe None
+    Idle.validateCommand("positionAxis") shouldBe None
+    Idle.validateCommand("offsetAxis") shouldBe None
+    Idle.validateCommand("selectWheel") shouldBe None
+    Idle.validateCommand("trackAxis") shouldBe None
+    Idle.validateCommand("stopAxis") shouldBe defined  // nothing to stop
+  }
+
+  test("Moving state should accept stopAxis only") {
+    import AxisStateEnum._
+    Moving.validateCommand("stopAxis") shouldBe None
+    Moving.validateCommand("homeAxis") shouldBe defined
+    Moving.validateCommand("positionAxis") shouldBe defined
+    Moving.validateCommand("trackAxis") shouldBe defined
+  }
+
+  test("Tracking state should accept stopAxis and trackAxis (re-issue)") {
+    import AxisStateEnum._
+    Tracking.validateCommand("stopAxis") shouldBe None
+    Tracking.validateCommand("trackAxis") shouldBe None
+    Tracking.validateCommand("homeAxis") shouldBe defined
+    Tracking.validateCommand("positionAxis") shouldBe defined
+  }
+
+  test("Error state should only accept homeAxis (recovery)") {
+    import AxisStateEnum._
+    Error.validateCommand("homeAxis") shouldBe None
+    Error.validateCommand("positionAxis") shouldBe defined
+    Error.validateCommand("stopAxis") shouldBe defined
+    Error.validateCommand("trackAxis") shouldBe defined
+  }
+
+  test("stopAxis completion state depends on prior state (SDD Figure 4-2)") {
+    import AxisStateEnum._
+    Homing.stopCompletionState shouldBe Lost      // interrupted home = not homed
+    Moving.stopCompletionState shouldBe Idle       // interrupted move = still homed
+    Tracking.stopCompletionState shouldBe Idle     // stopped tracking = idle
+  }
+
+  test("validateCommand rejection message should include state and command") {
+    val result = AxisStateEnum.Lost.validateCommand("positionAxis")
+    result shouldBe defined
+    result.get should include("Lost")
+    result.get should include("positionAxis")
+  }
+
+  // ========================================
+  // State Model Tests — AxisCmdState
+
+  test("AxisCmdState should have correct defaults") {
+    val cmd = AxisCmdState()
+    
+    cmd.activeThread shouldBe 0
+    cmd.axisErrorMsg shouldBe ""
+    cmd.inPosition shouldBe false
+    cmd.moving shouldBe false
+    cmd.activeCommand shouldBe None
+    cmd.commandHalted shouldBe false
+    cmd.stopCode shouldBe 0
+  }
+
+  test("AxisCmdState.update should modify published and internal fields") {
+    val updated = AxisCmdState().update(Map(
+      "activeThread" -> 3,
+      "moving" -> true,
+      "activeCommand" -> ActiveCommand.Move,
+      "stopCode" -> 1
+    ))
+    
+    updated.activeThread shouldBe 3
+    updated.moving shouldBe true
+    updated.activeCommand shouldBe Some(ActiveCommand.Move)
+    updated.stopCode shouldBe 1
+  }
+
+  test("AxisCmdState.update should support clearActiveCommand") {
+    val withCommand = AxisCmdState(activeCommand = Some(ActiveCommand.Home))
+    val cleared = withCommand.update(Map("clearActiveCommand" -> true))
+    
+    cleared.activeCommand shouldBe None
+  }
+
+  // ========================================
+  // State Model Tests — HcdState
+  // ========================================
+
+  test("HcdState should initialize axes with both state structures") {
     val state = HcdState()
     
     val withAxisA = state.initializeAxis(Axis.A, MechanismType.Linear)
@@ -83,6 +283,9 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     withAxisA.activeAxes(Axis.A.index) should be (true)
     withAxisA.getAxis(Axis.A) should not be (None)
     withAxisA.getAxis(Axis.A).get.mechanismType should be (MechanismType.Linear)
+    // Should also have AxisCmdState
+    withAxisA.getCmdState(Axis.A) should not be (None)
+    withAxisA.getCmdState(Axis.A).get.activeThread shouldBe 0
   }
   
   test("HcdState.updateAxis should update specific axis") {
@@ -113,7 +316,32 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     updated.version should be (12345)
     updated.debug should be (true)
   }
-  
+
+  test("HcdState.updateCmdState should update axis command state") {
+    val state = HcdState().initializeAxis(Axis.B)
+    
+    val updated = state.updateCmdState(Axis.B, Map(
+      "activeThread" -> 2,
+      "moving" -> true,
+      "activeCommand" -> ActiveCommand.Move
+    ))
+    
+    val cmdB = updated.getCmdState(Axis.B).get
+    cmdB.activeThread shouldBe 2
+    cmdB.moving shouldBe true
+    cmdB.activeCommand shouldBe Some(ActiveCommand.Move)
+  }
+
+  test("HcdState.isThreadActive should decode threadStatus bitmask") {
+    val state = HcdState(threadStatus = 0x06)  // bits 1 and 2 set (threads 1 and 2)
+    
+    state.isThreadActive(0) shouldBe false
+    state.isThreadActive(1) shouldBe true
+    state.isThreadActive(2) shouldBe true
+    state.isThreadActive(3) shouldBe false
+    state.isThreadActive(7) shouldBe false
+  }
+
   // ========================================
   // Actor Tests - Basic Operations
   // ========================================
@@ -177,9 +405,32 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val result = probe.receiveMessage()
     result should be (None)
   }
-  
+
+  test("InternalStateActor should handle axis cmd state updates") {
+    val initialState = HcdState().initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A,
+      Map("activeThread" -> 1, "moving" -> true, "activeCommand" -> ActiveCommand.Move),
+      probe.ref
+    )
+    probe.receiveMessage().success shouldBe true
+    
+    // Verify
+    val queryProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    actor ! InternalStateActor.GetAxisCmdState(Axis.A, queryProbe.ref)
+    
+    val cmdState = queryProbe.receiveMessage()
+    cmdState should not be None
+    cmdState.get.activeThread shouldBe 1
+    cmdState.get.moving shouldBe true
+    cmdState.get.activeCommand shouldBe Some(ActiveCommand.Move)
+  }
+
   // ========================================
-  // Subscription Tests
+  // Subscription Tests — StateChanged (for CSP)
   // ========================================
   
   test("InternalStateActor should notify subscribers on HCD state changes") {
@@ -286,6 +537,178 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
   }
   
   // ========================================
+  // Subscription Tests — CmdStateChanged (for CommandWatchers)
+  // ========================================
+
+  test("InternalStateActor should notify cmd state subscribers on axis cmd changes") {
+    val initialState = HcdState().initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe to Axis A command state
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    
+    // Update cmd state for Axis A
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A,
+      Map("activeThread" -> 1, "moving" -> true),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Should receive cmd state notification
+    val notification = cmdProbe.receiveMessage()
+    notification.axis shouldBe Axis.A
+    notification.cmdState.activeThread shouldBe 1
+    notification.cmdState.moving shouldBe true
+    notification.changedFields should contain ("activeThread")
+    notification.changedFields should contain ("moving")
+  }
+
+  test("InternalStateActor cmd subscriber should NOT be notified by axis state updates") {
+    val initialState = HcdState().initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe to cmd state only
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    
+    // Update operational state (position, velocity) — NOT cmd state
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A,
+      Map("position" -> 500.0, "velocity" -> 10.0),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Cmd subscriber should NOT be notified (position doesn't affect cmd state)
+    cmdProbe.expectNoMessage(200.millis)
+  }
+
+  test("InternalStateActor cmd subscriber for axis A should NOT see axis B changes") {
+    val initialState = HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbeA = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe to Axis A cmd state only
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbeA.ref)
+    
+    // Update Axis B cmd state
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.B,
+      Map("activeThread" -> 2, "moving" -> true),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Axis A subscriber should NOT be notified
+    cmdProbeA.expectNoMessage(200.millis)
+  }
+
+  test("InternalStateActor should not notify cmd subscribers when values unchanged") {
+    val initialState = HcdState().initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    
+    // Send same default values (nothing actually changes)
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A,
+      Map("activeThread" -> 0, "moving" -> false),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Should NOT notify (values didn't actually change)
+    cmdProbe.expectNoMessage(200.millis)
+  }
+
+  test("InternalStateActor should support UnsubscribeCmdState") {
+    val initialState = HcdState().initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe then unsubscribe
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    actor ! InternalStateActor.UnsubscribeCmdState(cmdProbe.ref)
+    
+    // Update cmd state
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A,
+      Map("activeThread" -> 1),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Should NOT be notified
+    cmdProbe.expectNoMessage(200.millis)
+  }
+
+  // ========================================
+  // InPosition Mirroring Tests
+  // ========================================
+
+  test("InternalStateActor should mirror inPosition from AxisState to AxisCmdState") {
+    // Set up axis with demand far from position (inPosition = false)
+    val initialState = HcdState().initializeAxis(Axis.A)
+      .updateAxis(Axis.A, Map("demand" -> 1000.0, "inPositionThreshold" -> 1.0))
+    
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe to cmd state
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    
+    // Update position to reach demand (triggers inPosition = true)
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A,
+      Map("position" -> 1000.5),  // Within threshold of 1.0
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Cmd subscriber SHOULD be notified because inPosition was mirrored
+    val notification = cmdProbe.receiveMessage()
+    notification.axis shouldBe Axis.A
+    notification.cmdState.inPosition shouldBe true
+    notification.changedFields should contain ("inPosition")
+  }
+
+  test("InternalStateActor should not mirror inPosition when it does not change") {
+    // Start with position == demand (inPosition already true)
+    val initialState = HcdState().initializeAxis(Axis.A)
+      .updateAxis(Axis.A, Map("position" -> 100.0, "demand" -> 100.0, "inPositionThreshold" -> 1.0))
+    // Also need cmd state inPosition to match
+      .updateCmdState(Axis.A, Map("inPosition" -> true))
+    
+    val actor = testKit.spawn(InternalStateActor(initialState))
+    val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    
+    // Subscribe
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
+    
+    // Update position but still in range (inPosition stays true)
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A,
+      Map("position" -> 100.5),  // Still within threshold
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // Should NOT notify cmd subscriber (inPosition didn't change)
+    cmdProbe.expectNoMessage(200.millis)
+  }
+
+  // ========================================
   // Integration Tests
   // ========================================
   
@@ -314,66 +737,85 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     subscriber3.receiveMessage().hcdState.simulation should be (true)
   }
   
-  test("InternalStateActor should track command completion scenario") {
-    // Simulate a command completion workflow
-    // Initialize with demand != position so inPosition starts as false
+  test("InternalStateActor should track command completion scenario using dual channels") {
+    // Simulate a positionAxis command completion workflow.
+    // The CommandHandler sets demand and starts motion;
+    // StatusMonitor updates position/velocity (AxisState) and moving/thread (AxisCmdState);
+    // CommandWatcher subscribes to CmdState and evaluates completion mask.
     val initialState = HcdState()
       .initializeAxis(Axis.D)
-      .updateAxis(Axis.D, Map("demand" -> 100.0))  // position=0, demand=100, so inPosition=false
+      .updateAxis(Axis.D, Map("demand" -> 100.0, "inPositionThreshold" -> 1.0))
     
     val actor = testKit.spawn(InternalStateActor(initialState))
     
-    val commandWatcher = testKit.createTestProbe[InternalStateActor.StateChanged]()
+    val stateWatcher = testKit.createTestProbe[InternalStateActor.StateChanged]()
+    val cmdWatcher = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     
-    // CommandWatcher subscribes to Axis D with inPosition filter
-    actor ! InternalStateActor.Subscribe(
-      commandWatcher.ref,
-      Some(InternalStateActor.InPositionFilter)
-    )
+    // CSP subscribes to all state changes
+    actor ! InternalStateActor.Subscribe(stateWatcher.ref)
+    // CommandWatcher subscribes to Axis D cmd state
+    actor ! InternalStateActor.SubscribeCmdState(Axis.D, cmdWatcher.ref)
     
-    // 1. Command starts - set demand and activeCommand
-    actor ! InternalStateActor.UpdateAxisState(
+    // 1. CommandHandler starts command — sets cmd state
+    actor ! InternalStateActor.UpdateAxisCmdState(
       Axis.D,
       Map(
-        "demand" -> 500.0,
-        "activeCommand" -> ActiveCommand.Move,
-        "thread" -> 3,
-        "axisState" -> AxisStateEnum.Moving
+        "activeThread" -> 4,
+        "moving" -> true,
+        "activeCommand" -> ActiveCommand.Move
       ),
       updateProbe.ref
     )
     updateProbe.receiveMessage()
     
-    // CommandWatcher should NOT be notified (inPosition still false)
-    commandWatcher.expectNoMessage(200.millis)
+    // CommandWatcher should be notified of command start
+    val startNotification = cmdWatcher.receiveMessage()
+    startNotification.cmdState.activeThread shouldBe 4
+    startNotification.cmdState.moving shouldBe true
     
-    // 2. Motor is moving - position updates but not at target
+    // 2. StatusMonitor polls — position updates (high frequency AxisState updates)
     actor ! InternalStateActor.UpdateAxisState(
       Axis.D,
-      Map("position" -> 250.0),
+      Map("position" -> 50.0, "velocity" -> 100.0),
       updateProbe.ref
     )
     updateProbe.receiveMessage()
     
-    // Still not in position
-    commandWatcher.expectNoMessage(200.millis)
+    // CSP gets notified (position changed)
+    stateWatcher.receiveMessage().changedFields should contain ("position")
+    // CommandWatcher should NOT be notified (position doesn't trigger cmd state)
+    cmdWatcher.expectNoMessage(200.millis)
     
-    // 3. Motor reaches target
+    // 3. Motor reaches target — position update triggers inPosition
     actor ! InternalStateActor.UpdateAxisState(
       Axis.D,
-      Map(
-        "position" -> 500.0,  // This will trigger inPosition = true
-        "velocity" -> 0.0,
-        "axisState" -> AxisStateEnum.Idle
-      ),
+      Map("position" -> 100.5),  // Within threshold of 1.0 from demand=100.0
       updateProbe.ref
     )
     updateProbe.receiveMessage()
     
-    // CommandWatcher SHOULD be notified (inPosition changed from false to true)
-    val notification = commandWatcher.receiveMessage()
-    notification.changedFields should contain ("inPosition")
-    notification.hcdState.getAxis(Axis.D).get.inPosition should be (true)
-    notification.hcdState.getAxis(Axis.D).get.position should be (500.0)
+    // CSP gets notified
+    stateWatcher.receiveMessage()
+    // CommandWatcher SHOULD be notified because inPosition was mirrored
+    val inPosNotification = cmdWatcher.receiveMessage()
+    inPosNotification.cmdState.inPosition shouldBe true
+    inPosNotification.changedFields should contain ("inPosition")
+    
+    // 4. StatusMonitor detects thread stopped and motor not moving
+    actor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.D,
+      Map("activeThread" -> 0, "moving" -> false, "stopCode" -> 1),
+      updateProbe.ref
+    )
+    updateProbe.receiveMessage()
+    
+    // CommandWatcher should get final notification — can now evaluate completion mask:
+    //   activeThread==0, inPosition==true, axisErrorMsg=="", moving==false  → Completed!
+    val completionNotification = cmdWatcher.receiveMessage()
+    completionNotification.cmdState.activeThread shouldBe 0
+    completionNotification.cmdState.moving shouldBe false
+    completionNotification.cmdState.inPosition shouldBe true  // Preserved from mirror
+    completionNotification.cmdState.axisErrorMsg shouldBe ""
+    completionNotification.cmdState.stopCode shouldBe 1  // Normal decel stop
   }

@@ -27,12 +27,16 @@ case class GalilHcdConfig(
  *                        Relative to programs.resources directory
  *                        File contains #Version program that returns version number in _TM1
  *                        Example: "galil_embedded_v1.dmc"
+ * @param standbyPollingRateHz QR polling rate when all axes are idle (Hz)
+ * @param actionPollingRateHz QR polling rate when any axis is active (Hz)
  */
 case class ControllerConfig(
   host: Seq[Int],
   port: Int,
   id: Int,
-  embeddedProgram: String
+  embeddedProgram: String,
+  standbyPollingRateHz: Double = 1.0,
+  actionPollingRateHz: Double = 10.0
 ) {
   /** Convert host array to IP string (e.g., "192.168.1.100") */
   def hostString: String = host.mkString(".")
@@ -92,7 +96,11 @@ object GalilHcdConfig {
       host = controllerConfig.getIntList("host").asScala.map(_.toInt).toSeq,
       port = controllerConfig.getInt("port"),
       id = controllerConfig.getInt("id"),
-      embeddedProgram = controllerConfig.getString("embeddedProgram")
+      embeddedProgram = controllerConfig.getString("embeddedProgram"),
+      standbyPollingRateHz = if controllerConfig.hasPath("standbyPollingRateHz")
+        then controllerConfig.getDouble("standbyPollingRateHz") else 1.0,
+      actionPollingRateHz = if controllerConfig.hasPath("actionPollingRateHz")
+        then controllerConfig.getDouble("actionPollingRateHz") else 10.0
     )
     
     // Parse simulate flag

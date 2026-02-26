@@ -78,8 +78,6 @@ CN 1;    'All Limit Switches active high
 MO;      'All motors OFF - necessary or some commands fail
 ' create arrays, variables
 DM ae[8]
-DM cmd[8]
-DM cur[8]
 DM dmd[8]
 DM accel[8]
 DM decel[8]
@@ -193,6 +191,7 @@ REM LCA=2;   'Waits for 0 samples after a move is completed, then provides 0% cu
 LDA=3;       'Both limit switches disabled
 AGA=1;       'D4140 stepper amplifier - 0.85 A phase current
 SPA=10000;   'Value of jog speed in encoder counts/second
+speed[0]=10000; 'Sync embedded speed array 
 STA;         'SAFETY: Stop Axis A
 MOA;         'SAFETY: Stop Motor A
 MG "Axis A setup done"
@@ -207,6 +206,7 @@ REM LCB=2;  'Waits for 0 samples after a move is completed, then provides 0% cur
 LDB=3;      'Both limit switches disabled
 AGB=1;      'D4140 stepper amplifier - 0.85 A phase current
 SPB=10000;  'Value of jog speed in encoder counts/second
+speed[1]=10000; 'Sync embedded speed array 
 STB;        'SAFETY: Stop Axis F
 MOB;        'SAFETY: Stop Motor F
 MG "Axis B setup done"

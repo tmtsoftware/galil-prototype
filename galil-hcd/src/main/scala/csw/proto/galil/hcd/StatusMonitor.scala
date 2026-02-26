@@ -69,6 +69,13 @@ object StatusMonitor:
   case class GetPollingStatus(replyTo: ActorRef[PollingStatus]) extends Command
   
   /**
+   * Internal: axis state changed notification from InternalStateActor.
+   * Used to detect when axes transition between active/standby states
+   * and adjust polling rate accordingly.
+   */
+  private[hcd] case class AxisStateChanged(stateChanged: InternalStateActor.StateChanged) extends Command
+  
+  /**
    * Response to GetPollingStatus
    */
   case class PollingStatus(
@@ -84,16 +91,19 @@ object StatusMonitor:
    * 
    * @param controllerInterface Actor to request QR data from
    * @param internalState Actor to update with parsed data
-   * @param pollingRateHz Polling frequency in Hz (default: 10Hz = 100ms period)
+   * @param standbyPollingRateHz Polling rate when all axes idle (default: 1Hz)
+   * @param actionPollingRateHz Polling rate when any axis active (default: 10Hz)
    */
   def apply(
     controllerInterface: ActorRef[GalilCommandMessage],
     internalState: ActorRef[InternalStateActor.Command],
-    pollingRateHz: Double = 10.0
+    standbyPollingRateHz: Double = 1.0,
+    actionPollingRateHz: Double = 10.0
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
-        new StatusMonitor(context, timers, controllerInterface, internalState, pollingRateHz)
+        new StatusMonitor(context, timers, controllerInterface, internalState,
+          standbyPollingRateHz, actionPollingRateHz)
       }
     }
 
@@ -105,22 +115,36 @@ class StatusMonitor(
   timers: TimerScheduler[StatusMonitor.Command],
   controllerInterface: ActorRef[GalilCommandMessage],
   internalState: ActorRef[InternalStateActor.Command],
-  initialPollingRateHz: Double
+  standbyPollingRateHz: Double,
+  actionPollingRateHz: Double
 ) extends AbstractBehavior[StatusMonitor.Command](context):
   
   import StatusMonitor._
   
+  // Active axis states that require action polling rate
+  private val ActiveAxisStates: Set[AxisStateEnum] =
+    Set(AxisStateEnum.Homing, AxisStateEnum.Moving, AxisStateEnum.Tracking)
+  
   // Current state (mutable, but only accessed within actor)
   private var pollingEnabled: Boolean = true
-  private var pollingPaused: Boolean = false  // NEW: Pause for file operations
-  private var pollingRateHz: Double = initialPollingRateHz
+  private var pollingPaused: Boolean = false  // Pause for file operations
+  private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
   
-  // Start periodic polling
+  // Subscribe to IS axisState changes via message adapter
+  private val stateChangedAdapter = context.messageAdapter[InternalStateActor.StateChanged](
+    sc => AxisStateChanged(sc)
+  )
+  internalState ! InternalStateActor.Subscribe(
+    stateChangedAdapter,
+    Some(InternalStateActor.FieldFilter(Set("axisState")))
+  )
+  
+  // Start periodic polling at standby rate
   startPolling()
   
-  context.log.info(s"StatusMonitor started with polling rate: ${pollingRateHz}Hz (${pollingPeriod.toMillis}ms)")
+  context.log.info(s"StatusMonitor started - standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
   override def onMessage(msg: Command): Behavior[Command] =
     msg match
@@ -148,6 +172,9 @@ class StatusMonitor(
       case GetPollingStatus(replyTo) =>
         replyTo ! PollingStatus(pollingEnabled, pollingRateHz, lastPollTime, errorCount, pollingPaused)
         Behaviors.same
+      
+      case AxisStateChanged(stateChanged) =>
+        handleAxisStateChanged(stateChanged)
   
   /**
    * Handle periodic poll trigger
@@ -183,12 +210,12 @@ class StatusMonitor(
       
       context.log.debug(s"Received QR data, sample: ${dataRecord.generalState.sampleNumber}")
       
-      // Update HCD-level state
-      updateHcdState(dataRecord.generalState)
+      // Update HCD-level state (including thread status → per-axis activeThread)
+      val activeAxisChars = dataRecord.header.blocksPresent.filter(axis => DataRecord.axes.contains(axis))
+      updateHcdState(dataRecord.generalState, activeAxisChars)
       
       // Update each active axis
-      dataRecord.header.blocksPresent
-        .filter(axis => DataRecord.axes.contains(axis))
+      activeAxisChars
         .zip(dataRecord.axisStatuses)
         .foreach { case (axisChar, axisStatus) =>
           updateAxisState(axisChar, axisStatus)
@@ -268,42 +295,230 @@ class StatusMonitor(
     Behaviors.same
   
   /**
-   * Update HCD-level state from GeneralState
+   * Handle axis state change notification from InternalStateActor.
+   * 
+   * Adapts polling rate based on aggregate axis activity:
+   *   - If ANY axis is in an active state (Homing, Moving, Tracking) → action rate
+   *   - If ALL axes are in standby states (Lost, Idle, Error) → standby rate
+   * 
+   * Also updates currentPollingRateHz in IS so it's visible to the rest of the system.
    */
-  private def updateHcdState(generalState: GeneralState): Unit =
+  private def handleAxisStateChanged(stateChanged: InternalStateActor.StateChanged): Behavior[Command] =
+    val hcdState = stateChanged.hcdState
+    val anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
+    val targetRate = if anyAxisActive then actionPollingRateHz else standbyPollingRateHz
+    
+    if targetRate != pollingRateHz then
+      val reason = if anyAxisActive then
+        val activeAxes = hcdState.axes.collect {
+          case (axis, ax) if ActiveAxisStates.contains(ax.axisState) =>
+            s"${axis}:${ax.axisState}"
+        }.mkString(", ")
+        s"active axes [$activeAxes]"
+      else
+        "all axes standby"
+      
+      pollingRateHz = targetRate
+      context.log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
+      if pollingEnabled && !pollingPaused then
+        stopPolling()
+        startPolling()
+      
+      // Update IS with current rate
+      internalState ! InternalStateActor.UpdateHcdState(
+        Map("currentPollingRateHz" -> pollingRateHz),
+        context.system.ignoreRef
+      )
+    
+    Behaviors.same
+  
+  /**
+   * Update HCD-level state from GeneralState.
+   * Also decodes threadStatus bitmask and updates per-axis activeThread in AxisCmdState.
+   */
+  private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
+    val threadStatusByte = generalState.threadStatus & 0xFF
+    
     val updates = Map(
       "digitalInputs" -> generalState.inputs.map(_ != 0),
       "digitalOutputs" -> generalState.outputs.map(_ != 0),
+      "threadStatus" -> threadStatusByte,
       "lastPollingTime" -> Instant.ofEpochMilli(System.currentTimeMillis())
     )
     
-    // Send update (fire and forget - we don't wait for response)
+    // Send HCD-level update
     internalState ! InternalStateActor.UpdateHcdState(updates, context.system.ignoreRef)
+    
+    // Decode threadStatus and update per-axis activeThread in AxisCmdState.
+    // Simple mapping: axis index + 1 = thread number (A->1, B->2, ..., G->7)
+    // Thread 0 is reserved for error handling.
+    activeAxisChars.foreach { axisChar =>
+      if DataRecord.axes.contains(axisChar) then
+        val axis = Axis.fromChar(axisChar)
+        val thread = axis.index + 1  // A=1, B=2, ... G=7
+        val threadActive = (threadStatusByte & (1 << thread)) != 0
+        val activeThread = if threadActive then thread else 0
+        
+        internalState ! InternalStateActor.UpdateAxisCmdState(
+          axis,
+          Map("activeThread" -> activeThread),
+          context.system.ignoreRef
+        )
+    }
   
   /**
-   * Update axis state from GalilAxisStatus
+   * Update axis state from GalilAxisStatus.
+   * Sends operational state (position, velocity, switches) to AxisState
+   * and command-relevant state (moving, stopCode) to AxisCmdState.
    */
   private def updateAxisState(axisChar: Char, axisStatus: GalilAxisStatus): Unit =
     // Map axis character to Axis enum
     val axis = Axis.fromChar(axisChar)
     
-    // Build update map with motor data
-    val updates = Map(
-      "position" -> axisStatus.motorPosition.toDouble,
-      "velocity" -> axisStatus.velocity.toDouble,
+    // Parse both the status word and switches byte from QR DataRecord
+    val status = parseAxisStatus(axisStatus.status)
+    val switches = parseSwitches(axisStatus.switches)
+    
+    // Stepper mode is reported by the controller in switches byte bit 0.
+    // For stepper motors (no encoder), position comes from auxiliaryPosition (TD / step count).
+    // For servo motors, position comes from motorPosition (TP / encoder count).
+    val isStepper = switches.stepperMode
+    val position = if isStepper then
+      axisStatus.auxiliaryPosition.toDouble
+    else
+      axisStatus.motorPosition.toDouble
+    
+    // Velocity in QR DataRecord is 64x the TV command value (per Galil docs)
+    val velocity = axisStatus.velocity.toDouble / 64.0
+    
+    // Build operational state update (position, velocity, named switches)
+    val axisUpdates = Map(
+      "position" -> position,
+      "velocity" -> velocity,
       "positionError" -> axisStatus.positionError.toDouble,
-      "switches" -> parseSwitches(axisStatus.switches)
-      // TODO: Map other fields as needed
+      "forwardLimit" -> switches.forwardLimit,
+      "reverseLimit" -> switches.reverseLimit,
+      "homeSwitch" -> switches.homeInput,
+      "isStepper" -> isStepper,
+      "negativeDirection" -> status.negativeDirection,
+      "motorOff" -> status.motorOff
     )
     
-    // Send update (fire and forget)
-    internalState ! InternalStateActor.UpdateAxisState(axis, updates, context.system.ignoreRef)
+    // Send operational state update
+    internalState ! InternalStateActor.UpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
+    
+    // Build command state update
+    // moving: bit 15 of status word ("Move in Progress") — reliable for ALL motor types
+    // Note: inPosition is mirrored automatically by InternalStateActor
+    val cmdUpdates = Map[String, Any](
+      "moving" -> status.moveInProgress,
+      "stopCode" -> (axisStatus.stopCode & 0xFF)  // unsigned byte
+    )
+    
+    // Send command state update
+    internalState ! InternalStateActor.UpdateAxisCmdState(axis, cmdUpdates, context.system.ignoreRef)
   
   /**
-   * Parse switch byte into boolean array
+   * Parsed status data from Galil QR DataRecord axis status WORD (2 bytes).
+   * Per DMC-41x3 User Manual, Data Record section:
+   *
+   *   Bit 15: Move in Progress
+   *   Bit 14: Mode of Motion PA or PR
+   *   Bit 13: Mode of Motion PA only
+   *   Bit 12: Find Edge (FE) in Progress
+   *   Bit 11: Home (HM) in Progress
+   *   Bit 10: 1st Phase of HM complete
+   *   Bit  9: 2nd Phase of HM complete (or FI command issued)
+   *   Bit  8: Mode of Motion Coord. Motion
+   *   Bit  7: Negative Direction Move
+   *   Bit  6: Mode of Motion Contour
+   *   Bit  5: Motion is slewing
+   *   Bit  4: Motion is stopping due to ST or Limit Switch
+   *   Bit  3: Motion is making final decel
+   *   Bit  2: Latch is armed
+   *   Bit  1: 3rd Phase of HM in Progress
+   *   Bit  0: Motor Off
    */
-  private def parseSwitches(switchByte: Byte): Array[Boolean] =
-    (0 until 7).map(i => (switchByte & (1 << i)) != 0).toArray
+  private case class AxisStatusData(
+    moveInProgress: Boolean,       // bit 15 — THE reliable moving flag
+    motionModePA_PR: Boolean,      // bit 14
+    motionModePAonly: Boolean,     // bit 13
+    findEdgeInProgress: Boolean,   // bit 12
+    homeInProgress: Boolean,       // bit 11
+    hmPhase1Complete: Boolean,     // bit 10
+    hmPhase2Complete: Boolean,     // bit  9
+    coordMotion: Boolean,          // bit  8
+    negativeDirection: Boolean,    // bit  7
+    contourMode: Boolean,          // bit  6
+    slewing: Boolean,              // bit  5
+    stopping: Boolean,             // bit  4
+    finalDecel: Boolean,           // bit  3
+    latchArmed: Boolean,           // bit  2
+    hmPhase3InProgress: Boolean,   // bit  1
+    motorOff: Boolean              // bit  0
+  )
+  
+  /**
+   * Parse axis status word from QR DataRecord
+   */
+  private def parseAxisStatus(statusWord: Short): AxisStatusData =
+    val s = statusWord & 0xFFFF  // unsigned
+    AxisStatusData(
+      moveInProgress = (s & (1 << 15)) != 0,
+      motionModePA_PR = (s & (1 << 14)) != 0,
+      motionModePAonly = (s & (1 << 13)) != 0,
+      findEdgeInProgress = (s & (1 << 12)) != 0,
+      homeInProgress = (s & (1 << 11)) != 0,
+      hmPhase1Complete = (s & (1 << 10)) != 0,
+      hmPhase2Complete = (s & (1 << 9)) != 0,
+      coordMotion = (s & (1 << 8)) != 0,
+      negativeDirection = (s & (1 << 7)) != 0,
+      contourMode = (s & (1 << 6)) != 0,
+      slewing = (s & (1 << 5)) != 0,
+      stopping = (s & (1 << 4)) != 0,
+      finalDecel = (s & (1 << 3)) != 0,
+      latchArmed = (s & (1 << 2)) != 0,
+      hmPhase3InProgress = (s & (1 << 1)) != 0,
+      motorOff = (s & (1 << 0)) != 0
+    )
+  
+  /**
+   * Parsed data from Galil QR DataRecord axis switches BYTE.
+   * Per DMC-500x0 User Manual, Data Record section:
+   *
+   *   Bit 7: Latch Occurred
+   *   Bit 6: State of Latch Input
+   *   Bit 5: N/A
+   *   Bit 4: N/A
+   *   Bit 3: State of Forward Limit
+   *   Bit 2: State of Reverse Limit
+   *   Bit 1: State of Home Input
+   *   Bit 0: Stepper Mode
+   *
+   * NOTE: These are RAW I/O states, NOT the same as the TS command output.
+   * The TS command has its own different bit layout.
+   */
+  private case class SwitchData(
+    latchOccurred: Boolean,     // bit 7
+    latchInput: Boolean,        // bit 6
+    forwardLimit: Boolean,      // bit 3 — raw state (CN config determines active high/low)
+    reverseLimit: Boolean,      // bit 2
+    homeInput: Boolean,         // bit 1
+    stepperMode: Boolean        // bit 0 — stepper mode indicator
+  )
+  
+  /**
+   * Parse switches byte from QR DataRecord
+   */
+  private def parseSwitches(switchByte: Byte): SwitchData =
+    SwitchData(
+      latchOccurred = (switchByte & (1 << 7)) != 0,
+      latchInput = (switchByte & (1 << 6)) != 0,
+      forwardLimit = (switchByte & (1 << 3)) != 0,
+      reverseLimit = (switchByte & (1 << 2)) != 0,
+      homeInput = (switchByte & (1 << 1)) != 0,
+      stepperMode = (switchByte & (1 << 0)) != 0
+    )
   
   /**
    * Calculate polling period from rate

@@ -50,7 +50,8 @@ private[hcd] object ControllerInterfaceActor {
       adapter: CSWDeviceAdapter,
       loggerFactory: LoggerFactory,
       galilPrefix: Prefix,
-      currentStatePublisher: CurrentStatePublisher
+      currentStatePublisher: CurrentStatePublisher,
+      internalStateActor: ActorRef[InternalStateActor.Command]
   ): Behavior[GalilCommandMessage] =
     Behaviors.withTimers { timers =>
       Behaviors.setup { ctx =>
@@ -132,6 +133,58 @@ private[hcd] object ControllerInterfaceActor {
         }
 
         val controllerIdentity = identifyController()
+
+        // ========================================
+        // Thread Allocation (from hardware state)
+        // ========================================
+        // Thread 0 is reserved for #Init / general purpose.
+        // Threads 1-7 are available for embedded programs.
+        // Allocation queries MG _NO directly — the hardware IS the pool.
+        // No separate bookkeeping needed; MG _NO is always authoritative.
+
+        /**
+         * Query the controller's active thread bitmask and update IS.
+         *
+         * @return the thread status bitmask (_NO value)
+         */
+        def queryThreadStatus(): Int = {
+          val noResponses = galilIo.send("MG _NO")
+          val noValue = noResponses.head._2.utf8String.trim
+          val threadStatus = try {
+            noValue.toDouble.toInt
+          } catch {
+            case _: NumberFormatException =>
+              log.warn(s"MG _NO returned unexpected value: '$noValue'")
+              0
+          }
+          // Push real-time thread status to IS
+          internalStateActor ! InternalStateActor.UpdateHcdState(
+            Map("threadStatus" -> threadStatus),
+            ctx.system.ignoreRef)
+          threadStatus
+        }
+
+        /**
+         * Allocate a free thread by querying hardware directly.
+         * Thread 0 is reserved. Searches threads 1-7 for one not active in _NO.
+         *
+         * @return Some(threadNumber) if a thread is free, None if all busy
+         */
+        def allocateThread(): Option[Int] = {
+          val threadStatus = queryThreadStatus()
+          // Find first thread 1-7 that is not active
+          (1 to 7).find { t =>
+            val bit = 1 << t
+            (threadStatus & bit) == 0
+          } match {
+            case Some(thread) =>
+              log.debug(s"Allocated thread $thread (_NO=0x${threadStatus.toHexString})")
+              Some(thread)
+            case None =>
+              log.warn(s"No free threads available (_NO=0x${threadStatus.toHexString})")
+              None
+          }
+        }
 
         def handleDataRecordResponse(dr: DataRecord, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
           log.debug(s"handleDataRecordResponse $dr")
@@ -337,6 +390,57 @@ private[hcd] object ControllerInterfaceActor {
               case ex: Exception =>
                 log.error(s"SendCommand failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
+          // Execute embedded program with automatic thread allocation and start confirmation.
+          // Allocates a thread from hardware state (MG _NO), sends XQ, then confirms.
+          case GalilCommandMessage.ExecuteProgram(label, replyTo) =>
+            try {
+              galilIo.synchronized {
+                // Step 1: Allocate a thread (queries MG _NO, updates IS)
+                allocateThread() match {
+                  case None =>
+                    replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                      thread = -1, threadWasActive = false,
+                      error = Some(s"No threads available to execute #$label"))
+
+                  case Some(thread) =>
+                    // Step 2: Send XQ command
+                    val xqCmd = s"XQ #$label,$thread"
+                    log.info(s"ExecuteProgram: $xqCmd")
+                    val xqResponses = galilIo.send(xqCmd)
+
+                    // Check for XQ rejection (? response)
+                    val xqError = xqResponses.find { case (_, bs) =>
+                      bs.utf8String.trim.startsWith("?")
+                    }
+                    xqError match {
+                      case Some((cmd, bs)) =>
+                        log.warn(s"ExecuteProgram: $xqCmd rejected: ${bs.utf8String.trim}")
+                        replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                          thread = thread, threadWasActive = false,
+                          error = Some(s"$xqCmd rejected: ${bs.utf8String.trim}"))
+
+                      case None =>
+                        // Step 3: Confirm thread started (queries MG _NO, updates IS)
+                        val threadStatus = queryThreadStatus()
+                        val threadBit = 1 << thread
+                        val threadActive = (threadStatus & threadBit) != 0
+                        log.info(s"ExecuteProgram: $xqCmd — _NO=0x${threadStatus.toHexString}, " +
+                          s"thread $thread ${if threadActive then "ACTIVE" else "already finished"}")
+
+                        replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                          thread = thread, threadWasActive = threadActive, error = None)
+                    }
+                }
+              }
+            } catch {
+              case ex: Exception =>
+                log.error(s"ExecuteProgram failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                  thread = -1, threadWasActive = false,
+                  error = Some(s"ExecuteProgram failed: ${ex.getMessage}"))
             }
             Behaviors.same
 
