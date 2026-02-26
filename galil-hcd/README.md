@@ -1,6 +1,6 @@
 # GalilMotion HCD
 
-The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500x0
+The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500
 motion controllers. It manages embedded program execution, state monitoring, and
 CSW event publishing for one or more axes.
 
@@ -39,6 +39,35 @@ Set the system property `-Dgalil.config.path` to choose which HCD config to load
 ```
 
 If the property is not set, the HCD loads `GalilHcdConfig.conf` (the default).
+
+### Controller Config Structure
+
+```hocon
+controller {
+  host = [192, 168, 86, 41]     # IP as integer array
+  port = 23                      # TCP port
+  id = 1                         # Controller instance ID
+  embeddedProgram = "protoHCD_lab.dmc"  # DMC program file
+  standbyPollingRateHz = 1.0     # QR rate when all axes idle
+  actionPollingRateHz = 10.0     # QR rate when any axis active
+}
+
+simulate = false                 # true for simulator mode
+
+activeAxes = [true, true, false, false, false, false, false, false]
+
+axes {
+  A {
+    mechanismType = "rotating"   # "linear" or "rotating"
+    upperLimit = 360.0
+    lowerLimit = 0.0
+    algorithm = "shortest"       # "forward" or "shortest"
+    inPositionThreshold = 1.0    # Position tolerance (counts)
+    indexOffset = 0.0            # Post-home offset
+  }
+  # B { ... }
+}
+```
 
 ## CSW Commands
 
@@ -87,7 +116,7 @@ Program source: `src/main/resources/programs/protoHCD_lab.dmc`
 | `#TrackA`–`#TrackH` | pool | Jog-mode tracking (JG mode with target updates) |
 
 Thread 0 is reserved for general-purpose operations. Threads 1–7 are allocated
-dynamically from the hardware thread pool
+dynamically from the hardware thread pool.
 
 ## Running Tests
 
