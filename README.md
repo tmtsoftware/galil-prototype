@@ -73,7 +73,8 @@ sbt "galil-simulator/run"
 
 # Terminal 2: Start CSW services, then the HCD
 csw-services start -e
-sbt "galil-deploy/runMain csw.proto.galil.deploy.GalilContainerCmdApp --local galil-hcd/src/main/resources/GalilHcd.conf"
+sbt stage
+./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf
 ```
 
 ### With Hardware
@@ -82,7 +83,8 @@ Ensure the Galil controller is powered on and network-accessible, then:
 
 ```bash
 csw-services start -e
-sbt "galil-deploy/runMain csw.proto.galil.deploy.GalilContainerCmdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Hardware.conf"
+sbt stage
+./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 ```
 
 See the [galil-hcd README](galil-hcd/) for configuration details, test instructions, and
