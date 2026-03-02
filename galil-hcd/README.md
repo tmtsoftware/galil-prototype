@@ -1,6 +1,6 @@
 # GalilMotion HCD
 
-The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500
+The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500x0
 motion controllers. It manages embedded program execution, state monitoring, and
 CSW event publishing for one or more axes.
 
@@ -157,20 +157,27 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"   # 4 tests
 **Note:** `CLUSTER_SEEDS` must be unset for tests that use FrameworkTestKit.
 The environment variable conflicts with the test kit's internal cluster formation.
 
-### Hardware Integration Tests
-
-These require a physical Galil DMC-4143 controller at `192.168.86.41:23` with
-stepper motors on axes A and B:
-
-```bash
-unset CLUSTER_SEEDS
-sbt "galil-hcd/testOnly *HardwareIntegrationTest"      # 13 tests, ~23s
-```
+### HCD Integration Tests
 
 The integration tests exercise the full stack — CSW framework, actor architecture,
-real Galil communication, and embedded program execution. Coverage includes homing,
-positioning, stopping, concurrent multi-axis motion, zero-distance moves,
-configuration commands, and tracking.
+Galil communication (real or simulated), and embedded program execution. Coverage
+includes homing, positioning, stopping, concurrent multi-axis motion, zero-distance
+moves, configuration commands, and tracking.
+
+All 13 tests pass against both real hardware and the simulator.
+
+```bash
+# Against real hardware (default config, requires Galil DMC-500x0 at 192.168.86.41:23):
+unset CLUSTER_SEEDS
+sbt "galil-hcd/testOnly *HcdIntegrationTest"              # 13 tests, ~26s
+
+# Against simulator (requires GalilSimulatorApp running on 127.0.0.1:8888):
+unset CLUSTER_SEEDS
+sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf "galil-hcd/testOnly *HcdIntegrationTest"  # 13 tests, ~21s
+```
+
+**Note:** Do not run hardware and simulator integration tests concurrently — both
+use FrameworkTestKit which binds the same Pekko Remoting TCP port.
 
 ### Test Summary
 
@@ -184,7 +191,7 @@ configuration commands, and tracking.
 | LongRunningCommandTest | 24 + 5 ignored | None |
 | ControllerInterfaceActorTest | 16 | Simulator |
 | CurrentStatePublisherActorTest | 4 | Simulator |
-| **HardwareIntegrationTest** | **13** | **Hardware** |
+| **HcdIntegrationTest** | **13** | **Hardware or Simulator** |
 | **Total** | **146 + 5 ignored** | |
 
 The 5 ignored tests are for `selectWheel` — the embedded `#SelectX` programs

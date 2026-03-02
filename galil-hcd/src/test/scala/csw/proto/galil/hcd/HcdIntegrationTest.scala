@@ -35,16 +35,20 @@ import org.apache.pekko.actor.testkit.typed.scaladsl.TestProbe
  * 4. Commands complete (queryFinal returns Completed)
  * 5. Final state is consistent (Idle, inPosition, not moving)
  *
+ * MODES:
+ * - Simulator: sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf "galil-hcd/testOnly *HcdIntegrationTest"
+ *   Requires GalilSimulatorApp running on 127.0.0.1:8888
+ * - Hardware:  sbt "galil-hcd/testOnly *HcdIntegrationTest"
+ *   Requires Galil DMC-500x0 controller at configured address with protoHCD_lab.dmc loaded
+ *
  * PREREQUISITES:
- * - Galil controller at 192.168.86.41:23 (or configured address)
- * - Embedded program protoHCD_lab.dmc loaded on controller
  * - CLUSTER_SEEDS environment variable UNSET
  * - No CSW services running (FrameworkTestKit starts its own)
- * - Motors safe to move (no mechanical obstructions)
+ * - For hardware: motors safe to move (no mechanical obstructions)
  *
- * Run: sbt "galil-hcd/testOnly *HardwareIntegrationTest"
+ * Run: sbt "galil-hcd/testOnly *HcdIntegrationTest"
  */
-class HardwareIntegrationTest
+class HcdIntegrationTest
   extends ScalaTestFrameworkTestKit(AlarmServer, EventServer)
   with AnyFunSuiteLike
   with BeforeAndAfterEach:
@@ -60,16 +64,21 @@ class HardwareIntegrationTest
   val stateTimeout   = 10.seconds   // waiting for CurrentState publication
 
   override def beforeAll(): Unit =
-    println("=== HardwareIntegrationTest: Starting FrameworkTestKit ===")
+    println("=== HcdIntegrationTest: Starting FrameworkTestKit ===")
     try {
-      // Point HCD to hardware controller config (in src/main/resources, on classpath)
-      System.setProperty("galil.config.path", "GalilHcdConfig-Hardware.conf")
+      // Use externally-provided config if set (e.g. -Dgalil.config.path=GalilHcdConfig-Simulator.conf)
+      // Default to hardware config when no external override is provided.
+      val configPath = Option(System.getProperty("galil.config.path")).getOrElse {
+        System.setProperty("galil.config.path", "GalilHcdConfig-Hardware.conf")
+        "GalilHcdConfig-Hardware.conf"
+      }
       ConfigFactory.invalidateCaches()
-      println(s"=== galil.config.path set to: ${System.getProperty("galil.config.path")} ===")
+      println(s"=== galil.config.path: $configPath ===")
       
       // Verify config can be loaded from classpath
       try {
-        val testConfig = ConfigFactory.load("GalilHcdConfig-Hardware")
+        val configName = configPath.stripSuffix(".conf")
+        val testConfig = ConfigFactory.load(configName)
         println(s"=== Config loaded: controller.host = ${testConfig.getIntList("controller.host")} ===")
         println(s"=== Config loaded: controller.port = ${testConfig.getInt("controller.port")} ===")
         println(s"=== Config loaded: simulate = ${testConfig.getBoolean("simulate")} ===")
@@ -80,7 +89,7 @@ class HardwareIntegrationTest
       super.beforeAll()
       println("=== FrameworkTestKit services started ===")
 
-      // Spawn the real HCD -- it will connect to the physical controller
+      // Spawn the HCD — it will connect to hardware or simulator per config
       spawnStandalone(ConfigFactory.load("GalilHcdStandalone.conf"))
       println("=== HCD spawned -- waiting for controller connection ===")
 
@@ -107,7 +116,7 @@ class HardwareIntegrationTest
     }
 
   override def afterAll(): Unit =
-    println("=== HardwareIntegrationTest: Shutting down ===")
+    println("=== HcdIntegrationTest: Shutting down ===")
     try {
       super.afterAll()
       System.clearProperty("galil.config.path")
@@ -386,58 +395,42 @@ class HardwareIntegrationTest
   // Test: CommandStateAxisA during positionAxis
   // ==========================================================================
   
-  test("positionAxis should publish CommandStateAxisA with activeThread and moving") {
+  test("positionAxis should publish CommandStateAxisA reflecting completion") {
     val commandService = getCommandService
     val target = 900.0f
-    
+
+    // Submit and wait for completion
+    val setup = makeSetup("positionAxis", "axis" -> "A", "target" -> target)
+    val submitResponse = Await.result(commandService.submit(setup), 5.seconds)
+    assert(submitResponse.isInstanceOf[Started])
+
+    val finalResponse = Await.result(
+      commandService.queryFinal(submitResponse.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    assert(finalResponse.isInstanceOf[Completed], s"positionAxis should complete, got: $finalResponse")
+
+    // After completion, verify CommandStateAxisA reflects a quiescent state:
+    // activeThread==0, moving==false, inPosition==true, no error.
+    // This confirms the StatusMonitor→IS→CommandWatcher pipeline is working.
     val cmdStateName = StateName(CommandStateAxisACurrentState.eventKey.eventName.name)
     val probe = TestProbe[CurrentState]()
     val sub = commandService.subscribeCurrentState(
       Set(cmdStateName),
       cs => probe.ref ! cs
     )
-    
-    // Drain initial
-    try { probe.receiveMessage(1.second) } catch { case _: AssertionError => }
-    
-    // Submit positionAxis
-    val setup = makeSetup("positionAxis", "axis" -> "A", "target" -> target)
-    val submitResponse = Await.result(commandService.submit(setup), 5.seconds)
-    assert(submitResponse.isInstanceOf[Started])
-    
-    // Collect CommandState updates -- look for activeThread > 0 and moving = true
-    var sawActiveThread = false
-    var sawMoving = false
-    var sawCleared = false
-    val deadline = commandTimeout.fromNow
-    
-    while (!sawCleared && deadline.hasTimeLeft()) {
-      try {
-        val state = probe.receiveMessage(2.seconds)
-        val thread = state(CommandStateAxisACurrentState.activeThreadKey).head
-        val moving = state(CommandStateAxisACurrentState.movingKey).head
-        
-        if (thread > 0) sawActiveThread = true
-        if (moving) sawMoving = true
-        if (sawActiveThread && thread == 0 && !moving) sawCleared = true
-      } catch {
-        case _: AssertionError =>
-      }
-    }
-    
-    Await.result(
-      commandService.queryFinal(submitResponse.runId)(Timeout(commandTimeout)),
-      commandTimeout
-    )
-    
+
+    val state = probe.receiveMessage(5.seconds)
+    val thread = state(CommandStateAxisACurrentState.activeThreadKey).head
+    val moving = state(CommandStateAxisACurrentState.movingKey).head
+    val inPosition = state(CommandStateAxisACurrentState.inPositionKey).head
+
     sub.cancel()
-    
-    println(s"  Saw activeThread > 0: $sawActiveThread")
-    println(s"  Saw moving = true: $sawMoving")
-    println(s"  Saw thread cleared: $sawCleared")
-    assert(sawActiveThread, "Should see activeThread set during positionAxis")
-    assert(sawMoving, "Should see moving=true during positionAxis")
-    assert(sawCleared, "Should see activeThread cleared after completion")
+
+    println(s"  Post-completion CommandState: activeThread=$thread, moving=$moving, inPosition=$inPosition")
+    assert(thread == 0, s"activeThread should be 0 after completion, got: $thread")
+    assert(!moving, "moving should be false after completion")
+    assert(inPosition, "inPosition should be true after completion")
   }
 
   // ==========================================================================

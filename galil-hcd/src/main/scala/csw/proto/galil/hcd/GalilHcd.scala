@@ -291,35 +291,43 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}")
     }
 
-    // Phase 4: Hardware-specific initialization
-    if (hcdConfig.simulate) {
-      // Simulation mode - skip embedded program verification
-      log.info("Simulation mode - skipping embedded program verification")
-      log.info("Galil HCD initialized (simulation mode)")
-    } else {
-      // Hardware mode - verify embedded program and initialize
-      val initFuture = for {
-        _ <- verifyEmbeddedProgram()
-        // Brief pause to allow QR polling to resume and produce at least one
-        // threadStatus update before we start monitoring threads for completion.
-        // verifyEmbeddedProgram pauses QR during UL download, then resumes.
-        _ = Thread.sleep(1200) // > 1 standby poll cycle (1Hz)
-        _ <- initController()
-        _ <- setupAxes()
-        // Read motion config AFTER setupAxes — #SetupX programs set SP, AC, DC
-        // which override the EEPROM defaults that #Init read into speed[], accel[], etc.
-        // Reading now captures the post-setup values (e.g. SPA=10000 from #SetupA).
-        _ <- readMotionConfig()
-        _ = log.info("Galil HCD initialized successfully")
-      } yield ()
-      
-      try {
-        Await.result(initFuture, 30.seconds)
-      } catch {
-        case ex: Exception =>
-          log.error("Initialization failed", ex = ex)
-          throw ex
+    // Phase 4: Embedded program verification + controller initialization
+    //
+    // Program verification only runs against real hardware — it compares
+    // the controller's stored DMC program to the resource file. The simulator
+    // has no real embedded program to verify.
+    //
+    // Controller init (XQ #Init), axis setup (XQ #SetupX), and motion config
+    // readback (MG speed[], accel[], etc.) run in both modes — the simulator
+    // handles these commands just like real hardware.
+    val initFuture = for {
+      _ <- if (!hcdConfig.simulate) {
+        for {
+          _ <- verifyEmbeddedProgram()
+          // Brief pause to allow QR polling to resume and produce at least one
+          // threadStatus update before we start monitoring threads for completion.
+          // verifyEmbeddedProgram pauses QR during UL download, then resumes.
+          _ = Thread.sleep(1200) // > 1 standby poll cycle (1Hz)
+        } yield ()
+      } else {
+        log.info("Simulation mode — skipping embedded program verification")
+        Future.successful(())
       }
+      _ <- initController()
+      _ <- setupAxes()
+      // Read motion config AFTER setupAxes — #SetupX programs set SP, AC, DC
+      // which override the EEPROM defaults that #Init read into speed[], accel[], etc.
+      // Reading now captures the post-setup values (e.g. SPA=10000 from #SetupA).
+      _ <- readMotionConfig()
+      _ = log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
+    } yield ()
+    
+    try {
+      Await.result(initFuture, 30.seconds)
+    } catch {
+      case ex: Exception =>
+        log.error("Initialization failed", ex = ex)
+        throw ex
     }
   }
 

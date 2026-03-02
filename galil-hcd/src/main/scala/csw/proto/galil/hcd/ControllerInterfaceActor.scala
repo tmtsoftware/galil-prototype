@@ -84,7 +84,7 @@ private[hcd] object ControllerInterfaceActor {
          * Identify the controller by sending the ID command.
          * Runs during actor setup to verify the connection and log hardware identity.
          *
-         * Real Galil response example (DMC-4143):
+         * Real Galil response example (DMC-500):
          *   FW, DMC50040 Rev 1.2a
          *   DMC, 50000, Rev 0
          *   CMB, 41023, 3.3v, Rev 1

@@ -9,21 +9,37 @@ import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState, Header}
 import scala.concurrent.duration._
 
 /**
- * An actor that simulates a Galil device (in a very simplified way).
+ * Actor that simulates a Galil DMC-500x0 controller with full motion emulation.
+ *
+ * Supports the complete HCD command flow including:
+ *   - Embedded program execution (XQ/HX) with thread management via _NO bitmask
+ *   - Motion emulation with speed-limited position stepping for QR DataRecord fidelity
+ *   - Embedded variable storage (speed[], accel[], decel[], dmd[], etc.)
+ *   - QR DataRecord with proper status word bits, switches byte, positions, velocity
+ *   - Program download (UL) returning stored program text
+ *   - MG queries for _NO, TIME, and embedded array variables
+ *
+ * This enables the full HardwareIntegrationTest suite to run without hardware,
+ * supporting CI testing and Assembly/Sequencer development with a simulated HCD.
+ *
+ * Architecture follows SDD Section 4.7 — Simulation Strategy:
+ *   "The simulation logic maintains internal 'simulated' states for each axis.
+ *    When the HCD calls methods like getDataRecordRaw or sendToGalil, it receives
+ *    synthesized data that mimics the real controller's responses."
  */
 object GalilSimulatorActor {
 
-  // Commands corresponding to the ones defined in GalilCommands.conf
-  // New interface commands (embedded program execution)
+  // ========================================
+  // Galil command constants
+  // ========================================
+
   val ExecuteProgram       = "XQ"
   val HaltExecution        = "HX"
   val Identify             = "ID"
   val SetBit               = "SB"
   val ClearBit             = "CB"
   val AnalogOutput         = "AO"
-  val MessageGet           = "MG"  // Used for reading analog inputs: MG @AN[n]
-  
-  // Legacy commands (kept for reference, but removed from interface)
+  val MessageGet           = "MG"
   val AbsTarget            = "PA"
   val Acceleration         = "AC"
   val AmplifierGain        = "AG"
@@ -47,392 +63,914 @@ object GalilSimulatorActor {
   val SetMotorPosition     = "DP"
   val StepDriveResolution  = "YA"
   val StepMotorResolution  = "YB"
+  val StopMotion           = "ST"
+  val UploadProgram        = "UL"
+  val DownloadProgram      = "DL"
+  val LimitDisable         = "LD"
+  val ConfigureInputs      = "CN"
+  val HomeVelocity         = "HV"
 
-  // Some commands that set a value for an axis (XXX TODO: Add to this list)
-  private val axixCmds = Set(
-    AbsTarget,
-    Acceleration,
-    AmplifierGain,
-    AnalogFeedbackSelect,
-    BrushlessModulus,
-    BrushlessZero,
-    Deceleration,
-    JogSpeed,
-    LowCurrent,
-    MotorSmoothing,
-    MotorSpeed,
-    MotorType,
-    PositionTracking,
-    RelTarget,
-    SetMotorPosition,
-    StepDriveResolution,
-    StepMotorResolution
+  // Commands that follow the generic axis set/get pattern: XXA=value or XXA=?
+  private val axisCmds = Set(
+    AbsTarget, Acceleration, AmplifierGain, AnalogFeedbackSelect,
+    BrushlessModulus, BrushlessZero, Deceleration, JogSpeed,
+    LowCurrent, MotorSmoothing, MotorSpeed, MotorType,
+    PositionTracking, RelTarget, SetMotorPosition,
+    StepDriveResolution, StepMotorResolution, HomeVelocity,
+    LimitDisable
   )
 
-  // Commands received by this actor
+  // ========================================
+  // Protocol
+  // ========================================
+
   sealed trait GalilSimulatorCommand
 
-  // A Galil command - response goes to the replyTo actor
+  /** A Galil command string with a reply destination */
   case class Command(cmd: String, replyTo: ActorRef[ByteString]) extends GalilSimulatorCommand
 
-  // Called periodically to simulate the motor motion for the given axis
-  case class SimulateMotion(axis: Char) extends GalilSimulatorCommand
+  /** Periodic timer tick to advance motion simulation */
+  private case object MotionTick extends GalilSimulatorCommand
 
-  // Holds the timer and current state for an axis
-  case class AxisContext(motorOn: Boolean, referencePosition: Int, settings: Map[String, Double])
+  /** Delayed thread completion — program finished executing */
+  private case class ThreadComplete(thread: Int) extends GalilSimulatorCommand
 
-  // Holds the current state of each axis
-  case class SimulatorContext(motionTimerKey: String, map: Map[Char, AxisContext])
+  // ========================================
+  // Per-axis simulated state
+  // ========================================
 
-  // For TC command
-  private var errorStatus  = 0
-  private val errorMessage = "Unrecognized command"
+  /**
+   * Simulated state for one axis.
+   *
+   * @param motorOn       SH has been issued (motor enabled)
+   * @param position      Current position in encoder/step counts (auxiliaryPosition for steppers)
+   * @param demand        Target position from dmd[] variable (set by HCD before XQ #MoveX)
+   * @param velocity      Current velocity in counts/sec (signed; reported as 64x in QR)
+   * @param maxSpeed      SP value (counts/sec)
+   * @param acceleration  AC value (counts/sec^2)
+   * @param deceleration  DC value (counts/sec^2)
+   * @param moving        Motor is in motion (status bit 15)
+   * @param jogging       Motor is in JG mode (tracking)
+   * @param motorType     MT value (2.0 = stepper with active low)
+   * @param stopCode      Last stop code (0=running, 1=normal stop)
+   * @param settings      Catch-all for other axis settings (legacy generic commands)
+   */
+  case class SimAxis(
+    motorOn: Boolean = false,
+    position: Double = 0.0,
+    demand: Double = 0.0,
+    velocity: Double = 0.0,
+    maxSpeed: Double = 10000.0,
+    acceleration: Double = 256000.0,
+    deceleration: Double = 256000.0,
+    moving: Boolean = false,
+    jogging: Boolean = false,
+    motorType: Double = 2.0,  // stepper
+    stopCode: Byte = 0,
+    settings: Map[String, Double] = Map.empty
+  )
 
-  // Defines the actor behavior
+  /**
+   * Global simulator state.
+   *
+   * @param axes              Per-axis state, keyed by axis char ('A'-'H')
+   * @param threadStatus      Bitmask of active threads (bit N = thread N running)
+   * @param embeddedVars      Named embedded variables: "speed[0]" -> 10000.0, etc.
+   * @param sampleNumber      Incrementing QR sample counter
+   * @param errorStatus       Last error code (for TC command)
+   * @param digitalOutputs    Simulated digital output bits
+   * @param programText       Stored program text (for UL download)
+   */
+  case class SimState(
+    axes: Map[Char, SimAxis] = Map.empty,
+    threadStatus: Int = 0,
+    embeddedVars: Map[String, Double] = Map.empty,
+    sampleNumber: Short = 0,
+    errorStatus: Int = 0,
+    digitalOutputs: Array[Byte] = Array.fill(10)(0.toByte),
+    digitalInputs: Array[Byte] = Array.fill(10)(0.toByte),
+    programText: String = ""
+  )
+
+  // ========================================
+  // Motion simulation constants
+  // ========================================
+
+  /** How often the motion simulation ticks (ms) */
+  private val MotionTickIntervalMs = 10
+  private val MotionTickInterval = MotionTickIntervalMs.milliseconds
+  private val MotionTickKey = "motion-tick"
+
+  /** Threshold below which we snap to target (counts) */
+  private val SnapThreshold = 0.5
+
+  // ========================================
+  // Entry point
+  // ========================================
+
   def simulate(
-      timer: TimerScheduler[GalilSimulatorCommand],
-      simCtx: SimulatorContext = SimulatorContext("motion-timer", Map.empty)
+    timer: TimerScheduler[GalilSimulatorCommand],
+    state: SimState = SimState()
   ): Behavior[GalilSimulatorCommand] =
     Behaviors.receive { (ctx, msg) =>
       msg match {
-        case SimulateMotion(axis)  => simulateMotion(simCtx, timer, axis)
-        case Command(cmd, replyTo) => processCommand(ctx, simCtx, timer, cmd, replyTo)
+        case Command(cmd, replyTo) => processCommand(ctx, state, timer, cmd, replyTo)
+        case MotionTick            => advanceMotion(state, timer)
+        case ThreadComplete(t)     => completeThread(state, timer, t)
       }
     }
 
-  // Process the Galil command and return the reply
-  private def processCommand(
-      ctx: ActorContext[GalilSimulatorCommand],
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String,
-      replyTo: ActorRef[ByteString]
-  ): Behavior[GalilSimulatorCommand] = {
+  // ========================================
+  // Command dispatch
+  // ========================================
 
+  private def processCommand(
+    ctx: ActorContext[GalilSimulatorCommand],
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String,
+    replyTo: ActorRef[ByteString]
+  ): Behavior[GalilSimulatorCommand] = {
     try {
-      val (response, maybeNewBehavior) =
-        if (cmdString.isEmpty) {
-          // Empty command - real Galil responds with just the prompt ":"
-          (formatReply(None), None)
-        } else cmdString.take(2) match {
-          // Core commands
-          case `Identify` =>
-            // ID - Return controller identification (simulated DMC-50080, 8-axis controller)
-            val idResponse = "FW, DMC50080 Rev 1.0sim\r\nDMC, 50000, Rev 0\r\nCMB, 00000, 0.0v, Rev 0\r\nAMP1, 00000, Rev 0"
-            (formatReply(idResponse), None)
-          case `GetDataRecord` =>
-            // QR returns binary data ending with ':' terminator
-            val dataRecord = ByteString(getDataRecord(simCtx).toByteBuffer)
-            val response = dataRecord ++ ByteString(":")
-            (response, None)
-          case `ErrorCode` => (formatReply(tcCmd(cmdString)), None)
-          
-          // New interface: Program execution commands
-          case `ExecuteProgram` =>
-            // XQ #LABEL,thread
-            // For now, just acknowledge success
-            println(s"Simulator: ExecuteProgram - $cmdString")
-            (formatReply(None), None)
-          
-          case `HaltExecution` =>
-            // HX thread
-            // For now, just acknowledge success
-            println(s"Simulator: HaltExecution - $cmdString")
-            (formatReply(None), None)
-          
-          // New interface: Digital I/O commands  
-          case `SetBit` =>
-            // SB address
-            println(s"Simulator: SetBit - $cmdString")
-            (formatReply(None), None)
-          
-          case `ClearBit` =>
-            // CB address
-            println(s"Simulator: ClearBit - $cmdString")
-            (formatReply(None), None)
-          
-          // New interface: Analog I/O commands
-          case `AnalogOutput` =>
-            // AO channel,value
-            println(s"Simulator: AnalogOutput - $cmdString")
-            (formatReply(None), None)
-          
-          case `MessageGet` =>
-            // MG @AN[channel] - Read analog input
-            // Return simulated voltage value
-            println(s"Simulator: ReadAnalogInput - $cmdString")
-            (formatReply("2.5"), None)  // Return 2.5V
-          
-          // Legacy motion control commands (kept for backwards compatibility)
-          case `BeginMotion` =>
-            (formatReply(None), Some(beginMotion(ctx, simCtx, timer, cmdString)))
-          case `MotorOn` =>
-            (formatReply(None), Some(motorOn(ctx, simCtx, timer, cmdString)))
-          case `MotorOff` =>
-            (formatReply(None), Some(motorOff(simCtx, timer, cmdString)))
-          case `GetMotorPosition` =>
-            (formatReply(getMotorPosition(simCtx, cmdString)), None)
-          case `SetMotorPosition` =>
-            (formatReply(None), Some(setMotorPosition(simCtx, timer, cmdString)))
-          case cmd if axixCmds.contains(cmd) => genericCmd(simCtx, timer, cmdString)
-          case _                             => (formatReply(None, isError = true), None)  // Return ? for unknown commands
-        }
+      // Log every command except QR (too noisy) and empty (just prompts)
+      if (cmdString.nonEmpty && !cmdString.startsWith("QR")) {
+        println(s"[SIM] CMD: '$cmdString'")
+      }
+      val (response, newState) = dispatch(ctx, state, timer, cmdString)
+      // Log response for non-QR commands (show first 60 chars)
+      if (cmdString.nonEmpty && !cmdString.startsWith("QR")) {
+        val respStr = response.utf8String.take(60).replace("\r", "\\r").replace("\n", "\\n")
+        println(s"[SIM] RSP: '$respStr'")
+      }
       replyTo ! response
-      maybeNewBehavior.getOrElse(Behaviors.same)
-    }
-    catch {
+      if (newState ne state) simulate(timer, newState) else Behaviors.same
+    } catch {
       case e: Exception =>
+        println(s"[SIM] ERROR processing '$cmdString': ${e.getMessage}")
         e.printStackTrace()
         replyTo ! formatReply(None, isError = true)
         Behaviors.same
     }
   }
 
-  // Simulate the motor motion based on the given commands
-  private def simulateMotion(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      axis: Char
-  ): Behavior[GalilSimulatorCommand] = {
-    val ac = getAxisContext(simCtx, axis)
-    if (ac.motorOn) {
-      val absTarget = ac.settings.getOrElse(AbsTarget, 0.0).toInt
-      if (absTarget != ac.referencePosition) {
-        println(s"XXX absTarget = $absTarget, ref pos = ${ac.referencePosition}")
-        val steps = if (absTarget > ac.referencePosition) 1 else -1
-        moveMotor(simCtx, timer, axis, ac, steps)
-      }
-      else {
-        // At reference position, so stop moving the motor
-        timer.cancel(simCtx.motionTimerKey)
-        Behaviors.same
-      }
+  /**
+   * Dispatch a Galil command string to the appropriate handler.
+   * Returns (response bytes, possibly-updated state).
+   */
+  private def dispatch(
+    ctx: ActorContext[GalilSimulatorCommand],
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+
+    if (cmdString.isEmpty) {
+      return (formatReply(None), state)
     }
-    else {
-      // motor is off
-      Behaviors.same
-    }
-  }
 
-  // Move the motor by the given number of steps
-  private def moveMotor(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      axis: Char,
-      ac: AxisContext,
-      steps: Int
-  ): Behavior[GalilSimulatorCommand] = {
+    val cmd2 = cmdString.take(2)
 
-    val ac    = getAxisContext(simCtx, axis)
-    val newAc = ac.copy(referencePosition = ac.referencePosition + steps)
-    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
-  }
+    cmd2 match {
+      // ---- Identity ----
+      case `Identify` =>
+        val idResponse = "FW, DMC50040 Rev 1.2sim\r\nDMC, 50000, Rev 0\r\nCMB, 00000, 0.0v, Rev 0\r\nAMP1, 00000, Rev 0"
+        (formatReply(idResponse), state)
 
-  // Gets the context for the given Galil axis
-  private def getAxisContext(simCtx: SimulatorContext, axis: Char): AxisContext = {
-    simCtx.map.getOrElse(axis, AxisContext(motorOn = false, referencePosition = 0, Map.empty))
-  }
-
-  // Simulates the TC command:
-  private def tcCmd(cmdString: String): String = {
-    val n = cmdString.drop(2)
-    if (n == "0")
-      s"$errorStatus"
-    else if (errorStatus == 0)
-      s"$errorStatus"
-    else s"$errorStatus $errorMessage"
-  }
-
-  // Formats a reply from the Galil device.
-  // From the Galil doc:
-  // 2) Sending a Command
-  // Once a socket is established, the user will need to send a Galil command as a string to
-  // the controller (via the opened socket) followed by a Carriage return (0x0D).
-  // 3) Receiving a Response
-  // "The controller will respond to that command with a string. The response of the
-  // command depends on which command was sent. In general, if there is a
-  // response expected such as the "TP" Tell Position command. The response will
-  // be in the form of the expected value(s) followed by a Carriage return (0x0D), Line
-  // Feed (0x0A), and a Colon (:). If the command was rejected, the response will be
-  // just a question mark (?) and nothing else. If the command is not expected to
-  // return a value, the response will be just the Colon (:)."
-  def formatReply(reply: Option[String], isError: Boolean = false): ByteString = {
-    errorStatus = if (isError) 1 else 0
-    val s =
-      if (isError) "?"
-      else
-        reply match {
-          case Some(msg) => s"$msg\r\n:"
-          case None      => ":"
+      // ---- QR DataRecord (binary) ----
+      case `GetDataRecord` =>
+        // Log QR state when anything interesting is happening
+        val anyMoving = state.axes.exists { case (_, ax) => ax.moving || ax.jogging }
+        if (anyMoving || state.threadStatus != 0) {
+          val axSummary = state.axes.toSeq.sortBy(_._1).map { case (c, ax) =>
+            s"$c:pos=${ax.position.toInt},mov=${ax.moving},jog=${ax.jogging},mot=${ax.motorOn}"
+          }.mkString(" ")
+          println(s"[SIM] QR: threads=0x${state.threadStatus.toHexString} $axSummary")
         }
-    ByteString(s)
-  }
+        val dr = buildDataRecord(state)
+        val bytes = ByteString(dr.toByteBuffer) ++ ByteString(":")
+        (bytes, state.copy(sampleNumber = (state.sampleNumber + 1).toShort))
 
-  def formatReply(reply: String): ByteString = formatReply(Some(reply))
+      // ---- Error code ----
+      case `ErrorCode` =>
+        (formatReply(handleTC(state, cmdString)), state)
 
-  def formatReply(reply: Int): ByteString = formatReply(Some(reply.toString))
+      // ---- Program execution ----
+      case `ExecuteProgram` =>
+        handleXQ(ctx, state, timer, cmdString)
 
-  // Simulates commands that let you set and get values, for example:
-  //
-  // PRA=?
-  // PRA=1
-  //
-  // Command is the first two chars, axis should be the third.
-  // If the next two chars are "=?", get the value, otherwise set it.
-  // Return value is the Galil response.
-  private def genericCmd(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String
-  ): (ByteString, Option[Behavior[GalilSimulatorCommand]]) = {
-    val cmd   = cmdString.take(2)
-    val axis  = cmdString.drop(2).head
-    val value = cmdString.drop(4)
-    value match {
-      case "?" =>
-        (formatReply(getAxisValue(simCtx, axis, cmd).toString), None)
+      case `HaltExecution` =>
+        handleHX(state, timer, cmdString)
+
+      // ---- MG (message/query) — handles _NO, TIME, embedded vars ----
+      case `MessageGet` =>
+        (formatReply(handleMG(state, cmdString)), state)
+
+      // ---- Motor on/off ----
+      case `MotorOn` =>
+        handleSH(state, cmdString)
+
+      case `MotorOff` =>
+        handleMO(state, timer, cmdString)
+
+      // ---- Stop ----
+      case `StopMotion` =>
+        handleST(state, timer, cmdString)
+
+      // ---- Begin motion ----
+      case `BeginMotion` =>
+        handleBG(state, timer, cmdString)
+
+      // ---- Set/Define position ----
+      case "DP" =>
+        handleDP(state, cmdString)
+
+      // ---- Tell position ----
+      case `GetMotorPosition` =>
+        val axis = cmdString.drop(2).headOption.getOrElse('A')
+        val pos = getAxis(state, axis).position.toInt
+        (formatReply(pos), state)
+
+      // ---- Digital I/O ----
+      case `SetBit` => (formatReply(None), state)
+      case `ClearBit` => (formatReply(None), state)
+      case `AnalogOutput` => (formatReply(None), state)
+
+      // ---- Upload program (download FROM controller, confusingly) ----
+      case `UploadProgram` =>
+        val programResponse = state.programText + "\\\r\n:"
+        (ByteString(programResponse), state)
+
+      // ---- Download program (upload TO controller) ----
+      case `DownloadProgram` =>
+        (formatReply(None), state)
+
+      // ---- Jog speed (used by tracking) ----
+      case `JogSpeed` =>
+        handleJG(state, cmdString)
+
+      // ---- Configure inputs (CN) — just acknowledge ----
+      case `ConfigureInputs` =>
+        (formatReply(None), state)
+
+      // ---- Generic axis commands (SP, AC, DC, MT, etc.) ----
+      case cmd if axisCmds.contains(cmd) && cmdString.length > 2 && cmdString(2).isLetter =>
+        handleGenericAxisCmd(state, cmdString)
+
+      // ---- Embedded variable assignment: name[idx]=value ----
+      case _ if cmdString.contains('[') && cmdString.contains('=') && !cmdString.contains("=?") =>
+        handleVarAssignment(state, cmdString)
+
+      // ---- Unknown — return acknowledgment (many Galil commands just need ":") ----
       case _ =>
-        (formatReply(None), Some(setAxisValue(simCtx, timer, axis, cmd, value.toDouble)))
+        println(s"[SIM] Unhandled command (acknowledging): '$cmdString'")
+        (formatReply(None), state)
     }
   }
 
-  // Gets the reference position for the given axis
-  private def getMotorPosition(simCtx: SimulatorContext, cmdString: String): Int = {
-    val axis = cmdString.drop(2).head
-    val ac   = getAxisContext(simCtx, axis)
-    ac.referencePosition
+  // ========================================
+  // XQ — Execute embedded program
+  // ========================================
+
+  /**
+   * Handle XQ #Label,thread
+   *
+   * Parses the label and thread, sets the thread bit in _NO,
+   * and schedules simulated program behavior based on the label.
+   */
+  private def handleXQ(
+    ctx: ActorContext[GalilSimulatorCommand],
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    // Parse: "XQ #Label,thread" or "XQ #Label, thread"
+    val args = cmdString.drop(3).trim
+    val parts = args.split(",").map(_.trim)
+    val label = parts(0).stripPrefix("#")
+    val thread = if (parts.length > 1) parts(1).toInt else 0
+
+    println(s"[SIM] XQ #$label on thread $thread")
+
+    // Set thread bit active
+    val newThreadStatus = state.threadStatus | (1 << thread)
+    var newState = state.copy(threadStatus = newThreadStatus)
+
+    label match {
+      case "Init" =>
+        newState = initializeEmbeddedVars(newState)
+        scheduleThreadComplete(timer, thread, 50.millis)
+
+      case s if s.startsWith("Setup") =>
+        val axis = s.last
+        val ax = getAxis(newState, axis).copy(
+          motorType = 2.0,
+          motorOn = false
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+        scheduleThreadComplete(timer, thread, 50.millis)
+
+      case s if s.startsWith("Home") =>
+        val axis = s.last
+        val ax = getAxis(newState, axis).copy(
+          position = 0.0,
+          motorOn = true,
+          stopCode = 1
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+        scheduleThreadComplete(timer, thread, 80.millis)
+
+      case s if s.startsWith("Move") =>
+        val axis = s.last
+        val idx = axis - 'A'
+        val demand = newState.embeddedVars.getOrElse(s"dmd[$idx]", 0.0)
+        val speed = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
+        val accel = newState.embeddedVars.getOrElse(s"accel[$idx]", 256000.0)
+        val decel = newState.embeddedVars.getOrElse(s"decel[$idx]", 256000.0)
+
+        val ax = getAxis(newState, axis).copy(
+          demand = demand,
+          maxSpeed = speed,
+          acceleration = accel,
+          deceleration = decel,
+          moving = true,
+          jogging = false,
+          motorOn = true,
+          stopCode = 0
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+        // Track which thread drives this axis — advanceMotion will clear it on arrival
+        newState = newState.copy(
+          embeddedVars = newState.embeddedVars + (s"_axisThread[$idx]" -> thread.toDouble)
+        )
+        ensureMotionTicking(timer)
+
+      case s if s.startsWith("Track") =>
+        val axis = s.last
+        val idx = axis - 'A'
+        val targetPos = newState.embeddedVars.getOrElse(s"${axis}target[0]", 0.0)
+        val targetVel = newState.embeddedVars.getOrElse(s"${axis}target[1]", 0.0)
+
+        val ax = getAxis(newState, axis).copy(
+          demand = targetPos,
+          velocity = targetVel,
+          moving = true,
+          jogging = true,
+          motorOn = true,
+          stopCode = 0
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+        ensureMotionTicking(timer)
+        // Track program ENDs quickly — motor keeps jogging
+        scheduleThreadComplete(timer, thread, 100.millis)
+
+      case s if s.startsWith("Stop") =>
+        val axis = s.last
+        val idx = axis - 'A'
+        val ax = getAxis(newState, axis).copy(
+          moving = false,
+          jogging = false,
+          velocity = 0.0,
+          stopCode = 4
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+
+        // Clear the thread that was driving motion on this axis (if any).
+        // Without this, the move thread leaks forever since advanceMotion
+        // will never reach the target to clear it naturally.
+        val moveThreadKey = s"_axisThread[$idx]"
+        newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
+          val mt = moveThreadNum.toInt
+          println(s"[SIM] #Stop$axis: clearing leaked move thread $mt")
+          val clearedStatus = newState.threadStatus & ~(1 << mt)
+          newState = newState.copy(
+            threadStatus = clearedStatus,
+            embeddedVars = newState.embeddedVars - moveThreadKey
+          )
+        }
+        scheduleThreadComplete(timer, thread, 50.millis)
+
+      case s if s.startsWith("Select") =>
+        // #SelectX: same as move — position to demand
+        val axis = s.last
+        val idx = axis - 'A'
+        val demand = newState.embeddedVars.getOrElse(s"dmd[$idx]", 0.0)
+        val speed = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
+
+        val ax = getAxis(newState, axis).copy(
+          demand = demand,
+          maxSpeed = speed,
+          moving = true,
+          jogging = false,
+          motorOn = true,
+          stopCode = 0
+        )
+        newState = newState.copy(axes = newState.axes + (axis -> ax))
+        newState = newState.copy(
+          embeddedVars = newState.embeddedVars + (s"_axisThread[$idx]" -> thread.toDouble)
+        )
+        ensureMotionTicking(timer)
+
+      case _ =>
+        println(s"[SIM] Unknown program label: $label — completing immediately")
+        scheduleThreadComplete(timer, thread, 30.millis)
+    }
+
+    (formatReply(None), newState)
   }
 
-  // Sets the reference position for the given axis
-  private def setMotorPosition(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String
+  // ========================================
+  // HX — Halt execution
+  // ========================================
+
+  private def handleHX(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    val threadStr = cmdString.drop(2).trim
+    val thread = if (threadStr.nonEmpty) threadStr.toInt else 0
+    val newThreadStatus = state.threadStatus & ~(1 << thread)
+    (formatReply(None), state.copy(threadStatus = newThreadStatus))
+  }
+
+  // ========================================
+  // MG — Message/Query handler
+  // ========================================
+
+  /**
+   * Handle MG command for querying system variables and embedded arrays.
+   *
+   * Supported patterns:
+   *   MG _NO        → thread bitmask
+   *   MG TIME       → system time counter
+   *   MG _TDA       → axis A step position
+   *   MG speed[0]   → embedded array variable
+   *   MG @AN[n]     → analog input (simulated 2.5V)
+   */
+  private def handleMG(state: SimState, cmdString: String): String = {
+    val args = cmdString.drop(3).trim
+
+    args match {
+      case "_NO" =>
+        f"${state.threadStatus.toDouble}%.4f"
+
+      case s if s.startsWith("_TD") =>
+        val axis = s.last
+        f"${getAxis(state, axis).position}%.4f"
+
+      case s if s.startsWith("_TP") =>
+        val axis = s.last
+        f"${getAxis(state, axis).position}%.4f"
+
+      case "TIME" =>
+        f"${(System.currentTimeMillis() % 1000000).toDouble}%.4f"
+
+      case s if s.startsWith("_TM") =>
+        "1000.0000"
+
+      case s if s.startsWith("@AN") =>
+        "2.5000"
+
+      case s if s.contains('[') =>
+        val value = state.embeddedVars.getOrElse(s, 0.0)
+        f"$value%.4f"
+
+      case other =>
+        println(s"[SIM] MG: unknown query '$other'")
+        "0.0000"
+    }
+  }
+
+  // ========================================
+  // Motor on/off, stop
+  // ========================================
+
+  private def handleSH(state: SimState, cmdString: String): (ByteString, SimState) = {
+    val axis = cmdString.drop(2).headOption.getOrElse('A')
+    val ax = getAxis(state, axis).copy(motorOn = true)
+    (formatReply(None), state.copy(axes = state.axes + (axis -> ax)))
+  }
+
+  private def handleMO(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    val axis = cmdString.drop(2).headOption.getOrElse('A')
+    val ax = getAxis(state, axis).copy(
+      motorOn = false, moving = false, jogging = false, velocity = 0.0
+    )
+    var newState = state.copy(axes = state.axes + (axis -> ax))
+    // Clear any move thread driving this axis
+    val idx = axis - 'A'
+    val moveThreadKey = s"_axisThread[$idx]"
+    newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
+      val mt = moveThreadNum.toInt
+      val clearedStatus = newState.threadStatus & ~(1 << mt)
+      newState = newState.copy(
+        threadStatus = clearedStatus,
+        embeddedVars = newState.embeddedVars - moveThreadKey
+      )
+    }
+    (formatReply(None), newState)
+  }
+
+  private def handleST(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    val axisChars = cmdString.drop(2).trim
+    val axesToStop = if (axisChars.isEmpty) ('A' to 'H').toSeq else axisChars.toSeq
+    var newAxes = state.axes
+    var newVars = state.embeddedVars
+    var newThreadStatus = state.threadStatus
+    for (axis <- axesToStop) {
+      val ax = getAxis(state, axis)
+      if (ax.moving || ax.jogging) {
+        newAxes = newAxes + (axis -> ax.copy(
+          moving = false, jogging = false, velocity = 0.0, stopCode = 4
+        ))
+        // Clear the thread that was driving motion on this axis
+        val idx = axis - 'A'
+        val moveThreadKey = s"_axisThread[$idx]"
+        newVars.get(moveThreadKey).foreach { moveThreadNum =>
+          val mt = moveThreadNum.toInt
+          println(s"[SIM] ST$axis: clearing leaked move thread $mt")
+          newThreadStatus = newThreadStatus & ~(1 << mt)
+          newVars = newVars - moveThreadKey
+        }
+      }
+    }
+    (formatReply(None), state.copy(axes = newAxes, embeddedVars = newVars, threadStatus = newThreadStatus))
+  }
+
+  // ========================================
+  // BG — Begin motion (legacy direct command)
+  // ========================================
+
+  private def handleBG(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    val axis = cmdString.drop(2).headOption.getOrElse('A')
+    val ax = getAxis(state, axis)
+
+    val jogSpeed = ax.settings.getOrElse(JogSpeed, 0.0)
+    if (jogSpeed != 0.0) {
+      val newAx = ax.copy(
+        moving = true, jogging = true, velocity = jogSpeed, stopCode = 0
+      )
+      ensureMotionTicking(timer)
+      (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
+    } else {
+      val target = ax.settings.getOrElse(AbsTarget, 0.0)
+      val newAx = ax.copy(
+        moving = true, jogging = false, demand = target, stopCode = 0
+      )
+      ensureMotionTicking(timer)
+      (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
+    }
+  }
+
+  // ========================================
+  // JG — Jog speed
+  // ========================================
+
+  private def handleJG(state: SimState, cmdString: String): (ByteString, SimState) = {
+    if (cmdString.length < 3) return (formatReply(None), state)
+    val axis = cmdString(2)
+    val rest = cmdString.drop(3)
+    if (rest.startsWith("=?") || rest == "?") {
+      val speed = getAxis(state, axis).settings.getOrElse(JogSpeed, 0.0)
+      (formatReply(f"$speed%.4f"), state)
+    } else {
+      val value = rest.stripPrefix("=").toDouble
+      val ax = getAxis(state, axis)
+      val newAx = ax.copy(settings = ax.settings + (JogSpeed -> value))
+      (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
+    }
+  }
+
+  // ========================================
+  // DP — Define position
+  // ========================================
+
+  private def handleDP(state: SimState, cmdString: String): (ByteString, SimState) = {
+    if (cmdString.length < 4) return (formatReply(None), state)
+    val axis = cmdString(2)
+    val value = cmdString.drop(3).stripPrefix("=").toDouble
+    val ax = getAxis(state, axis).copy(position = value)
+    (formatReply(None), state.copy(axes = state.axes + (axis -> ax)))
+  }
+
+  // ========================================
+  // Generic axis commands (SP, AC, DC, MT, etc.)
+  // ========================================
+
+  private def handleGenericAxisCmd(state: SimState, cmdString: String): (ByteString, SimState) = {
+    val cmd = cmdString.take(2)
+    val axis = cmdString(2)
+    val rest = cmdString.drop(3)
+
+    if (rest == "?" || rest == "=?") {
+      val ax = getAxis(state, axis)
+      val value = cmd match {
+        case `MotorSpeed`   => ax.maxSpeed
+        case `Acceleration` => ax.acceleration
+        case `Deceleration` => ax.deceleration
+        case `MotorType`    => ax.motorType
+        case _              => ax.settings.getOrElse(cmd, 0.0)
+      }
+      (formatReply(f"$value%.4f"), state)
+    } else {
+      val value = rest.stripPrefix("=").toDouble
+      val ax = getAxis(state, axis)
+      val newAx = cmd match {
+        case `MotorSpeed`   => ax.copy(maxSpeed = value)
+        case `Acceleration` => ax.copy(acceleration = value)
+        case `Deceleration` => ax.copy(deceleration = value)
+        case `MotorType`    => ax.copy(motorType = value)
+        case _              => ax.copy(settings = ax.settings + (cmd -> value))
+      }
+      (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
+    }
+  }
+
+  // ========================================
+  // Embedded variable assignment: name[idx]=value
+  // ========================================
+
+  private def handleVarAssignment(state: SimState, cmdString: String): (ByteString, SimState) = {
+    val eqIdx = cmdString.indexOf('=')
+    val varName = cmdString.substring(0, eqIdx).trim
+    val value = cmdString.substring(eqIdx + 1).trim.toDouble
+    val newVars = state.embeddedVars + (varName -> value)
+    (formatReply(None), state.copy(embeddedVars = newVars))
+  }
+
+  // ========================================
+  // TC — Error code
+  // ========================================
+
+  private def handleTC(state: SimState, cmdString: String): String = {
+    val n = cmdString.drop(2).trim
+    if (n == "0" || n.isEmpty) s"${state.errorStatus}"
+    else if (state.errorStatus == 0) "0"
+    else s"${state.errorStatus} Unrecognized command"
+  }
+
+  // ========================================
+  // Motion simulation
+  // ========================================
+
+  /**
+   * Advance all moving axes by one tick interval.
+   *
+   * For position moves (PA/dmd), moves toward demand at configured speed.
+   * For jog moves (JG/tracking), moves continuously at jog velocity.
+   *
+   * When a position move reaches its target:
+   *   - Sets moving=false, velocity=0, stopCode=1
+   *   - Clears the axis's thread (if one was assigned via _axisThread)
+   */
+  private def advanceMotion(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand]
   ): Behavior[GalilSimulatorCommand] = {
-    val axis        = cmdString.drop(2).head
-    val ac          = getAxisContext(simCtx, axis)
-    val value       = cmdString.drop(4).toInt
-    val newSettings = ac.settings + (SetMotorPosition -> value.toDouble)
-    val newAc       = ac.copy(referencePosition = value, settings = newSettings)
-    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
+    val dt = MotionTickIntervalMs / 1000.0
+    var newState = state
+    var anyMoving = false
+
+    for ((axisChar, ax) <- state.axes if ax.moving || ax.jogging) {
+      if (ax.jogging) {
+        // Jog mode — move at constant velocity
+        val newPos = ax.position + ax.velocity * dt
+        val newAx = ax.copy(position = newPos)
+        newState = newState.copy(axes = newState.axes + (axisChar -> newAx))
+        anyMoving = true
+      } else if (ax.moving) {
+        // Position mode — move toward demand
+        val distance = ax.demand - ax.position
+        val absDistance = Math.abs(distance)
+
+        if (absDistance <= SnapThreshold) {
+          // Arrived at target
+          val idx = axisChar - 'A'
+          val threadKey = s"_axisThread[$idx]"
+          val maybeThread = newState.embeddedVars.get(threadKey).map(_.toInt)
+
+          println(s"[SIM] ARRIVED: axis $axisChar at ${ax.demand} (was ${ax.position}), thread=${maybeThread.getOrElse("none")}")
+
+          val newAx = ax.copy(
+            position = ax.demand,
+            velocity = 0.0,
+            moving = false,
+            stopCode = 1
+          )
+          newState = newState.copy(axes = newState.axes + (axisChar -> newAx))
+          newState = newState.copy(embeddedVars = newState.embeddedVars - threadKey)
+
+          // Schedule thread completion — simulates MC + EN + optional mdelay
+          maybeThread.foreach { thread =>
+            val mdelay = newState.embeddedVars.getOrElse(s"mdelay[$idx]", 0.0)
+            scheduleThreadComplete(timer, thread, (20 + mdelay.toLong).millis)
+          }
+        } else {
+          // Move toward target, limited by maxSpeed
+          val maxStep = ax.maxSpeed * dt
+          val step = Math.min(maxStep, absDistance)
+          val direction = Math.signum(distance)
+          val newPos = ax.position + direction * step
+          val currentVelocity = direction * Math.min(ax.maxSpeed, absDistance / dt)
+
+          val newAx = ax.copy(position = newPos, velocity = currentVelocity)
+          newState = newState.copy(axes = newState.axes + (axisChar -> newAx))
+          anyMoving = true
+        }
+      }
+    }
+
+    if (!anyMoving) {
+      timer.cancel(MotionTickKey)
+    }
+
+    simulate(timer, newState)
   }
 
-  // Turn the motor for the give axis on
-  // ("... tells the controller to use the current motor position as the command position
-  // and to enable servo control at the current position".)
-  private def motorOn(
-      ctx: ActorContext[GalilSimulatorCommand],
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String
+  // ========================================
+  // Thread completion
+  // ========================================
+
+  private def completeThread(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    thread: Int
   ): Behavior[GalilSimulatorCommand] = {
-    val axis  = cmdString.drop(2).head
-    val ac    = getAxisContext(simCtx, axis)
-    val newAc = ac.copy(motorOn = true)
-    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
+    val newThreadStatus = state.threadStatus & ~(1 << thread)
+    println(s"[SIM] Thread $thread completed (_NO: 0x${state.threadStatus.toHexString} → 0x${newThreadStatus.toHexString})")
+    simulate(timer, state.copy(threadStatus = newThreadStatus))
   }
 
-  // Turn the motor for the give axis off
-  private def motorOff(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String
-  ): Behavior[GalilSimulatorCommand] = {
-    val axis = cmdString.drop(2).head
-    val ac   = getAxisContext(simCtx, axis)
-    timer.cancel(simCtx.motionTimerKey)
-    val newAc = ac.copy(motorOn = false)
-    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
+  // ========================================
+  // Embedded variable initialization (#Init)
+  // ========================================
+
+  /**
+   * Initialize default embedded variable values, mimicking what #Init does
+   * on real hardware. These are the EEPROM defaults that the HCD reads
+   * via readMotionConfig() during initialization.
+   */
+  private def initializeEmbeddedVars(state: SimState): SimState = {
+    val defaults = Map(
+      "speed[0]"  -> 10000.0,
+      "accel[0]"  -> 256000.0,
+      "decel[0]"  -> 256000.0,
+      "hspd[0]"   -> 5000.0,
+      "hoff[0]"   -> 0.0,
+      "mdelay[0]" -> 0.0,
+      "dmd[0]"    -> 0.0,
+      "speed[1]"  -> 10000.0,
+      "accel[1]"  -> 256000.0,
+      "decel[1]"  -> 256000.0,
+      "hspd[1]"   -> 5000.0,
+      "hoff[1]"   -> 0.0,
+      "mdelay[1]" -> 0.0,
+      "dmd[1]"    -> 0.0,
+      "Atarget[0]" -> 0.0,
+      "Atarget[1]" -> 0.0,
+      "Btarget[0]" -> 0.0,
+      "Btarget[1]" -> 0.0
+    )
+    state.copy(embeddedVars = state.embeddedVars ++ defaults)
   }
 
-  // Begin moving the motor for the give axis (Stop when it reaches the target)
-  private def beginMotion(
-      ctx: ActorContext[GalilSimulatorCommand],
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      cmdString: String
-  ): Behavior[GalilSimulatorCommand] = {
-    val axis = cmdString.drop(2).head
-    val ac   = getAxisContext(simCtx, axis)
-    timer.cancel(simCtx.motionTimerKey)
-    val motorSpeed =
-      math.max(ac.settings.getOrElse(MotorSpeed, 25000.0), 1.0).toInt
-    val delay = (1000000 / motorSpeed).microseconds
-    timer.startTimerAtFixedRate(simCtx.motionTimerKey, SimulateMotion(axis), delay)
-    simulate(timer, simCtx)
-  }
+  // ========================================
+  // QR DataRecord generation
+  // ========================================
 
-  // Set the value for a given command on the given axis
-  private def setAxisValue(
-      simCtx: SimulatorContext,
-      timer: TimerScheduler[GalilSimulatorCommand],
-      axis: Char,
-      name: String,
-      value: Double
-  ): Behavior[GalilSimulatorCommand] = {
-    val ac          = getAxisContext(simCtx, axis)
-    val newSettings = ac.settings + (name -> value)
-    val newAc       = ac.copy(settings = newSettings)
-    simulate(timer, SimulatorContext(simCtx.motionTimerKey, simCtx.map + (axis -> newAc)))
-  }
-
-  // Gets the value for a given command on the given axis
-  private def getAxisValue(simCtx: SimulatorContext, axis: Char, name: String): Double = {
-    val ac = getAxisContext(simCtx, axis)
-    ac.settings
-      .getOrElse(name, 0) // XXX TODO: Use documented default values for each command
-  }
-
-  // Returns DataRecord based on current simulator context
-  private def getDataRecord(simCtx: SimulatorContext): DataRecord = {
-    val blocksPresent = DataRecord.allAxes.take(7)
-
+  /**
+   * Build a complete QR DataRecord from current simulated state.
+   *
+   * The DataRecord includes:
+   *   - Header with blocks present (S, T, I, A, B, C, D for 4-axis)
+   *   - GeneralState with threadStatus, I/O, error code
+   *   - Per-axis GalilAxisStatus with proper bit fields:
+   *     - status word bit 15 = moving, bit 0 = motorOff, bit 7 = negativeDir
+   *     - switches byte bit 0 = stepperMode (1 for stepper)
+   *     - auxiliaryPosition = current position (for steppers)
+   *     - velocity = currentVelocity * 64 (Galil encoding)
+   */
+  private def buildDataRecord(state: SimState): DataRecord = {
+    val blocksPresent = List('S', 'T', 'I', 'A', 'B', 'C', 'D')
     val header = Header(blocksPresent.map(_.toString))
 
-    val sampleNumber                    = 28114.toShort
-    val inputs                          = (0 to 9).map(_ => 0.toByte).toArray
-    val outputs                         = (0 to 9).map(_ => 0.toByte).toArray
-    val ethernetHandleStatus            = DataRecord.axes.map(_ => 0.toByte).toArray
-    val errorCode                       = this.errorStatus.toByte
-    val threadStatus                    = 0.toByte
-    val amplifierStatus                 = 0
-    val contourModeSegmentCount         = 0
-    val contourModeBufferSpaceRemaining = 0.toShort
-    val sPlaneSegmentCount              = 0.toShort
-    val sPlaneMoveStatus                = 0.toShort
-    val sPlaneDistanceTraveled          = 0
-    val sPlaneBufferSpaceRemaining      = 0.toShort
-    val tPlaneSegmentCount              = 0.toShort
-    val tPlaneMoveStatus                = 0.toShort
-    val tPlaneDistanceTraveled          = 0
-    val tPlaneBufferSpaceRemaining      = 0.toShort
+    val threadStatusByte = (state.threadStatus & 0xFF).toByte
 
     val generalState = GeneralState(
-      sampleNumber,
-      inputs,
-      outputs,
-      ethernetHandleStatus,
-      errorCode,
-      threadStatus,
-      amplifierStatus,
-      contourModeSegmentCount,
-      contourModeBufferSpaceRemaining,
-      sPlaneSegmentCount,
-      sPlaneMoveStatus,
-      sPlaneDistanceTraveled,
-      sPlaneBufferSpaceRemaining,
-      tPlaneSegmentCount,
-      tPlaneMoveStatus,
-      tPlaneDistanceTraveled,
-      tPlaneBufferSpaceRemaining
+      sampleNumber = state.sampleNumber,
+      inputs = state.digitalInputs,
+      outputs = state.digitalOutputs,
+      ethernetHandleStatus = Array.fill(8)(0.toByte),
+      errorCode = state.errorStatus.toByte,
+      threadStatus = threadStatusByte,
+      amplifierStatus = 0,
+      contourModeSegmentCount = 0,
+      contourModeBufferSpaceRemaining = 0.toShort,
+      sPlaneSegmentCount = 0.toShort,
+      sPlaneMoveStatus = 0.toShort,
+      sPlaneDistanceTraveled = 0,
+      sPlaneBufferSpaceRemaining = 0.toShort,
+      tPlaneSegmentCount = 0.toShort,
+      tPlaneMoveStatus = 0.toShort,
+      tPlaneDistanceTraveled = 0,
+      tPlaneBufferSpaceRemaining = 0.toShort
     )
 
-    val axisStatuses = blocksPresent
-      .drop(3)
-      .map(axis => GalilAxisStatus(referencePosition = getAxisContext(simCtx, axis).referencePosition))
-      .toArray
+    val axisChars = blocksPresent.filter(c => DataRecord.axes.contains(c))
+    val axisStatuses = axisChars.map(buildAxisStatus(state, _)).toArray
 
     DataRecord(header, generalState, axisStatuses)
   }
 
+  /**
+   * Build GalilAxisStatus for one axis from simulated state.
+   *
+   * Status word bits (per DMC-500x0 User Manual):
+   *   bit 15: Move in Progress
+   *   bit 14: Mode of Motion PA or PR
+   *   bit  7: Negative Direction Move
+   *   bit  0: Motor Off
+   *
+   * Switches byte bits:
+   *   bit 0: Stepper Mode (1 = stepper motor)
+   */
+  private def buildAxisStatus(state: SimState, axisChar: Char): GalilAxisStatus = {
+    val ax = getAxis(state, axisChar)
+
+    var statusWord: Int = 0
+    if (ax.moving || ax.jogging) statusWord |= (1 << 15)
+    if (!ax.jogging && ax.moving) statusWord |= (1 << 14)
+    if (ax.velocity < 0) statusWord |= (1 << 7)
+    if (!ax.motorOn) statusWord |= (1 << 0)
+
+    var switchesByte: Int = 0
+    if (ax.motorType >= 2.0) switchesByte |= (1 << 0)
+
+    val qrVelocity = (ax.velocity * 64.0).toInt
+    val pos = ax.position.toInt
+
+    GalilAxisStatus(
+      status = statusWord.toShort,
+      switches = switchesByte.toByte,
+      stopCode = ax.stopCode,
+      referencePosition = pos,
+      motorPosition = 0,
+      positionError = 0,
+      auxiliaryPosition = pos,
+      velocity = qrVelocity,
+      torque = 0,
+      analogInput = 0,
+      hallInputStatus = 0,
+      reservedByte = 0,
+      userDefinedVariable = 0
+    )
+  }
+
+  // ========================================
+  // Utilities
+  // ========================================
+
+  private def getAxis(state: SimState, axis: Char): SimAxis =
+    state.axes.getOrElse(axis, SimAxis())
+
+  private def ensureMotionTicking(timer: TimerScheduler[GalilSimulatorCommand]): Unit = {
+    timer.startTimerAtFixedRate(MotionTickKey, MotionTick, MotionTickInterval)
+  }
+
+  private def scheduleThreadComplete(
+    timer: TimerScheduler[GalilSimulatorCommand],
+    thread: Int,
+    delay: FiniteDuration
+  ): Unit = {
+    timer.startSingleTimer(s"thread-complete-$thread", ThreadComplete(thread), delay)
+  }
+
+  // ========================================
+  // Reply formatting (Galil protocol)
+  // ========================================
+
+  def formatReply(reply: Option[String], isError: Boolean = false): ByteString = {
+    val s =
+      if (isError) "?"
+      else reply match {
+        case Some(msg) => s"$msg\r\n:"
+        case None      => ":"
+      }
+    ByteString(s)
+  }
+
+  def formatReply(reply: String): ByteString = formatReply(Some(reply))
+  def formatReply(reply: Int): ByteString = formatReply(Some(reply.toString))
 }
