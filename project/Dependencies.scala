@@ -33,7 +33,8 @@ object Dependencies {
 
   val GalilSimulator = Seq(
     CSW.`csw-framework`,
-    Libs.scalatest % Test
+    Libs.scalatest % Test,
+    Libs.`pekko-actor-testkit-typed` % Test
   )
 
   val GalilRepl = Seq(

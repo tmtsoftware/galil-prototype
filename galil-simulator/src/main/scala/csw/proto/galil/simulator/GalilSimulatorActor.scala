@@ -113,6 +113,7 @@ object GalilSimulatorActor {
    * @param jogging       Motor is in JG mode (tracking)
    * @param motorType     MT value (2.0 = stepper with active low)
    * @param stopCode      Last stop code (0=running, 1=normal stop)
+   * @param homed         Axis has been homed (TS bit 1)
    * @param settings      Catch-all for other axis settings (legacy generic commands)
    */
   case class SimAxis(
@@ -127,6 +128,7 @@ object GalilSimulatorActor {
     jogging: Boolean = false,
     motorType: Double = 2.0,  // stepper
     stopCode: Byte = 0,
+    homed: Boolean = false,
     settings: Map[String, Double] = Map.empty
   )
 
@@ -163,6 +165,9 @@ object GalilSimulatorActor {
 
   /** Threshold below which we snap to target (counts) */
   private val SnapThreshold = 0.5
+
+  /** Axes modeled by the simulator (4-axis DMC-500x0) */
+  private val SimulatedAxes = Seq('A', 'B', 'C', 'D')
 
   // ========================================
   // Entry point
@@ -290,6 +295,36 @@ object GalilSimulatorActor {
         val pos = getAxis(state, axis).position.toInt
         (formatReply(pos), state)
 
+      // ---- TP: Tell Position (encoder/motor position) ----
+      case "TP" =>
+        handleTellQuery(state, cmdString, ax => ax.position.toInt.toString)
+
+      // ---- TD: Tell Dual/Step position (auxiliary/step count) ----
+      case "TD" =>
+        handleTellQuery(state, cmdString, ax => ax.position.toInt.toString)
+
+      // ---- TV: Tell Velocity ----
+      case "TV" =>
+        handleTellQuery(state, cmdString, ax => f"${ax.velocity}%.4f")
+
+      // ---- SC: Stop Code ----
+      case "SC" =>
+        handleTellQuery(state, cmdString, ax => ax.stopCode.toInt.toString)
+
+      // ---- TS: Tell Switches ----
+      case "TS" =>
+        handleTellQuery(state, cmdString, ax => switchesByte(ax).toString)
+
+      // ---- TA: Tell Amplifier (not a real Galil command, but useful for inspecting axis state) ----
+
+      // ---- LV: List Variables (names and values) ----
+      case "LV" =>
+        handleLV(state)
+
+      // ---- LA: List Arrays (names and dimensions) ----
+      case "LA" =>
+        handleLA(state)
+
       // ---- Digital I/O ----
       case `SetBit` => (formatReply(None), state)
       case `ClearBit` => (formatReply(None), state)
@@ -316,8 +351,14 @@ object GalilSimulatorActor {
       case cmd if axisCmds.contains(cmd) && cmdString.length > 2 && cmdString(2).isLetter =>
         handleGenericAxisCmd(state, cmdString)
 
-      // ---- Embedded variable assignment: name[idx]=value ----
+      // ---- Embedded variable assignment: name[idx]=value (array) ----
       case _ if cmdString.contains('[') && cmdString.contains('=') && !cmdString.contains("=?") =>
+        handleVarAssignment(state, cmdString)
+
+      // ---- Embedded scalar variable assignment: name=value ----
+      // Matches lowercase names like "tcon=1000", "version=20260302"
+      // Does NOT match axis commands (uppercase 2-char prefix + axis letter, e.g. "SPA=20000")
+      case _ if cmdString.contains('=') && !cmdString.contains("=?") && cmdString.head.isLower =>
         handleVarAssignment(state, cmdString)
 
       // ---- Unknown — return acknowledgment (many Galil commands just need ":") ----
@@ -374,6 +415,7 @@ object GalilSimulatorActor {
         val ax = getAxis(newState, axis).copy(
           position = 0.0,
           motorOn = true,
+          homed = true,
           stopCode = 1
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))
@@ -534,6 +576,10 @@ object GalilSimulatorActor {
       case s if s.contains('[') =>
         val value = state.embeddedVars.getOrElse(s, 0.0)
         f"$value%.4f"
+
+      // Scalar variable lookup (e.g., MG tcon, MG version)
+      case s if state.embeddedVars.contains(s) =>
+        f"${state.embeddedVars(s)}%.4f"
 
       case other =>
         println(s"[SIM] MG: unknown query '$other'")
@@ -722,6 +768,99 @@ object GalilSimulatorActor {
   }
 
   // ========================================
+  // Tell-query helpers (TP, TD, TV, SC, TS)
+  // ========================================
+
+  /**
+   * Handle a "tell" query command (TP, TD, TV, SC, TS).
+   *
+   * If an axis letter follows the command (e.g. "TPA"), returns a single value.
+   * If no axis letter follows (e.g. "TP"), returns comma-separated values for all
+   * simulated axes — matching real Galil controller behavior.
+   */
+  private def handleTellQuery(
+    state: SimState,
+    cmdString: String,
+    extract: SimAxis => String
+  ): (ByteString, SimState) = {
+    val rest = cmdString.drop(2).trim
+    if (rest.nonEmpty && rest.head.isLetter) {
+      // Single axis: TPA, TDB, TVA, etc.
+      val axis = rest.head
+      (formatReply(extract(getAxis(state, axis))), state)
+    } else {
+      // All axes: TP, TD, TV, etc. → "val, val, val, val"
+      val values = SimulatedAxes.map(c => extract(getAxis(state, c)))
+      (formatReply(values.mkString(", ")), state)
+    }
+  }
+
+  /**
+   * Compute the switches byte for an axis (used by TS and QR DataRecord).
+   *
+   * Bit 0: Stepper Mode (1 = stepper motor, motorType >= 2.0)
+   * Bit 1: Home complete (1 = axis has been homed)
+   */
+  private def switchesByte(ax: SimAxis): Int = {
+    var sw: Int = 0
+    if (ax.motorType >= 2.0) sw |= (1 << 0)
+    if (ax.homed) sw |= (1 << 1)
+    sw
+  }
+
+  // ========================================
+  // LV — List Variables (names and values)
+  // ========================================
+
+  /**
+   * List all embedded variables with their current values.
+   * Output format matches real Galil controller:
+   *   name= value
+   */
+  private def handleLV(state: SimState): (ByteString, SimState) = {
+    // LV lists only scalar (non-array) variables — exclude anything with "["
+    val scalars = state.embeddedVars.filter { case (name, _) => !name.contains('[') }
+    if (scalars.isEmpty) {
+      (formatReply(None), state)
+    } else {
+      val lines = scalars.toSeq.sortBy(_._1).map { case (name, value) =>
+        f"$name= $value%.4f"
+      }
+      (formatReply(lines.mkString("\r\n")), state)
+    }
+  }
+
+  // ========================================
+  // LA — List Arrays (names and dimensions)
+  // ========================================
+
+  /**
+   * List all embedded array names with their dimensions.
+   * Groups variables by base name and reports the max index + 1 as dimension.
+   * Output format matches real Galil controller:
+   *   basename[dim]
+   */
+  private def handleLA(state: SimState): (ByteString, SimState) = {
+    // Parse "name[idx]" patterns, group by base name, find max index
+    val arrayPattern = """^(.+)\[(\d+)\]$""".r
+    val arrays = state.embeddedVars.keys.collect {
+      case arrayPattern(base, idx) => (base, idx.toInt)
+    }.groupBy(_._1).map { case (base, entries) =>
+      val maxIdx = entries.map(_._2).max
+      (base, maxIdx + 1)
+    }
+
+    if (arrays.isEmpty) {
+      (formatReply(None), state)
+    } else {
+      val lines = arrays.toSeq.sortBy(_._1).map { case (name, dim) =>
+        s"$name[$dim]"
+      }
+      (formatReply(lines.mkString("\r\n")), state)
+    }
+  }
+
+  // ========================================
   // Motion simulation
   // ========================================
 
@@ -863,7 +1002,7 @@ object GalilSimulatorActor {
    *     - velocity = currentVelocity * 64 (Galil encoding)
    */
   private def buildDataRecord(state: SimState): DataRecord = {
-    val blocksPresent = List('S', 'T', 'I', 'A', 'B', 'C', 'D')
+    val blocksPresent = List('S', 'T', 'I') ++ SimulatedAxes
     val header = Header(blocksPresent.map(_.toString))
 
     val threadStatusByte = (state.threadStatus & 0xFF).toByte
@@ -915,15 +1054,14 @@ object GalilSimulatorActor {
     if (ax.velocity < 0) statusWord |= (1 << 7)
     if (!ax.motorOn) statusWord |= (1 << 0)
 
-    var switchesByte: Int = 0
-    if (ax.motorType >= 2.0) switchesByte |= (1 << 0)
+    val sw = switchesByte(ax)
 
     val qrVelocity = (ax.velocity * 64.0).toInt
     val pos = ax.position.toInt
 
     GalilAxisStatus(
       status = statusWord.toShort,
-      switches = switchesByte.toByte,
+      switches = sw.toByte,
       stopCode = ax.stopCode,
       referencePosition = pos,
       motorPosition = 0,

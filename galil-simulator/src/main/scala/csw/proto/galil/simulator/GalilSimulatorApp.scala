@@ -14,7 +14,7 @@ object GalilSimulatorApp {
 
   // Parses the command line options
   private val parser = new scopt.OptionParser[Options]("test-pekko-service-app") {
-    head("simulator", System.getProperty("VERSION"))
+    head("simulator", Option(System.getProperty("VERSION")).getOrElse("dev"))
 
     opt[String]("host") valueName "<hostname>" action { (x, c) =>
       c.copy(host = x)

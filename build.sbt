@@ -20,7 +20,6 @@ lazy val `galil-hcd` = project
   .enablePlugins(DeployApp)
   .settings(
     libraryDependencies ++= GalilHcd,
-    Test / fork := false  // Run tests in same JVM - allows -D flags to work
   )
   .dependsOn(`galil-io`)
 
@@ -46,7 +45,10 @@ lazy val `galil-simulator` = project
 // A REPL client to test talking to the Galil hardware or simulator
 lazy val `galil-repl` = project
   .enablePlugins(DeployApp)
-  .settings(libraryDependencies ++= `GalilRepl`)
+  .settings(
+    libraryDependencies ++= `GalilRepl`,
+    run / connectInput := true  // REPL needs stdin in forked JVM
+  )
   .dependsOn(`galil-io`)
 
 // Supports talking to and simulating a Galil device
@@ -66,7 +68,9 @@ lazy val `galil-deploy` = project
     libraryDependencies ++= GalilDeploy
   )
 
-// Pass system properties to forked test JVMs
+// Pass galil.* system properties to forked test JVMs.
+// This allows `sbt -Dgalil.config.path=... "galil-hcd/testOnly ..."` to work
+// reliably across compile/stage/test cycles within a single sbt session.
 Test / fork := true
 Test / javaOptions ++= {
   val props = sys.props.filter { case (k, _) => k.startsWith("galil.") }
