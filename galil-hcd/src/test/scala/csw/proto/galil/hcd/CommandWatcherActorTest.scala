@@ -57,14 +57,28 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
 
   /**
    * Spawn a CommandWatcher and return (watcherRef, resultCapture, isActor).
+   *
+   * @param initialCmdState Optional initial CmdState to set BEFORE spawning the watcher.
+   *                        This mirrors what the real CommandHandler does: it pushes activeThread
+   *                        to CmdState before creating the watcher, ensuring the watcher's initial
+   *                        snapshot reflects the true state. Without this, there is a race between
+   *                        the watcher's snapshot request and the test's state updates.
    */
   private def spawnWatcher(
     axis: Axis = Axis.A,
     commandName: String = "positionAxis",
     mask: CompletionMask = CompletionMask.positionAxis,
-    timeout: FiniteDuration = 5.seconds
+    timeout: FiniteDuration = 5.seconds,
+    initialCmdState: Map[String, Any] = Map.empty
   ): (ActorRef[CommandWatcherActor.Command], ResultCapture, ActorRef[InternalStateActor.Command]) =
     val isActor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(axis)))
+
+    // Pre-set CmdState before spawning watcher (mirrors CommandHandler behavior)
+    if initialCmdState.nonEmpty then
+      val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+      isActor ! InternalStateActor.UpdateAxisCmdState(axis, initialCmdState, probe.ref)
+      probe.receiveMessage() // wait for confirmation to ensure state is set
+
     val capture = new ResultCapture()
     val runId = Id()
     val config = WatchConfig(
@@ -175,14 +189,12 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
   // ========================================
 
   test("CommandWatcher should complete when positionAxis mask is satisfied") {
-    val (watcher, capture, isActor) = spawnWatcher()
+    // Pre-set activeThread before watcher starts (mirrors CommandHandler behavior)
+    val (watcher, capture, isActor) = spawnWatcher(
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true)
+    )
 
-    // Simulate: command started (thread active, moving)
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 1, "moving" -> true), testKit.system.ignoreRef)
-
-    // Give watcher time to receive and evaluate (should NOT complete yet)
-    Thread.sleep(100)
+    // Watcher should NOT complete yet (positionAxis needs inPosition=true)
     capture.awaitNoResult(200.millis) should be(true)
 
     // Simulate: position reached
@@ -202,12 +214,9 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
   }
 
   test("CommandWatcher should report error on axis error") {
-    val (watcher, capture, isActor) = spawnWatcher()
-
-    // Simulate: command running
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 1, "moving" -> true), testKit.system.ignoreRef)
-    Thread.sleep(50)
+    val (watcher, capture, isActor) = spawnWatcher(
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true)
+    )
 
     // Simulate: error occurs
     isActor ! InternalStateActor.UpdateAxisCmdState(
@@ -219,12 +228,10 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
   }
 
   test("CommandWatcher should report error on commandHalted") {
-    val (watcher, capture, isActor) = spawnWatcher(axis = Axis.B)
-
-    // Simulate: command running
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.B, Map("activeThread" -> 2, "moving" -> true), testKit.system.ignoreRef)
-    Thread.sleep(50)
+    val (watcher, capture, isActor) = spawnWatcher(
+      axis = Axis.B,
+      initialCmdState = Map("activeThread" -> 2, "moving" -> true)
+    )
 
     // Simulate: command interrupted
     isActor ! InternalStateActor.UpdateAxisCmdState(
@@ -244,30 +251,33 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
 
   test("CommandWatcher should report error on timeout") {
     // Use a very short timeout
-    val (watcher, capture, isActor) = spawnWatcher(timeout = 300.millis)
+    val (watcher, capture, isActor) = spawnWatcher(
+      timeout = 300.millis,
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true)
+    )
 
-    // Simulate: command running but never completes
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 1, "moving" -> true), testKit.system.ignoreRef)
-
-    // Wait for timeout
+    // Command running but never completes — wait for timeout
     val (_, success, msg) = capture.awaitAndGet(2.seconds)
     success should be(false)
     msg should include("timed out")
   }
 
   test("CommandWatcher should not complete until ALL mask conditions met") {
-    val (watcher, capture, isActor) = spawnWatcher()
+    // Pre-set active thread (mirrors CommandHandler behavior)
+    val (watcher, capture, isActor) = spawnWatcher(
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true)
+    )
 
-    // Each update satisfies ONE condition but not all
+    // Watcher should not complete — positionAxis mask not satisfied
+    capture.awaitNoResult(200.millis) should be(true)
+
+    // Thread released, motion stopped — but inPosition still false
     isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 0), testKit.system.ignoreRef) // thread released
+      Axis.A, Map("activeThread" -> 0, "moving" -> false), testKit.system.ignoreRef)
     Thread.sleep(50)
-    capture.awaitNoResult(200.millis) should be(true) // still moving=default(false) but inPosition=false
+    capture.awaitNoResult(200.millis) should be(true) // positionAxis mask needs inPosition=true
 
-    // Actually, default AxisCmdState has moving=false, inPosition=false, axisErrorMsg=""
-    // So with activeThread=0, the only missing condition is inPosition=true
-    // Let's set inPosition to satisfy the mask
+    // Now set inPosition to satisfy the last condition
     isActor ! InternalStateActor.UpdateAxisCmdState(
       Axis.A, Map("inPosition" -> true), testKit.system.ignoreRef)
 
@@ -278,13 +288,11 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
   test("CommandWatcher with homeAxis mask should complete without inPosition") {
     val (watcher, capture, isActor) = spawnWatcher(
       commandName = "homeAxis",
-      mask = CompletionMask.homeAxis
+      mask = CompletionMask.homeAxis,
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true)
     )
 
-    // Simulate: home started
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 1, "moving" -> true), testKit.system.ignoreRef)
-    Thread.sleep(50)
+    // Watcher should NOT complete yet (thread still active)
     capture.awaitNoResult(200.millis) should be(true)
 
     // Simulate: home complete — thread released, stopped, but inPosition=false
@@ -298,15 +306,12 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
   test("CommandWatcher with stopAxis mask should ignore errors") {
     val (watcher, capture, isActor) = spawnWatcher(
       commandName = "stopAxis",
-      mask = CompletionMask.stopAxis
+      mask = CompletionMask.stopAxis,
+      initialCmdState = Map("activeThread" -> 1, "moving" -> true, "axisErrorMsg" -> "previous fault")
     )
 
-    // Simulate: stop with pre-existing error
-    isActor ! InternalStateActor.UpdateAxisCmdState(
-      Axis.A, Map("activeThread" -> 1, "moving" -> true, "axisErrorMsg" -> "previous fault"),
-      testKit.system.ignoreRef)
-    Thread.sleep(50)
-    capture.awaitNoResult(200.millis) should be(true) // still moving
+    // Watcher should NOT complete yet (still moving)
+    capture.awaitNoResult(200.millis) should be(true)
 
     // Thread released, stopped — should complete despite error
     isActor ! InternalStateActor.UpdateAxisCmdState(
@@ -314,6 +319,33 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
 
     val (_, success, _) = capture.awaitAndGet()
     success should be(true) // stopAxis doesn't check errors
+  }
+
+  test("CommandWatcher should not complete on stale pre-command state") {
+    // The CommandHandler pushes activeThread to CmdState before spawning the watcher.
+    // This test verifies the watcher's initial snapshot sees activeThread > 0,
+    // preventing premature completion on masks that check activeThread==0.
+    val (watcher, capture, isActor) = spawnWatcher(
+      commandName = "selectWheel",
+      mask = CompletionMask.selectWheel,
+      initialCmdState = Map("activeThread" -> 3)
+    )
+
+    // Watcher should NOT complete — activeThread=3 doesn't satisfy mask (needs 0)
+    capture.awaitNoResult(300.millis) should be(true)
+
+    // Motor starts moving
+    isActor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A, Map("moving" -> true), testKit.system.ignoreRef)
+    Thread.sleep(50)
+    capture.awaitNoResult(200.millis) should be(true) // still active
+
+    // Complete: thread released, motion stopped
+    isActor ! InternalStateActor.UpdateAxisCmdState(
+      Axis.A, Map("activeThread" -> 0, "moving" -> false), testKit.system.ignoreRef)
+
+    val (_, success2, _) = capture.awaitAndGet()
+    success2 should be(true)
   }
 
   // ========================================

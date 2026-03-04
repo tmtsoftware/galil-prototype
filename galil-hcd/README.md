@@ -89,7 +89,7 @@ These return `Started` immediately and complete asynchronously via CommandRespon
 | **homeAxis** | Home axis to reference position | Idle when not moving, thread released |
 | **stopAxis** | Halt active motion on axis | Idle when not moving, thread released |
 | **trackAxis** | Jog-mode tracking with position/velocity targets | Tracking when thread released (motor continues) |
-| **selectWheel** | Position by discrete selection | Idle when not moving, thread released (pending) |
+| **selectWheel** | Position by discrete selection | Idle when not moving, thread released |
 
 Each long-running command spawns a CommandWatcherActor that monitors InternalState
 notifications against a command-specific CompletionMask.
@@ -106,17 +106,108 @@ it against the expected version using LCS-based diff, and logs any differences.
 
 Program source: `src/main/resources/programs/protoHCD_lab.dmc`
 
-| Label | Thread | Purpose |
-|-------|--------|---------|
-| `#Init` | 0 | Controller initialization (motor off, clear errors) |
-| `#SetupA`–`#SetupH` | 1–7 | Per-axis setup (motor type, limits, speed config) |
-| `#MoveA`–`#MoveH` | pool | Absolute position move (PA mode) |
-| `#HomeA`–`#HomeH` | pool | Home sequence (find index, set origin) |
-| `#StopA`–`#StopH` | pool | Controlled stop (ST command + cleanup) |
-| `#TrackA`–`#TrackH` | pool | Jog-mode tracking (JG mode with target updates) |
+| Label | Purpose |
+|-------|---------|
+| `#Init` | Controller initialization (motor off, clear errors) |
+| `#SetupA`–`#SetupH` | Per-axis setup (motor type, limits, speed config) |
+| `#MoveA`–`#MoveH` | Absolute position move (PA mode) |
+| `#HomeA`–`#HomeH` | Home sequence (find index, set origin) |
+| `#StopA`–`#StopH` | Controlled stop (ST command + cleanup) |
+| `#TrackA`–`#TrackH` | Jog-mode tracking (JG mode with target updates) |
+| `#SelectA`–`#SelectH` | Discrete wheel/filter position selection |
 
-Thread 0 is reserved for general-purpose operations. Threads 1–7 are allocated
-dynamically from the hardware thread pool.
+Thread 0 is reserved for general-purpose operations (#Init). Threads 1–7 are
+allocated dynamically by the HCD from the hardware thread pool (`MG _NO`
+bitmask) for all axis operations including Setup.
+
+## HMI Test Console
+
+The HCD includes an embedded browser-based HMI for real-time motor control and
+monitoring. It is served directly from the HCD process — no separate web server
+or build step required.
+
+### Starting the HMI
+
+The HMI starts automatically when the HCD initializes. Open a browser to the
+appropriate port:
+
+| Mode | HMI URL | Controller |
+|------|---------|------------|
+| Hardware | `http://localhost:9090` | DMC-500x0 at 192.168.86.41:23 |
+| Simulator | `http://localhost:9091` | GalilSimulatorApp at 127.0.0.1:8888 |
+
+#### With Real Hardware
+
+```bash
+# Terminal 1: Start CSW Location Service (required)
+csw-services start
+
+# Terminal 2: Build and launch the HCD
+sbt stage
+./target/universal/stage/bin/galil-hcd \
+  -main csw.proto.galil.hcd.GalilHcdApp \
+  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  -Dgalil.config.path=GalilHcdConfig-Hardware.conf
+
+# Open browser to http://localhost:9090
+```
+
+#### With Simulator
+
+```bash
+# Terminal 1: Start CSW Location Service (required)
+csw-services start
+
+# Terminal 2: Start the Galil simulator
+sbt "galil-simulator/run"
+
+# Terminal 3: Build and launch the HCD
+sbt stage
+./target/universal/stage/bin/galil-hcd \
+  -main csw.proto.galil.hcd.GalilHcdApp \
+  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  -Dgalil.config.path=GalilHcdConfig-Simulator.conf
+
+# Open browser to http://localhost:9091
+```
+
+**Note:** Hardware and simulator HCDs cannot run simultaneously — both register
+the same component name (`APS.ICS.HCD.GalilMotion`) with the CSW Location
+Service. Stop one before starting the other.
+
+### HMI Features
+
+- **Real-time axis cards** — Position, velocity, demand, boolean flags (InPos,
+  Stepper, Motor, FwdLim, RevLim), command state, and error display per axis.
+  Active axes are fully interactive; inactive axes show dimmed telemetry with
+  an override toggle.
+- **Command controls** — Home, Stop, Position, Offset, Wheel, and Track buttons
+  per axis. Position/offset targets entered as encoder counts.
+- **Motor configuration** — Collapsible panel per axis for Speed, Acceleration,
+  Deceleration, Index Offset, Index Speed, and Threshold. Values auto-populate
+  from controller; Reload refreshes, Apply sends configAxis.
+- **Position chart** — Real-time line chart of axis positions (Recharts, active
+  axes only, ~2Hz sampling).
+- **Controller console** — MG output from embedded programs (hardware mode only;
+  skipped in simulation mode). Color-coded: errors red, homed green, moves blue.
+- **Simulation indicator** — Amber "SIMULATING" badge and top border when running
+  against the simulator.
+- **WebSocket streaming** — State updates at QR polling rate (1Hz standby, 10Hz
+  active). Automatic reconnection on disconnect.
+
+### Architecture
+
+The HMI runs entirely within the HCD process:
+
+- **HmiServer** (Pekko HTTP) — WebSocket `/ws/state` for streaming, REST
+  `POST /api/command` for commands, `GET /api/console` for buffered console
+  history.
+- **HmiJsonProtocol** — Serializes HcdState/AxisState/AxisCmdState to JSON
+  using play-json.
+- **ConsoleMessageReader** — Separate TCP handle to controller for MG output
+  (hardware mode only). Uses `CF I` + `CW 2` for ASCII routing.
+- **index.html** — Single-file React SPA (CDN, no build step). Vanilla
+  `React.createElement` calls — no JSX transpilation needed.
 
 ## Running Tests
 
@@ -136,8 +227,8 @@ sbt "galil-hcd/testOnly *GalilHcdConfigTest"          # 9 tests — config parsi
 sbt "galil-hcd/testOnly *InternalStateActorTest"       # 30 tests — state management
 sbt "galil-hcd/testOnly *StatusMonitorTest"            # 19 tests — QR polling, adaptive rate
 sbt "galil-hcd/testOnly *CommandHandlerActorTest"      # 16 tests — immediate commands
-sbt "galil-hcd/testOnly *CommandWatcherActorTest"      # 15 tests — completion mask evaluation
-sbt "galil-hcd/testOnly *LongRunningCommandTest"       # 24 tests — motion command handlers
+sbt "galil-hcd/testOnly *CommandWatcherActorTest"      # 16 tests — completion mask evaluation
+sbt "galil-hcd/testOnly *LongRunningCommandTest"       # 29 tests — motion command handlers
 ```
 
 ### Simulator-Dependent Tests
@@ -187,12 +278,9 @@ use FrameworkTestKit which binds the same Pekko Remoting TCP port.
 | InternalStateActorTest | 30 | None |
 | StatusMonitorTest | 19 | None |
 | CommandHandlerActorTest | 16 | None |
-| CommandWatcherActorTest | 15 | None |
-| LongRunningCommandTest | 24 + 5 ignored | None |
+| CommandWatcherActorTest | 16 | None |
+| LongRunningCommandTest | 29 | None |
 | ControllerInterfaceActorTest | 16 | Simulator |
 | CurrentStatePublisherActorTest | 4 | Simulator |
 | **HcdIntegrationTest** | **13** | **Hardware or Simulator** |
-| **Total** | **146 + 5 ignored** | |
-
-The 5 ignored tests are for `selectWheel` — the embedded `#SelectX` programs
-have not yet been created on the test bench controller.
+| **Total** | **152 + 13 integration** | |

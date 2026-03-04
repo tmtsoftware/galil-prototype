@@ -178,6 +178,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       "CurrentStatePublisher"
     )
 
+  // 5. HMI Server - Embedded HTTP/WebSocket test console (created during initialize)
+  private var hmiServer: hmi.HmiServer = uninitialized
+
   // ========================================
   // Lifecycle Handlers
   // ========================================
@@ -290,6 +293,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       log.info(s"Axis $axisChar config applied: threshold=${axisConfig.inPositionThreshold}, " +
         s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}")
     }
+    // Set the activeAxes flags and simulation mode on HcdState so the HMI knows which axes are configured
+    internalStateActor ! InternalStateActor.UpdateHcdState(
+      Map(
+        "activeAxes" -> hcdConfig.activeAxes.toArray,
+        "simulation" -> hcdConfig.simulate
+      ),
+      ctx.system.ignoreRef
+    )
 
     // Phase 4: Embedded program verification + controller initialization
     //
@@ -328,6 +339,33 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       case ex: Exception =>
         log.error("Initialization failed", ex = ex)
         throw ex
+    }
+    
+    // Phase 5: Start HMI test console server
+    // Runs after all actors are created and initialization is complete.
+    // Uses the ActorSystem from the component's context for Pekko HTTP.
+    try {
+      val hmiPort = hcdConfig.controller.port match {
+        case 23   => 9090  // Real hardware default
+        case 8888 => 9091  // Simulator — different port to allow both
+        case _    => 9090
+      }
+      hmiServer = new hmi.HmiServer(
+        internalStateActor = internalStateActor,
+        commandHandlerActor = commandHandlerActor,
+        hcdPrefix = componentInfo.prefix,
+        log = log,
+        port = hmiPort,
+        controllerHost = hcdConfig.controller.hostString,
+        controllerPort = hcdConfig.controller.port,
+        simulate = hcdConfig.simulate
+      )(ctx.system)
+      hmiServer.start()
+      log.info(s"HMI test console starting on port $hmiPort")
+    } catch {
+      case ex: Exception =>
+        log.warn(s"HMI server failed to start (non-fatal): ${ex.getMessage}")
+        // HMI failure is non-fatal — the HCD still functions without it
     }
   }
 
@@ -891,6 +929,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   override def onShutdown(): Unit = {
     log.info("Shutting down Galil HCD")
+    
+    // Stop HMI server first (clients will see disconnect)
+    if (hmiServer != null) hmiServer.stop()
     
     // Stop actors gracefully (null checks for case where initialize failed partway)
     if (statusMonitor != null) statusMonitor ! StatusMonitor.SetPolling(enabled = false)

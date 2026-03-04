@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GalilMotion HCD — Test Console</title>
+<style>
+  :root { --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0B0F19; color: #F9FAFB; font-family: system-ui, -apple-system, sans-serif; }
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  input::placeholder { color: #4B5563; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  @keyframes ping { 0%{transform:scale(1);opacity:.4} 100%{transform:scale(2);opacity:0} }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+<div id="root"><p style="color:#6B7280;padding:20px;font-family:monospace">Loading GalilMotion HMI...</p></div>
+
+<!-- React 18 from CDN -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Recharts is optional — chart panel gracefully hidden if CDN unavailable -->
+<script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+<script>
+'use strict';
+const { useState, useEffect, useRef, useCallback } = React;
+// Recharts may not load (CDN unavailable, air-gapped network, etc.)
+const hasRecharts = typeof Recharts !== 'undefined';
+const RC = hasRecharts ? Recharts : {};
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = RC;
+const e = React.createElement;
+
+// ── Configuration ──
+const CHART_COLORS = {A:'#10B981',B:'#3B82F6',C:'#F59E0B',D:'#EF4444',E:'#8B5CF6',F:'#EC4899',G:'#14B8A6',H:'#F97316'};
+const STATE_COLORS = {
+  Lost:    {bg:'#374151',text:'#9CA3AF',dot:'#6B7280',bdr:'#4B5563'},
+  Idle:    {bg:'#064E3B',text:'#6EE7B7',dot:'#10B981',bdr:'#065F46'},
+  Homing:  {bg:'#1E3A5F',text:'#93C5FD',dot:'#3B82F6',bdr:'#1E40AF'},
+  Moving:  {bg:'#78350F',text:'#FCD34D',dot:'#F59E0B',bdr:'#92400E'},
+  Tracking:{bg:'#164E63',text:'#67E8F9',dot:'#06B6D4',bdr:'#155E75'},
+  Error:   {bg:'#7F1D1D',text:'#FCA5A5',dot:'#EF4444',bdr:'#991B1B'},
+};
+
+const API_BASE = window.location.origin;
+const WS_URL = `ws://${window.location.host}/ws/state`;
+
+// ── WebSocket hook ──
+function useHmiConnection() {
+  const [state, setState] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [consoleLines, setConsoleLines] = useState([]);
+  const wsRef = useRef(null);
+  const reconnectRef = useRef(null);
+
+  const connect = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState < 2) return;
+    try {
+      const ws = new WebSocket(WS_URL);
+      ws.onopen = () => { setConnected(true); console.log('WS connected'); };
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'stateUpdate') {
+            setState(msg);
+          } else if (msg.type === 'consoleLine') {
+            setConsoleLines(prev => {
+              const next = [...prev, {time: msg.timestamp, text: msg.text}];
+              return next.length > 200 ? next.slice(-200) : next;
+            });
+          }
+        } catch(e) { console.warn('Bad WS frame', e); }
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        reconnectRef.current = setTimeout(connect, 2000);
+      };
+      ws.onerror = () => ws.close();
+      wsRef.current = ws;
+    } catch(e) { console.error('WS connect error', e); }
+  }, []);
+
+  useEffect(() => {
+    // Fetch initial state snapshot via REST
+    fetch(`${API_BASE}/api/status`)
+      .then(r => r.json()).then(setState)
+      .catch(e => console.warn('Initial status fetch failed', e));
+    // Fetch buffered console messages
+    fetch(`${API_BASE}/api/console`)
+      .then(r => r.json()).then(data => {
+        if (data.lines) {
+          setConsoleLines(data.lines.map(l => ({time: l.timestamp, text: l.text})));
+        }
+      })
+      .catch(e => console.warn('Initial console fetch failed', e));
+    connect();
+    return () => {
+      clearTimeout(reconnectRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [connect]);
+
+  const submitCommand = useCallback((commandName, params) => {
+    return fetch(`${API_BASE}/api/command`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({commandName, params})
+    }).then(r => r.json()).catch(err => ({runId:'',status:'Error',message:err.message}));
+  }, []);
+
+  return { state, connected, submitCommand, consoleLines };
+}
+
+// ── Components ──
+
+function StatusDot({axisState}) {
+  const c = (STATE_COLORS[axisState]||STATE_COLORS.Lost).dot;
+  const pulse = axisState==='Moving'||axisState==='Homing'||axisState==='Tracking';
+  const pulseStyle = pulse ? {animation:'pulse 1.2s ease-in-out infinite'} : {};
+  return e('span',{style:{position:'relative',display:'inline-flex',alignItems:'center',justifyContent:'center',width:12,height:12,marginRight:5}},
+    e('span',{style:Object.assign({width:8,height:8,borderRadius:'50%',backgroundColor:c}, pulseStyle)}),
+    pulse ? e('span',{style:{position:'absolute',width:12,height:12,borderRadius:'50%',border:'1.5px solid '+c,opacity:.4,animation:'ping 1.2s ease-in-out infinite'}}) : null
+  );
+}
+
+function BoolFlag({value,label,trueColor='#10B981',falseColor='#4B5563'}) {
+  return e('span',{style:{display:'inline-flex',alignItems:'center',gap:3,fontSize:10.5,color:'#D1D5DB',marginRight:8}},
+    e('span',{style:{width:6,height:6,borderRadius:1.5,backgroundColor:value?trueColor:falseColor}}),
+    label
+  );
+}
+
+function Btn({label,color,onClick,small}) {
+  const [h,setH] = useState(false);
+  return e('button',{onClick,onMouseEnter:()=>setH(true),onMouseLeave:()=>setH(false),
+    style:{backgroundColor:h?color:`${color}22`,color:h?'#FFF':color,
+      border:`1px solid ${color}55`,borderRadius:4,
+      padding:small?'2px 8px':'3px 12px',fontSize:small?10.5:11.5,
+      fontWeight:600,cursor:'pointer',fontFamily:'var(--mono)',
+      transition:'all .12s',whiteSpace:'nowrap'}},label);
+}
+
+function In({value,onChange,ph,onEnter,style}) {
+  return e('input',{type:'text',value,onChange:ev=>onChange(ev.target.value),
+    onKeyDown:ev=>ev.key==='Enter'&&onEnter&&onEnter(),
+    placeholder:ph,
+    style:{backgroundColor:'#1F2937',border:'1px solid #374151',borderRadius:4,
+      padding:'3px 6px',fontSize:11.5,color:'#F9FAFB',fontFamily:'var(--mono)',outline:'none',...style}});
+}
+
+function CmdRow({label,value,onChange,ph,onGo,goColor='#10B981'}) {
+  return e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:4}},
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label),
+    e(In,{value,onChange,ph,onEnter:onGo,style:{flex:1}}),
+    e(Btn,{label:'Go',color:goColor,small:true,onClick:onGo}));
+}
+
+function AxisErrorBar({msg}) {
+  if (!msg) return null;
+  return e('div',{style:{backgroundColor:'#451A1A',borderRadius:3,padding:'4px 8px',margin:'6px 0 2px',
+    fontSize:10.5,color:'#FCA5A5',display:'flex',alignItems:'center',gap:5,
+    fontFamily:'var(--mono)',borderLeft:'3px solid #EF4444'}},
+    e('span',{style:{fontWeight:700,fontSize:9.5,color:'#F87171'}},'ERR'),
+    msg);
+}
+
+function AxisCard({axis,axState,cmdSt,onCommand,active}) {
+  const [posTarget,setPosTarget] = useState('');
+  const [offTarget,setOffTarget] = useState('');
+  const [wheelPos,setWheelPos] = useState('');
+  const [trackPos,setTrackPos] = useState('');
+  const [trackVel,setTrackVel] = useState('20');
+  const [override,setOverride] = useState(false);
+  const [showConfig,setShowConfig] = useState(false);
+  // Config fields — initialized from state on first open
+  const [cfgVel,setCfgVel] = useState('');
+  const [cfgAcc,setCfgAcc] = useState('');
+  const [cfgDec,setCfgDec] = useState('');
+  const [cfgIdxOfs,setCfgIdxOfs] = useState('');
+  const [cfgIdxSpd,setCfgIdxSpd] = useState('');
+  const [cfgThresh,setCfgThresh] = useState('');
+  const [cfgLoaded,setCfgLoaded] = useState(false);
+
+  // Populate config fields from current state when panel first opens
+  useEffect(() => {
+    if (showConfig && !cfgLoaded && axState) {
+      setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+      setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+      setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+      setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+      setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+      setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+      setCfgLoaded(true);
+    }
+    if (!showConfig) setCfgLoaded(false);
+  }, [showConfig, cfgLoaded, axState]);
+
+  if (!axState) return null;
+  const enabled = active || override;
+  const colors = STATE_COLORS[axState.axisState] || STATE_COLORS.Lost;
+  const cmd = (name,extra={}) => { if (enabled) onCommand(name,{axis,...extra}); };
+  const cs = cmdSt || {};
+  const dim = enabled ? 1 : 0.35;
+
+  const sendConfig = () => {
+    const params = {};
+    if (cfgVel) params.velocity = cfgVel;
+    if (cfgAcc) params.acceleration = cfgAcc;
+    if (cfgDec) params.deceleration = cfgDec;
+    if (cfgIdxOfs) params.indexOffset = cfgIdxOfs;
+    if (cfgIdxSpd) params.indexSpeed = cfgIdxSpd;
+    if (cfgThresh) params.inPositionThreshold = cfgThresh;
+    if (Object.keys(params).length > 0) cmd('configAxis', params);
+  };
+
+  // Reload fields from live state
+  const reloadConfig = () => {
+    if (!axState) return;
+    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+  };
+
+  return e('div',{style:{backgroundColor:'#111827',border:`1px solid ${enabled?colors.bdr:'#1F2937'}`,
+    borderRadius:8,overflow:'hidden',minWidth:270,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
+    opacity:enabled?1:0.85, position:'relative'}},
+
+    // Header
+    e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+      e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:14,color:enabled?'#F9FAFB':'#6B7280',letterSpacing:1.5}},`AXIS ${axis}`),
+      !active ? e('span',{style:{fontSize:8.5,color:override?'#F59E0B':'#4B5563',cursor:'pointer',
+        padding:'2px 6px',borderRadius:3,border:`1px solid ${override?'#F59E0B44':'#27303f'}`,
+        backgroundColor:override?'#F59E0B11':'transparent',userSelect:'none'},
+        onClick:()=>setOverride(!override),title:'Override: enable commands on unconfigured axis'},
+        override?'OVERRIDE':'INACTIVE')
+      : e('span',{style:{display:'flex',alignItems:'center',fontSize:11.5,fontWeight:600,color:colors.text}},
+        e(StatusDot,{axisState:axState.axisState}), axState.axisState)),
+
+    // Status line for inactive+override showing axis state
+    !active && override ? e('div',{style:{padding:'0 12px 0',display:'flex',justifyContent:'flex-end'}},
+      e('span',{style:{display:'flex',alignItems:'center',fontSize:10.5,fontWeight:600,color:colors.text}},
+        e(StatusDot,{axisState:axState.axisState}), axState.axisState)) : null,
+
+    // Telemetry
+    e('div',{style:{padding:'8px 12px 4px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim}},
+      e('div',{style:{display:'grid',gridTemplateColumns:'80px 1fr',rowGap:2}},
+        e('span',{style:{color:'#6B7280'}},'Position'),
+        e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:15,fontVariantNumeric:'tabular-nums'}},
+          (axState.position||0).toFixed(1)),
+        e('span',{style:{color:'#6B7280'}},'Velocity'),
+        e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
+          (axState.velocity||0).toFixed(1)),
+        e('span',{style:{color:'#6B7280'}},'Demand'),
+        e('span',{style:{color:'#93C5FD',fontVariantNumeric:'tabular-nums'}},
+          (axState.demand||0).toFixed(1))),
+
+      e('div',{style:{marginTop:6,display:'flex',flexWrap:'wrap'}},
+        e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
+        e(BoolFlag,{value:axState.isStepper,label:'Stepper',trueColor:'#8B5CF6'}),
+        e(BoolFlag,{value:!axState.motorOff,label:'Motor',trueColor:'#10B981',falseColor:'#EF4444'}),
+        e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444'}),
+        e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444'})),
+
+      // CmdState
+      e('div',{style:{marginTop:6,padding:'4px 7px',backgroundColor:'#1F2937',borderRadius:4,
+        fontSize:10.5,color:'#9CA3AF',display:'grid',gridTemplateColumns:'1fr 1fr',gap:1}},
+        e('span',null,'Thread: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
+        e('span',null,'Moving: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Yes':'No')),
+        e('span',{style:{gridColumn:'1/-1'}},'Cmd: ',
+          e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
+
+      // Error bar (shows when either source has non-empty msg)
+      e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null})),
+
+    // Commands (hidden when not enabled)
+    enabled ? e('div',{style:{padding:'6px 12px 10px',borderTop:'1px solid #1F2937'}},
+      e('div',{style:{display:'flex',gap:5,marginBottom:5}},
+        e(Btn,{label:'Home',color:'#3B82F6',onClick:()=>cmd('homeAxis')}),
+        e(Btn,{label:'Stop',color:'#EF4444',onClick:()=>cmd('stopAxis')}),
+        e(Btn,{label:showConfig?'Hide Cfg':'Config',color:'#6B7280',onClick:()=>setShowConfig(!showConfig)})),
+      e(CmdRow,{label:'Pos',value:posTarget,onChange:setPosTarget,ph:'target',
+        onGo:()=>cmd('positionAxis',{target:posTarget})}),
+      e(CmdRow,{label:'Ofs',value:offTarget,onChange:setOffTarget,ph:'offset',
+        onGo:()=>cmd('offsetAxis',{target:offTarget})}),
+      e(CmdRow,{label:'Whl',value:wheelPos,onChange:setWheelPos,ph:'pos #',
+        onGo:()=>cmd('selectWheel',{target:wheelPos}),goColor:'#8B5CF6'}),
+      e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:4}},
+        e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},'Trk'),
+        e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
+        e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
+        e(Btn,{label:'Go',color:'#06B6D4',small:true,
+          onClick:()=>cmd('trackAxis',{target:trackPos,target2:trackVel})})),
+
+      // Config panel (collapsible)
+      showConfig ? e('div',{style:{marginTop:8,padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
+        border:'1px solid #1F2937'}},
+        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+          fontFamily:'var(--mono)'}},'MOTION CONFIG'),
+        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+          fontFamily:'var(--mono)',fontSize:10.5}},
+          e('span',{style:{color:'#9CA3AF'}},'Speed'),
+          e(In,{value:cfgVel,onChange:setCfgVel,ph:'counts/s'}),
+          e('span',{style:{color:'#9CA3AF'}},'Accel'),
+          e(In,{value:cfgAcc,onChange:setCfgAcc,ph:'counts/s²'}),
+          e('span',{style:{color:'#9CA3AF'}},'Decel'),
+          e(In,{value:cfgDec,onChange:setCfgDec,ph:'counts/s²'}),
+          e('span',{style:{color:'#9CA3AF'}},'Idx Ofs'),
+          e(In,{value:cfgIdxOfs,onChange:setCfgIdxOfs,ph:'counts'}),
+          e('span',{style:{color:'#9CA3AF'}},'Idx Spd'),
+          e(In,{value:cfgIdxSpd,onChange:setCfgIdxSpd,ph:'counts/s'}),
+          e('span',{style:{color:'#9CA3AF'}},'Thresh'),
+          e(In,{value:cfgThresh,onChange:setCfgThresh,ph:'counts'})),
+        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+          e(Btn,{label:'Reload',color:'#4B5563',small:true,onClick:reloadConfig}),
+          e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig}))
+      ) : null) : null);
+}
+
+function ThreadStatusBar({threadStatus}) {
+  if (!threadStatus) return null;
+  return e('div',{style:{display:'flex',gap:2,alignItems:'center',fontFamily:'var(--mono)',fontSize:9.5,color:'#6B7280'}},
+    e('span',{style:{marginRight:2}},'Thr:'),
+    ...threadStatus.split('').map((b,i) =>
+      e('span',{key:i,style:{width:13,height:13,borderRadius:2,display:'inline-flex',
+        alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:700,
+        backgroundColor:b==='1'?'#F59E0B22':'#1F2937',
+        color:b==='1'?'#FCD34D':'#374151',
+        border:`1px solid ${b==='1'?'#F59E0B44':'#27303f'}`}},i)));
+}
+
+function ControllerConsole({lines}) {
+  const endRef = useRef(null);
+  const containerRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  useEffect(() => {
+    if (autoScroll && endRef.current) {
+      endRef.current.scrollIntoView({behavior:'auto'});
+    }
+  }, [lines.length, autoScroll]);
+
+  // Detect manual scroll — disable auto-scroll if user scrolls up
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    setAutoScroll(atBottom);
+  }, []);
+
+  if (!lines.length) return null;
+
+  // Format timestamp to just HH:MM:SS
+  const fmtTime = (t) => {
+    try { return new Date(t).toTimeString().slice(0,8); }
+    catch(e) { return ''; }
+  };
+
+  return e('div',{style:{backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,
+    padding:'8px 12px',fontFamily:'var(--mono)',fontSize:11}},
+    e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}},
+      e('span',{style:{color:'#6B7280',fontSize:9.5,fontWeight:700,letterSpacing:1.2}},'CONTROLLER CONSOLE'),
+      e('span',{style:{fontSize:9,color:autoScroll?'#065F46':'#4B5563',
+        backgroundColor:autoScroll?'#064E3B22':'transparent',
+        padding:'1px 6px',borderRadius:3,cursor:'pointer'},
+        onClick:()=>setAutoScroll(!autoScroll)},autoScroll?'auto-scroll':'scroll paused')),
+    e('div',{ref:containerRef, onScroll:handleScroll,
+      style:{maxHeight:180,overflowY:'auto',lineHeight:1.5}},
+      ...lines.map((l,i) =>
+        e('div',{key:i,style:{color:'#D1D5DB',display:'flex',gap:8}},
+          e('span',{style:{color:'#374151',flexShrink:0,fontSize:10}},fmtTime(l.time)),
+          e('span',{style:{color: l.text.includes('ERROR')||l.text.includes('POSERR')?'#FCA5A5':
+            l.text.includes('Homed')?'#6EE7B7':
+            l.text.includes('STOP')?'#FCD34D':
+            l.text.includes('MOVE')||l.text.includes('move to')?'#93C5FD':
+            l.text.includes('TRACK')?'#67E8F9':'#D1D5DB'}},l.text))),
+      e('div',{ref:endRef})));
+}
+
+function CommandLog({entries}) {
+  const endRef = useRef(null);
+  const containerRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  useEffect(() => {
+    if (autoScroll && endRef.current) {
+      endRef.current.scrollIntoView({behavior:'auto'});
+    }
+  }, [entries.length, autoScroll]);
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    setAutoScroll(atBottom);
+  }, []);
+
+  if (!entries.length) return null;
+  return e('div',{ref:containerRef, onScroll:handleScroll,
+    style:{backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,
+    padding:'8px 12px',maxHeight:130,overflowY:'auto',fontFamily:'var(--mono)',fontSize:10.5}},
+    e('div',{style:{color:'#6B7280',fontSize:9.5,fontWeight:700,marginBottom:4,letterSpacing:1.2}},'COMMAND LOG'),
+    ...entries.map((en,i) =>
+      e('div',{key:i,style:{color:'#D1D5DB',marginBottom:1.5,display:'flex',gap:6,lineHeight:1.4}},
+        e('span',{style:{color:'#4B5563',flexShrink:0}},en.time),
+        e('span',{style:{color:'#93C5FD'}},en.command),
+        e('span',{style:{color:'#6B7280'}},en.axis),
+        en.detail && e('span',{style:{color:'#6B7280'}},en.detail),
+        e('span',{style:{color:en.status==='Error'?'#FCA5A5':en.status==='Completed'?'#6EE7B7':'#FCD34D'}},
+          '→ '+en.status),
+        en.message && e('span',{style:{color:'#FCA5A5'}},en.message))),
+    e('div',{ref:endRef}));
+}
+
+function PositionChart({history,activeAxes}) {
+  if (!hasRecharts || history.length < 3) return null;
+  return e('div',{style:{backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px'}},
+    e('div',{style:{color:'#6B7280',fontSize:9.5,fontWeight:700,marginBottom:4,letterSpacing:1.2,fontFamily:'var(--mono)'}},'POSITION HISTORY'),
+    e(ResponsiveContainer,{width:'100%',height:150},
+      e(LineChart,{data:history,margin:{top:2,right:6,left:6,bottom:0}},
+        e(CartesianGrid,{strokeDasharray:'3 3',stroke:'#1F293788'}),
+        e(XAxis,{dataKey:'t',tick:{fontSize:9,fill:'#374151'},axisLine:{stroke:'#1F2937'},tickLine:false}),
+        e(YAxis,{tick:{fontSize:9,fill:'#4B5563'},axisLine:{stroke:'#1F2937'},tickLine:false,width:48}),
+        e(Tooltip,{contentStyle:{backgroundColor:'#1F2937',border:'1px solid #374151',fontSize:10,fontFamily:'monospace'}}),
+        e(Legend,{wrapperStyle:{fontSize:10,fontFamily:'monospace'}}),
+        ...activeAxes.map(a =>
+          e(Line,{key:a,type:'monotone',dataKey:a,stroke:CHART_COLORS[a],dot:false,strokeWidth:1.5,isAnimationActive:false})))));
+}
+
+function ErrorBanner({hcdState,controllerErrorMsg}) {
+  if (hcdState==='Ready' && !controllerErrorMsg) return null;
+  return e('div',{style:{backgroundColor:'#7F1D1D',border:'1px solid #991B1B',borderRadius:6,
+    padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:10,fontFamily:'var(--mono)',fontSize:12}},
+    e('span',{style:{fontSize:18,lineHeight:1}},'⚠'),
+    e('div',null,
+      e('div',{style:{color:'#FCA5A5',fontWeight:700}},'HCD State: '+hcdState),
+      controllerErrorMsg && e('div',{style:{color:'#FECACA',marginTop:2,fontSize:11}},controllerErrorMsg)));
+}
+
+// ── Main App ──
+function GalilHMI() {
+  const {state, connected, submitCommand, consoleLines} = useHmiConnection();
+  const [cmdLog, setCmdLog] = useState([]);
+  const [history, setHistory] = useState([]);
+  const tickRef = useRef(0);
+
+  // Derive active axes from state
+  const activeAxes = state?.activeAxes || [];
+  const allAxes = state?.axes ? Object.keys(state.axes).sort() : [];
+  const isActive = (a) => activeAxes.includes(a);
+
+  // Record position history at 2Hz
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (!state || !state.axes) return;
+      tickRef.current++;
+      setHistory(prev => {
+        const entry = {t: tickRef.current};
+        activeAxes.forEach(a => { entry[a] = state.axes[a]?.position || 0; });
+        const next = [...prev, entry];
+        return next.length > 120 ? next.slice(-120) : next;
+      });
+    }, 500);
+    return () => clearInterval(iv);
+  }, [state, activeAxes.join(',')]);
+
+  const handleCommand = useCallback((commandName, params) => {
+    const time = new Date().toTimeString().slice(0,8);
+    const detail = Object.entries(params).filter(([k])=>k!=='axis').map(([k,v])=>`${k}=${v}`).join(' ');
+    submitCommand(commandName, params).then(result => {
+      setCmdLog(prev => [...prev.slice(-199), {time, command:commandName, axis:params.axis,
+        status:result.status, message:result.message||'', detail}]);
+    });
+  }, [submitCommand]);
+
+  const hcdState = state?.hcdState || 'Unknown';
+  const simulation = state?.simulation || false;
+
+  return e('div',{style:{padding:'10px 14px',minHeight:'100vh',
+    borderTop: simulation ? '3px solid #F59E0B' : 'none'}},
+
+    // Header
+    e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',
+      marginBottom:8,paddingBottom:7,borderBottom:'1px solid #1F2937'}},
+      e('div',{style:{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}},
+        e('h1',{style:{fontSize:15,fontWeight:700,fontFamily:'var(--mono)',letterSpacing:.5}},'GalilMotion HCD'),
+        e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,backgroundColor:'#1F2937',color:'#9CA3AF',fontFamily:'var(--mono)'}},
+          'DMC-500x0'),
+        e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,fontFamily:'var(--mono)',fontWeight:700,
+          backgroundColor:hcdState==='Ready'?'#064E3B':'#7F1D1D',
+          color:hcdState==='Ready'?'#6EE7B7':'#FCA5A5'}},hcdState),
+        simulation && e('span',{style:{fontSize:9,padding:'2px 6px',borderRadius:3,
+          backgroundColor:'#92400E',color:'#FCD34D',fontFamily:'var(--mono)',fontWeight:700,
+          letterSpacing:1}},'SIMULATING'),
+        e(ThreadStatusBar,{threadStatus:state?.threadStatus})),
+      e('div',{style:{display:'flex',alignItems:'center',gap:6}},
+        e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
+          padding:'2px 8px',borderRadius:10,fontSize:10,fontWeight:600,
+          backgroundColor:connected?'#064E3B':'#7F1D1D',
+          color:connected?'#6EE7B7':'#FCA5A5',fontFamily:'var(--mono)'}},
+          e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:connected?'#10B981':'#EF4444'}}),
+          connected?'WS':'Disconnected'))),
+
+    // Controller error banner
+    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg}),
+
+    // Axis cards
+    e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))',gap:10,marginBottom:10}},
+      ...allAxes.map(a =>
+        e(AxisCard,{key:a, axis:a, axState:state?.axes?.[a], cmdSt:state?.cmdState?.[a], onCommand:handleCommand, active:isActive(a)}))),
+
+    // Position chart
+    e('div',{style:{marginBottom:10}}, e(PositionChart,{history,activeAxes})),
+
+    // Controller console (MG output from embedded programs)
+    e('div',{style:{marginBottom:10}}, e(ControllerConsole,{lines:consoleLines})),
+
+    // Command log
+    e(CommandLog,{entries:cmdLog}),
+
+    // Footer
+    e('div',{style:{marginTop:10,display:'flex',justifyContent:'space-between',fontSize:9,color:'#374151',fontFamily:'var(--mono)',padding:'0 2px'}},
+      e('span',null,'APS.ICS.HCD.GalilMotion · Prototype HMI · Pekko HTTP + React'),
+      e('span',null,`Axes: ${activeAxes.join(',')} · Rate: ${(state?.pollingRateHz||0).toFixed(0)}Hz`)));
+}
+
+// Mount
+try {
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(e(GalilHMI));
+} catch(err) {
+  document.getElementById('root').innerHTML =
+    '<pre style="color:#FCA5A5;padding:20px;font-family:monospace">HMI render error:\n' + err.stack + '</pre>';
+}
+</script>
+</body>
+</html>

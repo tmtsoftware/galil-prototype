@@ -311,39 +311,44 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     MockCIActor.commands should contain("XQ #HomeA,1")
   }
 
-  test("homeAxis should transition axisState to Homing then complete to Idle (fast path)") {
-    // With the mock CI actor, ExecuteProgram returns threadWasActive=true but the
-    // watcher immediately completes (mock IS has no active thread), transitioning
-    // the axis from Homing → Idle. This verifies the full fast-completion path.
+  test("homeAxis should transition axisState to Homing then complete to Idle") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
     val setup = makeSetup("homeAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
+    Thread.sleep(200)
+
+    // Simulate StatusMonitor: home complete — thread released, not moving
+    simulateHomeComplete(isActor, Axis.A)
     Thread.sleep(300)
 
     val probe = testKit.createTestProbe[Option[AxisState]]()
     isActor ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
     val axisState = probe.receiveMessage().get
-    // In the mock environment, the watcher auto-completes, restoring Idle.
-    // On real hardware, Homing would be visible while the embedded program runs.
     axisState.axisState should be(AxisStateEnum.Idle)
   }
 
   test("homeAxis should set activeCommand to Home then clear on completion") {
-    // With mock CI, the watcher auto-completes, clearing activeCommand.
-    // This verifies the cleanup path works correctly.
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
     val setup = makeSetup("homeAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
+    Thread.sleep(200)
+
+    // Verify activeCommand is Home while command is active
+    val probe1 = testKit.createTestProbe[Option[AxisCmdState]]()
+    isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe1.ref)
+    probe1.receiveMessage().get.activeCommand should be(Some(ActiveCommand.Home))
+
+    // Simulate StatusMonitor: home complete
+    simulateHomeComplete(isActor, Axis.A)
     Thread.sleep(300)
 
     val probe = testKit.createTestProbe[Option[AxisCmdState]]()
     isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
     val cmdState = probe.receiveMessage().get
-    // After fast completion, activeCommand is cleared
     cmdState.activeCommand should be(None)
   }
 
@@ -625,11 +630,29 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
   // ========================================
   // Section 6: selectWheel
-  // NOTE: Tests ignored until embedded #SelectX programs are created on the controller.
-  // The HCD-side implementation is complete but untestable without the embedded code.
   // ========================================
 
-  ignore("selectWheel should send correct Galil commands") {
+  private def simulateSelectComplete(
+    isActor: ActorRef[InternalStateActor.Command],
+    axis: Axis,
+    delay: FiniteDuration = 50.millis
+  ): Unit =
+    Thread.sleep(delay.toMillis)
+
+    // SM sees thread active, motor moving (embedded program executing)
+    val thread = axis.index + 1
+    isActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("activeThread" -> thread, "moving" -> true),
+      testKit.system.ignoreRef)
+    Thread.sleep(50)
+
+    // SM sees thread released, not moving (select complete)
+    // selectWheel mask: activeThread==0, axisErrorMsg=="", moving==false (no inPosition)
+    isActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("activeThread" -> 0, "moving" -> false),
+      testKit.system.ignoreRef)
+
+  test("selectWheel should send correct Galil commands") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
@@ -639,15 +662,15 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
     val cmds = MockCIActor.commands
     cmds should contain("dmd[0]=3")
-    cmds should contain("XQ #SelectA,1")
+    cmds.exists(_.startsWith("XQ #SelectA,")) should be(true)
 
     // Verify dmd was set before XQ
     val dmdIdx = cmds.indexOf("dmd[0]=3")
-    val xqIdx = cmds.indexOf("XQ #SelectA,1")
+    val xqIdx = cmds.indexWhere(_.startsWith("XQ #SelectA,"))
     dmdIdx should be < xqIdx
   }
 
-  ignore("selectWheel should transition axisState to Moving") {
+  test("selectWheel should transition axisState to Moving") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
@@ -661,7 +684,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     axisState.axisState should be(AxisStateEnum.Moving)
   }
 
-  ignore("selectWheel should set activeCommand to Select") {
+  test("selectWheel should set activeCommand to Select") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
@@ -675,7 +698,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     cmdState.activeCommand should be(Some(ActiveCommand.Select))
   }
 
-  ignore("selectWheel should complete when motion finishes") {
+  test("selectWheel should complete when motion finishes") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
@@ -683,17 +706,8 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
-    // selectWheel uses its own mask: thread==0, error=="", moving==false (no inPosition check)
-    // Simulate: thread active, motor moving
-    isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
-      Map("activeThread" -> 1, "moving" -> true),
-      testKit.system.ignoreRef)
-    Thread.sleep(50)
-
-    // Simulate: select complete — thread released, not moving
-    isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
-      Map("activeThread" -> 0, "moving" -> false),
-      testKit.system.ignoreRef)
+    // Simulate: select complete
+    simulateSelectComplete(isActor, Axis.A)
     Thread.sleep(300)
 
     val probe = testKit.createTestProbe[Option[AxisCmdState]]()
@@ -707,7 +721,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     stateProbe.receiveMessage().get.axisState should be(AxisStateEnum.Idle)
   }
 
-  ignore("selectWheel on axis B should use correct index and thread") {
+  test("selectWheel on axis B should use correct index and thread") {
     val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
     val runId = Id()
 
@@ -784,19 +798,25 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   }
 
   test("trackAxis should set activeCommand to Track then clear on completion") {
-    // With mock CI, the watcher auto-completes, clearing activeCommand.
-    // trackAxis completion leaves axis in Tracking state (unlike other commands).
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
+    Thread.sleep(200)
+
+    // Verify activeCommand is Track while command is active
+    val probe1 = testKit.createTestProbe[Option[AxisCmdState]]()
+    isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe1.ref)
+    probe1.receiveMessage().get.activeCommand should be(Some(ActiveCommand.Track))
+
+    // Simulate: #TrackA program runs and ends
+    simulateTrackComplete(isActor, Axis.A)
     Thread.sleep(300)
 
     val probe = testKit.createTestProbe[Option[AxisCmdState]]()
     isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
     val cmdState = probe.receiveMessage().get
-    // After fast completion, activeCommand is cleared
     cmdState.activeCommand should be(None)
   }
 

@@ -572,9 +572,16 @@ object CommandHandlerActor {
           internalStateActor, crm, runId, ctx)
 
       case Success(execResult) if execResult.threadWasActive =>
-        // Thread confirmed active — normal path. Spawn watcher.
+        // Thread confirmed active — normal path.
+        // Push activeThread to CmdState BEFORE spawning watcher so the watcher's
+        // initial snapshot reflects the true state. Without this, the watcher sees
+        // stale activeThread=0 from the last QR poll and may immediately satisfy
+        // completion masks that check activeThread==0 (selectWheel, homeAxis, stopAxis).
         val thread = execResult.thread
-        log.info(s"$commandName $axis: thread $thread confirmed active, spawning watcher")
+        log.info(s"$commandName $axis: thread $thread confirmed active, pushing to CmdState and spawning watcher")
+        internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
+          Map("activeThread" -> thread),
+          ctx.system.ignoreRef)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
           timeout, completionAxisState)
 
@@ -586,6 +593,9 @@ object CommandHandlerActor {
         // be pending. The watcher's initial snapshot will evaluate the full
         // mask and complete immediately if all conditions are met, or wait
         // for the remaining conditions otherwise.
+        // NOTE: Do NOT push activeThread here — thread is already finished,
+        // pushing a non-zero value would prevent the watcher from seeing
+        // the completion condition (activeThread==0).
         val thread = execResult.thread
         log.info(s"$commandName $axis: thread $thread already finished (fast completion), spawning watcher for remaining conditions")
 
@@ -626,7 +636,7 @@ object CommandHandlerActor {
       Map("axisState" -> AxisStateEnum.Error),
       ctx.system.ignoreRef)
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("clearActiveCommand" -> true),
+      Map("clearActiveCommand" -> true, "axisErrorMsg" -> errorMsg),
       ctx.system.ignoreRef)
     crm.updateCommand(Error(runId, s"$commandName $axis: $errorMsg"))
   }

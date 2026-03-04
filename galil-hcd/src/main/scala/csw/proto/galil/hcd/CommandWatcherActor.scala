@@ -187,6 +187,10 @@ object CommandWatcherActor:
   /**
    * Active monitoring behavior. Evaluates each CmdStateChanged notification
    * against the completion mask and error conditions.
+   *
+   * The CommandHandler pushes activeThread to CmdState before spawning the watcher,
+   * so the initial snapshot will have activeThread > 0 for normal commands. This
+   * prevents premature completion on stale pre-command state.
    */
   private def watching(
     config: WatchConfig,
@@ -260,10 +264,6 @@ object CommandWatcherActor:
         case CommandTimeout =>
           ctx.log.warn(s"CommandWatcher ${config.commandName}/${config.axis}: " +
             s"TIMEOUT after ${config.timeout}")
-          // TODO: In full implementation, halt thread and stop motor here:
-          //   ciActor ! HaltExecution(thread)
-          //   ciActor ! SendCommand("ST${axis.char}")
-          // For now, just report the error
           config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
             config.axis,
             Map("clearActiveCommand" -> true),

@@ -5,6 +5,7 @@ object Dependencies {
 
   val GalilHcd = Seq(
     CSW.`csw-framework`,
+    Libs.`pekko-http`,
     CSW.`csw-testkit` % Test,
     Libs.`scalatest` % Test,
     Libs.`pekko-actor-testkit-typed` % Test 

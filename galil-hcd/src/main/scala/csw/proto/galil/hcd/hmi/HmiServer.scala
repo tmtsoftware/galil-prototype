@@ -1,0 +1,328 @@
+package csw.proto.galil.hcd.hmi
+
+import org.apache.pekko.actor.typed.{ActorRef, ActorSystem, Props}
+import org.apache.pekko.actor.typed.scaladsl.{AskPattern, Behaviors}
+import org.apache.pekko.http.scaladsl.Http
+import org.apache.pekko.http.scaladsl.model._
+import org.apache.pekko.http.scaladsl.model.ws.{Message, TextMessage}
+import org.apache.pekko.http.scaladsl.server.Directives._
+import org.apache.pekko.http.scaladsl.server.Route
+import org.apache.pekko.stream.scaladsl.{BroadcastHub, Flow, Keep, Sink, Source}
+import org.apache.pekko.stream.OverflowStrategy
+import org.apache.pekko.util.Timeout
+import csw.logging.api.scaladsl.Logger
+import csw.params.commands.{CommandName, Setup}
+import csw.params.core.models.Id
+import csw.prefix.models.Prefix
+import csw.proto.galil.hcd._
+import csw.proto.galil.hcd.hmi.HmiJsonProtocol._
+import play.api.libs.json._
+
+import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
+import scala.util.{Failure, Success}
+
+/**
+ * Embedded HTTP/WebSocket server for the GalilMotion HCD test console.
+ *
+ * Provides:
+ *   GET  /              -> React SPA (index.html from resources/web/)
+ *   WS   /ws/state      -> Streaming JSON state updates
+ *   POST /api/command   -> Submit CSW commands via JSON
+ *   GET  /api/status    -> One-shot full state snapshot
+ *
+ * The server subscribes to InternalStateActor state changes and broadcasts
+ * them to all connected WebSocket clients as JSON frames.
+ *
+ * Lifecycle: created during GalilHcdHandlers.initialize(), stopped on shutdown.
+ */
+class HmiServer(
+  internalStateActor: ActorRef[InternalStateActor.Command],
+  commandHandlerActor: ActorRef[CommandHandlerActor.Command],
+  hcdPrefix: Prefix,
+  log: Logger,
+  port: Int = 9090,
+  controllerHost: String = "",
+  controllerPort: Int = 0,
+  simulate: Boolean = false
+)(implicit system: ActorSystem[?]) {
+
+  implicit val ec: ExecutionContext = system.executionContext
+  implicit val timeout: Timeout = Timeout(5.seconds)
+
+  // ── WebSocket broadcast infrastructure ──────────────────────────────
+  //
+  // Source.actorRef creates a materialized ActorRef that we push JSON strings to.
+  // BroadcastHub fans out to all connected WS clients with backpressure.
+  private val (wsPublisher, wsSource) = Source
+    .actorRef[String](
+      completionMatcher = PartialFunction.empty,
+      failureMatcher = PartialFunction.empty,
+      bufferSize = 64,
+      overflowStrategy = OverflowStrategy.dropHead
+    )
+    .toMat(BroadcastHub.sink(bufferSize = 64))(Keep.both)
+    .run()
+
+  // Subscribe to InternalStateActor for all state change notifications.
+  // Each StateChanged delivers the full HcdState snapshot, which we serialize
+  // to JSON and push into the broadcast hub.
+  private val stateSubscriber: ActorRef[InternalStateActor.StateChanged] = {
+    system.systemActorOf(
+      Behaviors.receive[InternalStateActor.StateChanged] { (_, msg) =>
+        val json = stateToJson(msg.hcdState)
+        wsPublisher ! json
+        Behaviors.same
+      },
+      "hmi-state-subscriber",
+      Props.empty
+    )
+  }
+  // Register subscription with IS actor (no filter — receive all changes)
+  internalStateActor ! InternalStateActor.Subscribe(stateSubscriber, None)
+
+  // ── Controller console reader ───────────────────────────────────────
+  //
+  // Opens a second TCP handle to the Galil controller to read unsolicited
+  // MG output from embedded programs. New lines are broadcast to all
+  // WebSocket clients as "consoleLine" JSON messages.
+  private var consoleReader: Option[ActorRef[ConsoleMessageReader.Command]] = None
+
+  private def startConsoleReader(): Unit = {
+    if (simulate) {
+      log.info("ConsoleMessageReader: skipped (simulation mode — no MG routing available)")
+    } else if (controllerHost.nonEmpty && controllerPort > 0) {
+      val reader = system.systemActorOf(
+        ConsoleMessageReader(
+          host = controllerHost,
+          port = controllerPort,
+          onLine = line => {
+            val json = consoleLineToJson(line.timestamp, line.text)
+            wsPublisher ! json
+          },
+          log = log
+        ),
+        "hmi-console-reader",
+        Props.empty
+      )
+      reader ! ConsoleMessageReader.Start
+      consoleReader = Some(reader)
+    } else {
+      log.info("ConsoleMessageReader: skipped (no controller host/port)")
+    }
+  }
+
+  // ── HTTP Routes ─────────────────────────────────────────────────────
+
+  private val routes: Route = concat(
+    // WebSocket endpoint for streaming state updates
+    path("ws" / "state") {
+      handleWebSocketMessages(wsFlow)
+    },
+
+    // REST: submit a command
+    path("api" / "command") {
+      post {
+        entity(as[String]) { body =>
+          val response = handleCommandRequest(body)
+          complete(HttpEntity(ContentTypes.`application/json`, response))
+        }
+      }
+    },
+
+    // REST: one-shot status snapshot
+    path("api" / "status") {
+      get {
+        import AskPattern._
+        val futureState: Future[HcdState] =
+          internalStateActor.ask[HcdState](ref => InternalStateActor.GetHcdState(ref))(timeout, system.scheduler)
+        onComplete(futureState) {
+          case Success(state) =>
+            complete(HttpEntity(ContentTypes.`application/json`, stateToJson(state)))
+          case Failure(ex) =>
+            complete(StatusCodes.InternalServerError, s"Failed to get state: ${ex.getMessage}")
+        }
+      }
+    },
+
+    // REST: get buffered console messages
+    path("api" / "console") {
+      get {
+        consoleReader match {
+          case Some(reader) =>
+            import AskPattern._
+            val futureMessages: Future[ConsoleMessageReader.Messages] =
+              reader.ask[ConsoleMessageReader.Messages](ref =>
+                ConsoleMessageReader.GetMessages(ref))(timeout, system.scheduler)
+            onComplete(futureMessages) {
+              case Success(msgs) =>
+                val json = consoleMessagesToJson(msgs.lines)
+                complete(HttpEntity(ContentTypes.`application/json`, json))
+              case Failure(ex) =>
+                complete(StatusCodes.InternalServerError, s"Failed to get console: ${ex.getMessage}")
+            }
+          case None =>
+            complete(HttpEntity(ContentTypes.`application/json`, """{"lines":[]}"""))
+        }
+      }
+    },
+
+    // Static files: serve React SPA from resources/web/
+    pathEndOrSingleSlash {
+      getFromResource("web/index.html", ContentTypes.`text/html(UTF-8)`)
+    },
+    // Serve other static assets (JS, CSS, etc.)
+    getFromResourceDirectory("web")
+  )
+
+  // ── WebSocket flow ──────────────────────────────────────────────────
+  //
+  // Incoming messages from the client are ignored (commands go via REST).
+  // Outgoing: broadcast state updates as TextMessage frames.
+  private def wsFlow: Flow[Message, Message, Any] = {
+    Flow.fromSinkAndSource(
+      Sink.ignore,
+      wsSource.map(json => TextMessage.Strict(json): Message)
+    )
+  }
+
+  // ── Command handling ────────────────────────────────────────────────
+
+  /**
+   * Parse a JSON command request, build a CSW Setup, and submit it
+   * to the CommandHandlerActor.
+   *
+   * Returns JSON response string with runId and status.
+   */
+  private def handleCommandRequest(body: String): String = {
+    try {
+      val request = parseCommandRequest(body)
+      val runId = Id()
+
+      // Build CSW Setup from JSON params using ICD key objects
+      val setup = buildSetup(request.commandName, request.params, runId)
+
+      // Submit to CommandHandlerActor (fire-and-forget from HMI perspective;
+      // the WebSocket stream will show state changes as the command progresses)
+      commandHandlerActor ! CommandHandlerActor.HandleCommand(setup, runId, None)
+
+      // Return Started for long-running, or Completed for immediate
+      val status = if (CommandHandlerActor.isImmediate(request.commandName)) "Completed" else "Started"
+      commandResponseJson(runId.id, status)
+    } catch {
+      case ex: Exception =>
+        log.error(s"HMI command error: ${ex.getMessage}")
+        commandResponseJson("", "Error", ex.getMessage)
+    }
+  }
+
+  /**
+   * Build a CSW Setup command from the HMI JSON parameters.
+   *
+   * Uses the ICD-generated key objects from GalilMotionKeys to ensure
+   * parameter names and types exactly match what CommandHandlerActor expects.
+   * Each command has its own key namespace in the ICD.
+   */
+  private def buildSetup(commandName: String, params: Map[String, JsValue], runId: Id): Setup = {
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+
+    var setup = Setup(hcdPrefix, CommandName(commandName), None)
+
+    // Helper: extract numeric value from JsNumber or JsString
+    def numericParam(key: String): Option[Double] = params.get(key).map {
+      case JsNumber(n) => n.toDouble
+      case JsString(s) => s.toDouble
+      case other => throw new IllegalArgumentException(s"Invalid $key: $other")
+    }
+
+    def stringParam(key: String): Option[String] = params.get(key).map {
+      case JsString(s) => s
+      case other => other.toString
+    }
+
+    def intParam(key: String): Option[Int] = params.get(key).map {
+      case JsNumber(n) => n.toInt
+      case JsString(s) => s.toInt
+      case other => throw new IllegalArgumentException(s"Invalid $key: $other")
+    }
+
+    commandName match {
+
+      case "homeAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(HomeAxisCommand.axisKey.set(a)))
+
+      case "stopAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(StopAxisCommand.axisKey.set(a)))
+
+      case "positionAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(PositionAxisCommand.axisKey.set(a)))
+        numericParam("target").foreach(t => setup = setup.add(PositionAxisCommand.targetKey.set(t.toFloat)))
+
+      case "offsetAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(OffsetAxisCommand.axisKey.set(a)))
+        // ICD uses "distance" not "target" for offsetAxis
+        numericParam("target").foreach(d => setup = setup.add(OffsetAxisCommand.distanceKey.set(d.toFloat)))
+
+      case "selectWheel" =>
+        stringParam("axis").foreach(a => setup = setup.add(SelectWheelCommand.axisKey.set(a)))
+        // ICD uses IntKey "position" (wheel slot number)
+        intParam("target").foreach(p => setup = setup.add(SelectWheelCommand.positionKey.set(p)))
+
+      case "trackAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(TrackAxisCommand.axisKey.set(a)))
+        numericParam("target").foreach(t => setup = setup.add(TrackAxisCommand.target1Key.set(t.toFloat)))
+        numericParam("target2").foreach(t => setup = setup.add(TrackAxisCommand.target2Key.set(t.toFloat)))
+
+      case "configAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(ConfigAxisCommand.axisKey.set(a)))
+        numericParam("velocity").foreach(v => setup = setup.add(ConfigAxisCommand.velocityKey.set(v.toFloat)))
+        numericParam("acceleration").foreach(v => setup = setup.add(ConfigAxisCommand.accelerationKey.set(v.toFloat)))
+        numericParam("deceleration").foreach(v => setup = setup.add(ConfigAxisCommand.decelerationKey.set(v.toFloat)))
+        numericParam("indexOffset").foreach(v => setup = setup.add(ConfigAxisCommand.indexOffsetKey.set(v.toFloat)))
+        numericParam("indexSpeed").foreach(v => setup = setup.add(ConfigAxisCommand.indexSpeedKey.set(v.toFloat)))
+        numericParam("inPositionThreshold").foreach(v => setup = setup.add(ConfigAxisCommand.inPositionThresholdKey.set(v.toFloat)))
+
+      case other =>
+        throw new IllegalArgumentException(s"Unknown command: $other")
+    }
+
+    setup
+  }
+
+  // ── Server lifecycle ────────────────────────────────────────────────
+
+  private var bindingFuture: Option[Future[Http.ServerBinding]] = None
+
+  def start(): Unit = {
+    // Start the controller console reader (second TCP handle)
+    startConsoleReader()
+
+    val classicSystem = system.classicSystem
+    bindingFuture = Some(
+      Http()(classicSystem).newServerAt("0.0.0.0", port).bind(routes)
+    )
+    bindingFuture.get.onComplete {
+      case Success(binding) =>
+        val address = binding.localAddress
+        log.info(s"HMI server started at http://${address.getHostString}:${address.getPort}/")
+        log.info(s"  WebSocket: ws://${address.getHostString}:${address.getPort}/ws/state")
+        log.info(s"  REST API:  http://${address.getHostString}:${address.getPort}/api/command")
+      case Failure(ex) =>
+        log.error(s"HMI server failed to start on port $port: ${ex.getMessage}")
+    }
+  }
+
+  def stop(): Unit = {
+    // Stop console reader
+    consoleReader.foreach(_ ! ConsoleMessageReader.Stop)
+
+    // Unsubscribe from IS
+    internalStateActor ! InternalStateActor.Unsubscribe(stateSubscriber)
+
+    bindingFuture.foreach { bf =>
+      bf.flatMap(_.unbind()).onComplete { _ =>
+        log.info("HMI server stopped")
+      }
+    }
+  }
+}

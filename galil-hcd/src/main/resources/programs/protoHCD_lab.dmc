@@ -13,7 +13,7 @@ REM ----------------------------------------------------------------------------
 ^c= ^c+1
 JP #fill_h,(^c<^a[-1]);'keep setting array values for length of array
 EN
-#print;	            'simple subroutine to print all values of an array
+#print;             'simple subroutine to print all values of an array
 ^c= 0;              'use local scope ^c for iterator
 #print_h;           'print loop
 MG "axis ",^c, " is ",^a[^c]
@@ -86,7 +86,7 @@ DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
 DM Atarget[2]
-version=20260105
+DM cpd[8]
 aeBusy=0
 ' default the motor parameters to those in flash EEPROM
 accel[0]=_ACA
@@ -190,8 +190,9 @@ MTA=2.0;     'Stepper motor with active low step pulses
 REM LCA=2;   'Waits for 0 samples after a move is completed, then provides 0% current
 LDA=3;       'Both limit switches disabled
 AGA=1;       'D4140 stepper amplifier - 0.85 A phase current
-SPA=10000;   'Value of jog speed in encoder counts/second
-speed[0]=10000; 'Sync embedded speed array 
+SPA=1000;   'Value of jog speed in encoder counts/second
+speed[0]=1000; 'Sync embedded speed array 
+cpd[0]=1.13; 'counts per degree for rotational positioning
 STA;         'SAFETY: Stop Axis A
 MOA;         'SAFETY: Stop Motor A
 MG "Axis A setup done"
@@ -205,8 +206,9 @@ MTB=2.0;    'Stepper motor with active low step pulses
 REM LCB=2;  'Waits for 0 samples after a move is completed, then provides 0% current
 LDB=3;      'Both limit switches disabled
 AGB=1;      'D4140 stepper amplifier - 0.85 A phase current
-SPB=10000;  'Value of jog speed in encoder counts/second
-speed[1]=10000; 'Sync embedded speed array 
+SPB=1000;  'Value of jog speed in encoder counts/second
+speed[1]=1000; 'Sync embedded speed array 
+cpd[1]=1.13; 'counts per degree for rotational positioning
 STB;        'SAFETY: Stop Axis F
 MOB;        'SAFETY: Stop Motor F
 MG "Axis B setup done"
@@ -269,6 +271,48 @@ EN
   MG "Motor B MOVE to ",_TDB," in ",dtime1/tcon," sec"
 EN
 '
+#SelectA
+' Move rotational device A to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+  SPB=speed[0]
+  ACB=accel[0]
+  DCB=decel[0]
+  SHA
+  PAA=dmd[0]*45.0*cpd[0]
+  stime0=TIME
+  BGA
+  MCA
+    IF (mdelay[0]>0)
+    WT mdelay[0]
+  ENDIF
+  etime0=TIME
+  dtime0=etime0-stime0
+  tcon=1000000/_TM
+  MG "Motor A select #", dmd[0]," move to ",_TDA," in ", dtime0/tcon," sec"
+EN
+'
+#SelectB
+' Move rotational device B to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+  SPB=speed[1]
+  ACB=accel[1]
+  DCB=decel[1]
+  SHB
+  PAB=dmd[1]*45.0*cpd[1]
+  stime1=TIME
+  BGB
+  MCB
+    IF (mdelay[1]>0)
+    WT mdelay[1]
+  ENDIF
+  etime1=TIME
+  dtime1=etime1-stime1
+  tcon=1000000/_TM
+  MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
+EN
+
 #TrackA
 ' A will track a demand consisting of a rotational target and a rot velocity.
 ' initial thoughts are to JG at the expected velocity and use IP to adjust the
