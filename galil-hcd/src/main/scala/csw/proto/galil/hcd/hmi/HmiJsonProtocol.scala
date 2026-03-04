@@ -1,5 +1,6 @@
 package csw.proto.galil.hcd.hmi
 
+import csw.prefix.models.Prefix
 import csw.proto.galil.hcd._
 import play.api.libs.json._
 
@@ -47,7 +48,7 @@ object HmiJsonProtocol {
 
   // ── Full state snapshot → JSON ────────────────────────────────────────
 
-  def stateToJson(hcdState: HcdState): String = {
+  def stateToJson(hcdState: HcdState, prefix: Prefix): String = {
     val axesJson = JsObject(
       hcdState.axes.map { case (axis, state) =>
         axis.toString -> axisStateToJson(state)
@@ -59,8 +60,8 @@ object HmiJsonProtocol {
       }.toSeq
     )
 
-    // Thread status as "0100110" string (bit per thread 0-6)
-    val threadBits = (0).to(6).map(i =>
+    // Thread status as "01001100" string (bit per thread 0-7, DMC-500x0 has 8 threads)
+    val threadBits = (0 to 7).map(i =>
       if ((hcdState.threadStatus & (1 << i)) != 0) "1" else "0"
     ).mkString
 
@@ -73,6 +74,7 @@ object HmiJsonProtocol {
 
     Json.obj(
       "type"               -> "stateUpdate",
+      "prefix"             -> prefix.toString,
       "timestamp"          -> hcdState.lastPollingTime.toString,
       "hcdState"           -> hcdState.state.toString,
       "controllerErrorMsg" -> hcdState.controllerErrorMsg,
@@ -114,23 +116,23 @@ object HmiJsonProtocol {
     ).toString()
 
   /**
-   * Build a console line JSON message for WebSocket broadcast.
+   * Build a log line JSON message for WebSocket broadcast.
+   *
+   * Emitted by HmiLogAppender for every CSW log message that meets the
+   * minimum level threshold. The frontend renders these in a unified log
+   * panel alongside state updates, ordered by timestamp.
+   *
+   * @param severity  CSW severity string: "TRACE","DEBUG","INFO","WARN","ERROR","FATAL"
+   * @param timestamp ISO-8601 timestamp string (set by CSW logger at call time)
+   * @param message   Log message text extracted from the CSW log JsObject
+   * @param component Component/class name from the log record, e.g. "GalilHcd"
    */
-  def consoleLineToJson(timestamp: java.time.Instant, text: String): String =
+  def logLineToJson(severity: String, timestamp: String, message: String, component: String): String =
     Json.obj(
-      "type"      -> "consoleLine",
-      "timestamp" -> timestamp.toString,
-      "text"      -> text
+      "type"      -> "logLine",
+      "severity"  -> severity,
+      "timestamp" -> timestamp,
+      "message"   -> message,
+      "component" -> component
     ).toString()
-
-  /**
-   * Build JSON array of buffered console messages for REST endpoint.
-   */
-  def consoleMessagesToJson(lines: Seq[ConsoleMessageReader.ConsoleLine]): String = {
-    val arr = JsArray(lines.map(l => Json.obj(
-      "timestamp" -> l.timestamp.toString,
-      "text"      -> l.text
-    )))
-    Json.obj("lines" -> arr).toString()
-  }
 }

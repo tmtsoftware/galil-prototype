@@ -48,28 +48,30 @@ enum AxisStateEnum:
   def validateCommand(commandName: String): Option[String] =
     import AxisStateEnum._
     (this, commandName) match
-      // homeAxis: accepted from Lost, Idle, Error (recovery path)
-      case (Lost, "homeAxis")     => None
-      case (Idle, "homeAxis")     => None
-      case (Error, "homeAxis")    => None
+      // homeAxis: accepted from Lost, Idle, Error only.
+      // Re-homing from Homing/Moving requires command interruption (AB) — not yet implemented.
+      case (Lost,  "homeAxis") => None
+      case (Idle,  "homeAxis") => None
+      case (Error, "homeAxis") => None
 
       // positionAxis, offsetAxis, selectWheel: only from Idle
       case (Idle, "positionAxis") => None
       case (Idle, "offsetAxis")   => None
       case (Idle, "selectWheel")  => None
 
-      // trackAxis: from Idle or Tracking (re-issue)
-      case (Idle, "trackAxis")     => None
+      // trackAxis: from Idle or Tracking (re-issue updates velocity/target)
+      case (Idle,     "trackAxis") => None
       case (Tracking, "trackAxis") => None
 
-      // stopAxis: from Homing, Moving, Tracking (must have something to stop)
-      case (Homing, "stopAxis")   => None
-      case (Moving, "stopAxis")   => None
+      // stopAxis: currently only from Tracking.
+      // Stopping from Homing or Moving requires AB (program abort) before #StopX
+      // to prevent the running program from restarting motion — NOT YET IMPLEMENTED.
+      // Those cases are rejected here until interruption support is added.
       case (Tracking, "stopAxis") => None
 
       // Reject everything else with a descriptive message
       case (state, cmd) =>
-        Some(s"$cmd not permitted in $state state")
+        Some(s"$cmd command not valid in $state state")
 
   /**
    * Determine the axis state after a stopAxis command completes,

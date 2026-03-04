@@ -51,7 +51,8 @@ private[hcd] object ControllerInterfaceActor {
       loggerFactory: LoggerFactory,
       galilPrefix: Prefix,
       currentStatePublisher: CurrentStatePublisher,
-      internalStateActor: ActorRef[InternalStateActor.Command]
+      internalStateActor: ActorRef[InternalStateActor.Command],
+      simulate: Boolean = false
   ): Behavior[GalilCommandMessage] =
     Behaviors.withTimers { timers =>
       Behaviors.setup { ctx =>
@@ -69,6 +70,30 @@ private[hcd] object ControllerInterfaceActor {
           }
         }
         val galilIo = connectToGalil()
+
+        // Spawn ControllerConsoleActor as child — opens a dedicated second TCP handle
+        // to receive unsolicited MG output from embedded programs. Skipped in simulation
+        // mode (simulator has no second handle or CF/CW routing infrastructure).
+        //
+        // The latch blocks this Behaviors.setup block until CF I + CW 2 complete.
+        // GalilHcd.initialize() blocks on GetIdentity after ctx.spawn(CI actor), so
+        // the wait is inline in the init chain — #Init will not run until the console
+        // handle is live and capturing MG output.
+        if !simulate then
+          val consoleLatch = new java.util.concurrent.CountDownLatch(1)
+          ctx.spawn(
+            ControllerConsoleActor(
+              host       = galilConfig.host,
+              port       = galilConfig.port,
+              prefix     = galilPrefix,
+              log        = log,
+              readyLatch = consoleLatch
+            ),
+            "ControllerConsoleActor"
+          )
+          val ready = consoleLatch.await(ControllerConsoleActor.ReadyTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+          if !ready then
+            log.warn("ControllerConsoleActor did not become ready within timeout — proceeding without MG capture")
 
         def galilSend(cmd: String): String = {
           log.debug(s"Sending '$cmd' to Galil")

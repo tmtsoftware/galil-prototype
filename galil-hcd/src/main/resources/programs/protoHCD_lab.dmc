@@ -1,7 +1,7 @@
 REM ----------------------------------------------------------------------------
 REM Programs to control a testbench with 2 steppers
 REM testing lab hardware of 2 stepper motors on axes A and B
-REM Source file name: galilHCD_lab.dmc
+REM Source file name: protoHCD_lab.dmc
 REM Updated for FD phase Embedded design
 REM ----------------------------------------------------------------------------
 REM Helper Routines

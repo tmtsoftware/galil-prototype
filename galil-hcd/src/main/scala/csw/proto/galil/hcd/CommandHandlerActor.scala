@@ -397,6 +397,63 @@ object CommandHandlerActor {
   }
 
   // ========================================
+  // ========================================
+  // Axis state guard — enforced at execution time (SDD Figure 4-2)
+  // ========================================
+
+  /**
+   * Re-validates axis state at execution time, closing the race window between
+   * onValidate() and handler execution.
+   *
+   * onValidate() queries IS and accepts/rejects, but the IS update setting the
+   * axis to Moving/Homing is a fire-and-forget message that may not have been
+   * applied by the time the next command's onValidate() runs.  Re-checking here
+   * — inside the single-threaded CommandHandlerActor, after the previous handler
+   * has written its state update — gives a much tighter guarantee.
+   *
+   * Returns None if accepted, or Some(error response) if rejected.
+   */
+  private def guardAxisState(
+    commandName: String,
+    axis: Axis,
+    runId: Id,
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    crm: CommandResponseManager,
+    log: csw.logging.api.scaladsl.Logger,
+    askTimeout: Timeout,
+    askScheduler: org.apache.pekko.actor.typed.Scheduler
+  ): Option[Error] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    import scala.concurrent.Await
+
+    val maybeAxisState = try {
+      val f = internalStateActor.ask[Option[AxisState]](
+        ref => InternalStateActor.GetAxisState(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(f, askTimeout.duration)
+    } catch {
+      case _: Exception => None
+    }
+
+    maybeAxisState match {
+      case Some(axisState) =>
+        axisState.axisState.validateCommand(commandName) match {
+          case None =>
+            None  // Accepted — proceed
+          case Some(reason) =>
+            log.warn(s"$commandName $axis rejected: $reason")
+            crm.updateCommand(Error(runId, reason))
+            Some(Error(runId, reason))
+        }
+      case None =>
+        val msg = s"$commandName $axis: axis not initialized"
+        log.error(msg)
+        crm.updateCommand(Error(runId, msg))
+        Some(Error(runId, msg))
+    }
+  }
+
+  // ========================================
   // Long-running command defaults
   // ========================================
 
@@ -675,6 +732,13 @@ object CommandHandlerActor {
 
     log.info(s"positionAxis $axis: target=$target")
 
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("positionAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
+
     // Query current axis state for position check and timeout calculation
     val maybeAxisState = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
@@ -773,6 +837,13 @@ object CommandHandlerActor {
 
     log.info(s"homeAxis $axis")
 
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("homeAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
+
     // 1. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("activeCommand" -> ActiveCommand.Home, "axisErrorMsg" -> ""),
@@ -837,9 +908,22 @@ object CommandHandlerActor {
 
     log.info(s"stopAxis $axis")
 
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("stopAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
+
     // Query current axisState to determine completion state (SDD Figure 4-2):
     //   Homing interrupted → Lost (axis not homed)
     //   Moving/Tracking interrupted → Idle (position is known)
+    //
+    // NOTE: stopAxis from Homing or Moving requires AB (program abort) before
+    // XQ #StopX to prevent the running program from restarting motion after ST.
+    // This interruption logic is NOT YET IMPLEMENTED — currently stopAxis is
+    // only accepted from Tracking (where #TrackX has already ended, so ST is safe).
+    // Full interruption support will be added in a future implementation step.
     val completionState = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
         ref => InternalStateActor.GetAxisState(axis, ref)
@@ -911,6 +995,13 @@ object CommandHandlerActor {
     val axis = Axis.fromChar(axisChoice.name.head)
     val distance = setup(OffsetAxisCommand.distanceKey).head.toDouble
     val idx = axis.index
+
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("offsetAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
 
     // Read current position from InternalState
     implicit val timeout: Timeout = askTimeout
@@ -1016,6 +1107,13 @@ object CommandHandlerActor {
 
     log.info(s"selectWheel $axis: position=$position")
 
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("selectWheel", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
+
     // 1. Set position demand in embedded variable
     sendToController(ciActor, s"dmd[$idx]=$position", log, askTimeout, askScheduler) match {
       case Failure(ex) =>
@@ -1100,6 +1198,13 @@ object CommandHandlerActor {
     val maybeTarget2 = setup.get(TrackAxisCommand.target2Key).map(_.head.toDouble)
 
     log.info(s"trackAxis $axis: target1=$target1 (position), target2=${maybeTarget2.getOrElse("(not sent)")}")
+
+    // Execution-time state machine guard (SDD Figure 4-2).
+    // Re-validates here because onValidate() has a race window: the IS update
+    // that sets axisState → Moving/Homing is fire-and-forget, and may not have
+    // been applied before the next command's onValidate() query.
+    if guardAxisState("trackAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
 
     // 1. Set tracking targets in embedded variables
     // Per SDD Table 3-1: #TrackX uses Xtarget[0] (position) and Xtarget[1] (velocity)

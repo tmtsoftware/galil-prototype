@@ -213,7 +213,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         loggerFactory,
         componentInfo.prefix,
         cswCtx.currentStatePublisher,
-        internalStateActor
+        internalStateActor,
+        simulate = hcdConfig.simulate
       ),
       "ControllerInterfaceActor"
     )
@@ -267,6 +268,32 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     )
     log.info("CommandHandlerActor created")
 
+    // Phase 3d: Start HMI server immediately after actors are ready — before
+    // Phase 4 (#Init, #SetupX) so initialization MG output appears in the HMI.
+    // HmiLogAppender.broadcast is wired here; any log.info() from this point
+    // (including [GALIL:prefix] console lines) streams to connected browsers.
+    // HTTP binding is non-blocking so this adds negligible latency to init.
+    try {
+      val hmiPort = hcdConfig.controller.port match {
+        case 23   => 9090  // Real hardware default
+        case 8888 => 9091  // Simulator — different port to allow both
+        case _    => 9090
+      }
+      hmiServer = new hmi.HmiServer(
+        internalStateActor  = internalStateActor,
+        commandHandlerActor = commandHandlerActor,
+        hcdPrefix           = componentInfo.prefix,
+        log                 = log,
+        port                = hmiPort
+      )(ctx.system)
+      hmiServer.start()
+      log.info(s"HMI test console starting on port $hmiPort")
+    } catch {
+      case ex: Exception =>
+        log.warn(s"HMI server failed to start (non-fatal): ${ex.getMessage}")
+        // HMI failure is non-fatal — the HCD still functions without it
+    }
+
     // Phase 3c: Initialize InternalState with per-axis config values
     // This ensures thresholds, mechanism types, etc. are set before any commands arrive
     for ((axisChar, axisConfig) <- hcdConfig.axes) {
@@ -285,13 +312,24 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             case "reverse"  => RotatingAlgorithm.Reverse
             case _          => RotatingAlgorithm.Forward
           }),
-          "upperLimit" -> axisConfig.upperLimit,
-          "lowerLimit" -> axisConfig.lowerLimit
+          "upperLimit"  -> axisConfig.upperLimit,
+          "lowerLimit"  -> axisConfig.lowerLimit,
+          // Seed IS with motion parameters from config.
+          // On hardware these are overwritten by readMotionConfig() after
+          // #Init/#SetupX run — giving real controller EEPROM values.
+          // In simulator mode readMotionConfig() gets 0.0 from uninitialized
+          // embedded arrays, so these config-file values are the effective values.
+          "maxSpeed"    -> axisConfig.maxSpeed,
+          "acceleration"-> axisConfig.acceleration,
+          "deceleration"-> axisConfig.deceleration,
+          "motionDelay" -> axisConfig.motionDelay,
+          "indexSpeed"  -> axisConfig.indexSpeed
         ),
         ctx.system.ignoreRef
       )
       log.info(s"Axis $axisChar config applied: threshold=${axisConfig.inPositionThreshold}, " +
-        s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}")
+        s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}, " +
+        s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}")
     }
     // Set the activeAxes flags and simulation mode on HcdState so the HMI knows which axes are configured
     internalStateActor ! InternalStateActor.UpdateHcdState(
@@ -341,32 +379,6 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         throw ex
     }
     
-    // Phase 5: Start HMI test console server
-    // Runs after all actors are created and initialization is complete.
-    // Uses the ActorSystem from the component's context for Pekko HTTP.
-    try {
-      val hmiPort = hcdConfig.controller.port match {
-        case 23   => 9090  // Real hardware default
-        case 8888 => 9091  // Simulator — different port to allow both
-        case _    => 9090
-      }
-      hmiServer = new hmi.HmiServer(
-        internalStateActor = internalStateActor,
-        commandHandlerActor = commandHandlerActor,
-        hcdPrefix = componentInfo.prefix,
-        log = log,
-        port = hmiPort,
-        controllerHost = hcdConfig.controller.hostString,
-        controllerPort = hcdConfig.controller.port,
-        simulate = hcdConfig.simulate
-      )(ctx.system)
-      hmiServer.start()
-      log.info(s"HMI test console starting on port $hmiPort")
-    } catch {
-      case ex: Exception =>
-        log.warn(s"HMI server failed to start (non-fatal): ${ex.getMessage}")
-        // HMI failure is non-fatal — the HCD still functions without it
-    }
   }
 
   // ========================================
@@ -641,11 +653,10 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    */
   private def initController(): Future[Unit] = {
     import scala.concurrent.duration._
-    
-    val thread = 0
-    log.info(s"Executing #Init on thread $thread")
-    
-    val result = sendAndWaitForThread(s"XQ #Init,$thread", thread, timeout = 5.seconds)
+
+    log.info("Executing #Init")
+
+    val result = sendAndWaitForThread("Init", timeout = 5.seconds)
     result match {
       case scala.util.Success(_) =>
         log.info("#Init completed successfully")
@@ -710,7 +721,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               val valueStr = result.response.trim
               try {
                 val value = valueStr.toDouble
-                stateUpdates(isFieldName) = value
+                // Skip zero values — in simulator mode, uninitialized embedded
+                // array variables return 0.0. Storing zero would corrupt the
+                // config-file defaults seeded into IS during Phase 3c.
+                // On real hardware all motion params are non-zero.
+                if value != 0.0 then
+                  stateUpdates(isFieldName) = value
+                else
+                  log.debug(s"Skipping $embeddedName[$idx]=0.0 (uninitialized — simulator?)")
               } catch {
                 case _: NumberFormatException =>
                   log.warn(s"Non-numeric response for $embeddedName[$idx]: '$valueStr'")
@@ -857,8 +875,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * @return Success(()) if thread completed, Failure if timeout or error
    */
   private def sendAndWaitForThread(
-    cmd: String,
-    thread: Int,
+    label: String,
     timeout: scala.concurrent.duration.FiniteDuration
   ): scala.util.Try[Unit] = {
     import scala.concurrent.Await
@@ -869,61 +886,51 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
     scala.util.Try {
-      // 1. Send the XQ command via CI actor
-      val cmdFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
-        ref => GalilCommandMessage.SendCommand(cmd, ref)
+      // 1. Send XQ via ExecuteProgram — allocates thread, sends XQ, then queries
+      //    MG _NO to confirm the thread started. Returns threadWasActive as
+      //    authoritative hardware truth.
+      val execFuture = controllerInterfaceActor.ask[GalilCommandMessage.ExecuteProgramResult](
+        ref => GalilCommandMessage.ExecuteProgram(label, ref)
       )
-      val cmdResult = Await.result(cmdFuture, 5.seconds)
-      cmdResult.error.foreach { err =>
-        throw new RuntimeException(s"Command '$cmd' failed: $err")
+      val execResult = Await.result(execFuture, 5.seconds)
+
+      execResult.error.foreach { err =>
+        throw new RuntimeException(s"ExecuteProgram '#$label' failed: $err")
       }
-      log.debug(s"Command sent: $cmd")
 
-      // 2. Poll IS for threadStatus until the target thread bit clears.
-      //    The thread may not even appear active on the first poll if the
-      //    program is very fast, so we also accept "never saw it active" as
-      //    completion (the program ran and finished between QR polls).
-      val deadline = timeout.fromNow
-      val pollInterval = 100 // ms
-      var sawActive = false
-      var completed = false
+      val allocatedThread = execResult.thread
 
-      while (deadline.hasTimeLeft() && !completed) {
-        Thread.sleep(pollInterval)
+      if !execResult.threadWasActive then
+        // The post-XQ _NO query did not show the thread active. Either:
+        //   (a) XQ was rejected silently (no ? but program didn't start), or
+        //   (b) the program was so fast it completed before the _NO query.
+        // For init-time programs (#Init is <100ms) (b) is likely. Log and accept.
+        log.info(s"Thread $allocatedThread completed (not observed active after XQ — " +
+          s"program finished before _NO query, or was a no-op)")
+      else
+        // Thread confirmed active — poll IS until it clears
+        val deadline     = timeout.fromNow
+        val pollInterval = 100 // ms
+        var completed    = false
 
-        val hcdStateFuture = internalStateActor.ask[HcdState](
-          ref => InternalStateActor.GetHcdState(ref)
-        )
-        val hcdState = Await.result(hcdStateFuture, 2.seconds)
-        val threadActive = (hcdState.threadStatus & (1 << thread)) != 0
+        while deadline.hasTimeLeft() && !completed do
+          Thread.sleep(pollInterval)
 
-        if (threadActive) {
-          sawActive = true
-          log.debug(s"Thread $thread active (threadStatus=0x${hcdState.threadStatus.toHexString})")
-        } else if (sawActive) {
-          // Thread was active and is now released — program completed
-          log.info(s"Thread $thread completed (was active, now released)")
-          completed = true
-        } else {
-          // Thread not active yet — may not have started, or may have already finished.
-          // Give it a few polls to start before assuming it already completed.
-          // After 500ms, if we never saw it active, assume it ran and finished.
-          if (deadline.timeLeft < (timeout - 500.millis)) {
-            log.info(s"Thread $thread completed (never observed active — finished between polls)")
+          val hcdStateFuture = internalStateActor.ask[HcdState](
+            ref => InternalStateActor.GetHcdState(ref)
+          )
+          val hcdState    = Await.result(hcdStateFuture, 2.seconds)
+          val threadActive = (hcdState.threadStatus & (1 << allocatedThread)) != 0
+
+          if !threadActive then
+            log.info(s"Thread $allocatedThread completed (was active, now released)")
             completed = true
-          }
-        }
-      }
+          else
+            log.debug(s"Thread $allocatedThread active (threadStatus=0x${hcdState.threadStatus.toHexString})")
 
-      if (!completed) {
-        // If we saw the thread active but it never cleared, that's a timeout
-        if (sawActive) {
-          throw new RuntimeException(s"Thread $thread timed out after $timeout (still active)")
-        } else {
-          // Never saw it active at all within the full timeout — assume it finished
-          log.info(s"Thread $thread completed (program likely finished very quickly)")
-        }
-      }
+        if !completed then
+          throw new RuntimeException(
+            s"Thread $allocatedThread timed out after $timeout waiting for '#$label' to complete")
     }
   }
 

@@ -1,6 +1,6 @@
 package csw.proto.galil.hcd.hmi
 
-import org.apache.pekko.actor.typed.{ActorRef, ActorSystem, Props}
+import org.apache.pekko.actor.typed.{ActorRef, ActorSystem}
 import org.apache.pekko.actor.typed.scaladsl.{AskPattern, Behaviors}
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model._
@@ -41,10 +41,7 @@ class HmiServer(
   commandHandlerActor: ActorRef[CommandHandlerActor.Command],
   hcdPrefix: Prefix,
   log: Logger,
-  port: Int = 9090,
-  controllerHost: String = "",
-  controllerPort: Int = 0,
-  simulate: Boolean = false
+  port: Int = 9090
 )(implicit system: ActorSystem[?]) {
 
   implicit val ec: ExecutionContext = system.executionContext
@@ -70,47 +67,21 @@ class HmiServer(
   private val stateSubscriber: ActorRef[InternalStateActor.StateChanged] = {
     system.systemActorOf(
       Behaviors.receive[InternalStateActor.StateChanged] { (_, msg) =>
-        val json = stateToJson(msg.hcdState)
+        val json = stateToJson(msg.hcdState, hcdPrefix)
         wsPublisher ! json
         Behaviors.same
       },
-      "hmi-state-subscriber",
-      Props.empty
+      "hmi-state-subscriber"
     )
   }
   // Register subscription with IS actor (no filter — receive all changes)
   internalStateActor ! InternalStateActor.Subscribe(stateSubscriber, None)
 
-  // ── Controller console reader ───────────────────────────────────────
-  //
-  // Opens a second TCP handle to the Galil controller to read unsolicited
-  // MG output from embedded programs. New lines are broadcast to all
-  // WebSocket clients as "consoleLine" JSON messages.
-  private var consoleReader: Option[ActorRef[ConsoleMessageReader.Command]] = None
-
-  private def startConsoleReader(): Unit = {
-    if (simulate) {
-      log.info("ConsoleMessageReader: skipped (simulation mode — no MG routing available)")
-    } else if (controllerHost.nonEmpty && controllerPort > 0) {
-      val reader = system.systemActorOf(
-        ConsoleMessageReader(
-          host = controllerHost,
-          port = controllerPort,
-          onLine = line => {
-            val json = consoleLineToJson(line.timestamp, line.text)
-            wsPublisher ! json
-          },
-          log = log
-        ),
-        "hmi-console-reader",
-        Props.empty
-      )
-      reader ! ConsoleMessageReader.Start
-      consoleReader = Some(reader)
-    } else {
-      log.info("ConsoleMessageReader: skipped (no controller host/port)")
-    }
-  }
+  // Register HmiLogAppender broadcast — the appender is instantiated by the CSW
+  // framework before HmiServer exists, so wiring is done here at start time.
+  // All HCD log messages (including [GALIL:prefix] controller console lines) will
+  // be pushed to connected WebSocket clients as "logLine" JSON messages.
+  private def broadcastLogLine(json: String): Unit = wsPublisher ! json
 
   // ── HTTP Routes ─────────────────────────────────────────────────────
 
@@ -138,31 +109,9 @@ class HmiServer(
           internalStateActor.ask[HcdState](ref => InternalStateActor.GetHcdState(ref))(timeout, system.scheduler)
         onComplete(futureState) {
           case Success(state) =>
-            complete(HttpEntity(ContentTypes.`application/json`, stateToJson(state)))
+            complete(HttpEntity(ContentTypes.`application/json`, stateToJson(state, hcdPrefix)))
           case Failure(ex) =>
             complete(StatusCodes.InternalServerError, s"Failed to get state: ${ex.getMessage}")
-        }
-      }
-    },
-
-    // REST: get buffered console messages
-    path("api" / "console") {
-      get {
-        consoleReader match {
-          case Some(reader) =>
-            import AskPattern._
-            val futureMessages: Future[ConsoleMessageReader.Messages] =
-              reader.ask[ConsoleMessageReader.Messages](ref =>
-                ConsoleMessageReader.GetMessages(ref))(timeout, system.scheduler)
-            onComplete(futureMessages) {
-              case Success(msgs) =>
-                val json = consoleMessagesToJson(msgs.lines)
-                complete(HttpEntity(ContentTypes.`application/json`, json))
-              case Failure(ex) =>
-                complete(StatusCodes.InternalServerError, s"Failed to get console: ${ex.getMessage}")
-            }
-          case None =>
-            complete(HttpEntity(ContentTypes.`application/json`, """{"lines":[]}"""))
         }
       }
     },
@@ -294,8 +243,10 @@ class HmiServer(
   private var bindingFuture: Option[Future[Http.ServerBinding]] = None
 
   def start(): Unit = {
-    // Start the controller console reader (second TCP handle)
-    startConsoleReader()
+    // Wire HmiLogAppender broadcast — now all CSW log messages (including
+    // [GALIL:prefix] controller console lines from ControllerConsoleActor)
+    // stream to connected HMI clients as "logLine" WebSocket messages.
+    HmiLogAppender.broadcast = broadcastLogLine
 
     val classicSystem = system.classicSystem
     bindingFuture = Some(
@@ -313,8 +264,8 @@ class HmiServer(
   }
 
   def stop(): Unit = {
-    // Stop console reader
-    consoleReader.foreach(_ ! ConsoleMessageReader.Stop)
+    // Disable log appender broadcast before teardown
+    HmiLogAppender.clearBroadcast()
 
     // Unsubscribe from IS
     internalStateActor ! InternalStateActor.Unsubscribe(stateSubscriber)

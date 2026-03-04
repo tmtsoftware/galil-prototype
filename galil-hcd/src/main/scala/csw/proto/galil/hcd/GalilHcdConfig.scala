@@ -54,6 +54,18 @@ case class ControllerConfig(
  * @param algorithm Approach algorithm: "forward" or "shortest"
  * @param inPositionThreshold Threshold for in-position status
  * @param indexOffset Offset applied after homing
+ *
+ * Motion parameters — optional, with defaults matching the prototype hardware.
+ * On hardware these are overwritten by readMotionConfig() after #Init/#SetupX run,
+ * so values here serve as:
+ *   1. Initial IS state before the first readMotionConfig completes
+ *   2. Effective values in simulator mode (no real controller to query)
+ *
+ * @param maxSpeed     Maximum move speed (counts/sec)
+ * @param acceleration Acceleration rate (counts/sec²)
+ * @param deceleration Deceleration rate (counts/sec²)
+ * @param motionDelay  Post-move settling time (ms)
+ * @param indexSpeed   Homing speed (counts/sec)
  */
 case class AxisConfig(
   mechanismType: String,       // "linear" or "rotating"
@@ -61,7 +73,13 @@ case class AxisConfig(
   lowerLimit: Double,          // mm or degrees
   algorithm: String,           // "forward" or "shortest"
   inPositionThreshold: Double, // Positional tolerance
-  indexOffset: Double          // Offset after homing
+  indexOffset: Double,         // Offset after homing
+  // Motion parameters (optional — hardware values overwritten from controller at init)
+  maxSpeed: Double     = 1000.0,  // counts/sec
+  acceleration: Double = 9216.0,  // counts/sec²
+  deceleration: Double = 9216.0,  // counts/sec²
+  motionDelay: Double  = 100.0,   // ms (post-move settling)
+  indexSpeed: Double   = 256.0    // counts/sec (homing speed)
 )
 
 object GalilHcdConfig {
@@ -118,13 +136,21 @@ object GalilHcdConfig {
       .flatMap { axis =>
         if (axesConfig.hasPath(axis)) {
           val axisConf = axesConfig.getConfig(axis)
+          def optDouble(key: String, default: Double): Double =
+            if axisConf.hasPath(key) then axisConf.getDouble(key) else default
           Some(axis -> AxisConfig(
-            mechanismType = axisConf.getString("mechanismType"),
-            upperLimit = axisConf.getDouble("upperLimit"),
-            lowerLimit = axisConf.getDouble("lowerLimit"),
-            algorithm = axisConf.getString("algorithm"),
+            mechanismType       = axisConf.getString("mechanismType"),
+            upperLimit          = axisConf.getDouble("upperLimit"),
+            lowerLimit          = axisConf.getDouble("lowerLimit"),
+            algorithm           = axisConf.getString("algorithm"),
             inPositionThreshold = axisConf.getDouble("inPositionThreshold"),
-            indexOffset = axisConf.getDouble("indexOffset")
+            indexOffset         = axisConf.getDouble("indexOffset"),
+            // Motion params — optional, fall back to case class defaults
+            maxSpeed            = optDouble("maxSpeed",     1000.0),
+            acceleration        = optDouble("acceleration", 9216.0),
+            deceleration        = optDouble("deceleration", 9216.0),
+            motionDelay         = optDouble("motionDelay",  100.0),
+            indexSpeed          = optDouble("indexSpeed",   256.0)
           ))
         } else {
           None

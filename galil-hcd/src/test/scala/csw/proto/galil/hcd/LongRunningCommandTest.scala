@@ -210,6 +210,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("positionAxis", "A", Map("target" -> 50000.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
 
@@ -231,6 +232,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("positionAxis", "A", Map("target" -> 50000.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -247,6 +249,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("positionAxis", "A", Map("target" -> 50000.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -262,6 +265,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     // Set inPositionThreshold so inPosition will trigger
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
       Map("inPositionThreshold" -> 10.0),
@@ -287,6 +291,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.B)
     val setup = makeSetup("positionAxis", "B", Map("target" -> 25000.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -377,13 +382,37 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   }
 
   // ========================================
+
+  /**
+   * Axis state prerequisites for unit tests (SDD Figure 4-2).
+   * Axes start in Lost after initializeAxis(). Commands that require
+   * Idle or Tracking state must call the appropriate helper first.
+   */
+
+  /** Put axis into Idle state (required for positionAxis/offsetAxis/selectWheel/trackAxis). */
+  private def setAxisIdle(isActor: ActorRef[InternalStateActor.Command], axis: Axis): Unit =
+    isActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> AxisStateEnum.Idle),
+      testKit.system.ignoreRef)
+    Thread.sleep(50) // allow IS message to be processed
+
+  /** Put axis into Tracking state so stopAxis is permitted (SDD Figure 4-2). */
+  private def setAxisTracking(isActor: ActorRef[InternalStateActor.Command], axis: Axis): Unit =
+    isActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> AxisStateEnum.Tracking),
+      testKit.system.ignoreRef)
+    Thread.sleep(50) // allow IS message to be processed
+
   // Section 3: stopAxis
   // ========================================
+  // Note: stopAxis is only permitted from Tracking state until command interruption
+  // is implemented. All tests here must set the axis to Tracking first.
 
   test("stopAxis should send XQ #StopX command") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisTracking(isActor, Axis.A)
     val setup = makeSetup("stopAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -393,6 +422,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
   test("stopAxis should signal commandHalted then clear it") {
     val (handler, isActor, _) = createTestActors()
+    setAxisTracking(isActor, Axis.A)
 
     // Subscribe to CmdState changes to observe halted flag
     val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
@@ -424,6 +454,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisTracking(isActor, Axis.A)
     val setup = makeSetup("stopAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -453,6 +484,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   test("offsetAxis should compute absolute target from current position + distance") {
     val (handler, isActor, _) = createTestActors()
 
+    setAxisIdle(isActor, Axis.A)
     // Set current position to 10000
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
       Map("position" -> 10000.0),
@@ -480,7 +512,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
 
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
-      Map("position" -> 20000.0),
+      Map("axisState" -> AxisStateEnum.Idle, "position" -> 20000.0),
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
@@ -501,9 +533,9 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
-    // Pre-set axis A position to 5000 with appropriate threshold
+    // Pre-set axis A to Idle and position to 5000 with appropriate threshold
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
-      Map("position" -> 5000.0, "demand" -> 5000.0, "inPositionThreshold" -> 1.0),
+      Map("axisState" -> AxisStateEnum.Idle, "position" -> 5000.0, "demand" -> 5000.0, "inPositionThreshold" -> 1.0),
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
@@ -527,9 +559,9 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
-    // Pre-set axis A position
+    // Pre-set axis A to Idle with position
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
-      Map("position" -> 3000.0, "inPositionThreshold" -> 1.0),
+      Map("axisState" -> AxisStateEnum.Idle, "position" -> 3000.0, "inPositionThreshold" -> 1.0),
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
@@ -547,6 +579,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("positionAxis", "A", Map("target" -> 50000.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -573,11 +606,11 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   test("Multiple commands on different axes should be independent") {
     val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
 
-    // Set thresholds
+    // Set Idle state and thresholds for both axes
     isActor ! InternalStateActor.UpdateAxisState(Axis.A,
-      Map("inPositionThreshold" -> 10.0), testKit.system.ignoreRef)
+      Map("axisState" -> AxisStateEnum.Idle, "inPositionThreshold" -> 10.0), testKit.system.ignoreRef)
     isActor ! InternalStateActor.UpdateAxisState(Axis.B,
-      Map("inPositionThreshold" -> 10.0), testKit.system.ignoreRef)
+      Map("axisState" -> AxisStateEnum.Idle, "inPositionThreshold" -> 10.0), testKit.system.ignoreRef)
     Thread.sleep(50)
 
     val runIdA = Id()
@@ -656,6 +689,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("selectWheel", "A", Map("position" -> 3))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -674,6 +708,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("selectWheel", "A", Map("position" -> 5))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -688,6 +723,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("selectWheel", "A", Map("position" -> 2))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -702,6 +738,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("selectWheel", "A", Map("position" -> 4))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -725,6 +762,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.B)
     val setup = makeSetup("selectWheel", "B", Map("position" -> 7))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -768,6 +806,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 1000.0, "target2" -> 20.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -786,6 +825,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -801,6 +841,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -824,6 +865,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
@@ -847,6 +889,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.A)
     // Only provide target1, no target2
     val setup = makeSetup("trackAxis", "A", Map("target1" -> 800.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
@@ -863,6 +906,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
     val runId = Id()
 
+    setAxisIdle(isActor, Axis.B)
     val setup = makeSetup("trackAxis", "B", Map("target1" -> 200.0, "target2" -> 15.0))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)

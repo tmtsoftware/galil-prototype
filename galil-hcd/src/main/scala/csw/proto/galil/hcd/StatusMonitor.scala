@@ -340,10 +340,14 @@ class StatusMonitor(
     val threadStatusByte = generalState.threadStatus & 0xFF
     
     val updates = Map(
-      "digitalInputs" -> generalState.inputs.map(_ != 0),
-      "digitalOutputs" -> generalState.outputs.map(_ != 0),
-      "threadStatus" -> threadStatusByte,
-      "lastPollingTime" -> Instant.ofEpochMilli(System.currentTimeMillis())
+      "digitalInputs"       -> generalState.inputs.map(_ != 0),
+      "digitalOutputs"      -> generalState.outputs.map(_ != 0),
+      "threadStatus"        -> threadStatusByte,
+      "lastPollingTime"     -> Instant.ofEpochMilli(System.currentTimeMillis()),
+      // Include current rate on every poll so the HMI always reflects the live
+      // rate without a separate message. Avoids the race where a fast move
+      // completes before the rate-change UpdateHcdState reaches subscribers.
+      "currentPollingRateHz" -> pollingRateHz
     )
     
     // Send HCD-level update
