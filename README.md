@@ -74,7 +74,7 @@ sbt "galil-simulator/run"
 # Terminal 2: Start CSW services, then the HCD
 csw-services start -e
 sbt stage
-./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf
+./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Simulator.conf
 ```
 
 ### With Hardware
