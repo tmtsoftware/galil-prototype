@@ -2,6 +2,7 @@ package csw.proto.galil.hcd
 
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.actor.typed.scaladsl.{Behaviors, TimerScheduler}
+import csw.logging.client.scaladsl.LoggerFactory
 import csw.command.client.CommandResponseManager
 import csw.params.commands.CommandResponse.{Completed, Error}
 import csw.params.core.models.Id
@@ -47,6 +48,19 @@ object CommandWatcherActor:
    * Timeout timer fired — command took too long.
    */
   private case object CommandTimeout extends Command
+
+  /**
+   * Result sent to parent (CommandHandlerActor) before the watcher stops.
+   * This ensures completion/failure is logged even when the actor stops
+   * before the CSW logging framework flushes the log message.
+   */
+  case class WatcherResult(
+    commandName: String,
+    axis: Axis,
+    runId: Id,
+    success: Boolean,
+    message: String
+  )
 
   // ========================================
   // Completion Mask
@@ -148,7 +162,9 @@ object CommandWatcherActor:
     internalStateActor: ActorRef[InternalStateActor.Command],
     commandResponseManager: CommandResponseManager,
     completionAxisState: AxisStateEnum = AxisStateEnum.Idle,
-    resultReporter: Option[(Id, Boolean, String) => Unit] = None
+    activeThread: Int = 0,
+    resultReporter: Option[(Id, Boolean, String) => Unit] = None,
+    loggerFactory: LoggerFactory = null
   )
 
   // ========================================
@@ -158,8 +174,10 @@ object CommandWatcherActor:
   def apply(config: WatchConfig): Behavior[Command] =
     Behaviors.setup { ctx =>
       Behaviors.withTimers { timers =>
-        ctx.log.info(s"CommandWatcher started: ${config.commandName} on axis ${config.axis}, " +
-          s"runId=${config.runId}, timeout=${config.timeout}")
+        val log = Option(config.loggerFactory)
+          .map(_.getLogger(ctx))
+          .getOrElse(new LoggerFactory(csw.prefix.models.Prefix("CSW.test")).getLogger(ctx))
+        log.info(s"Watch: ${config.commandName}/${config.axis} timeout=${config.timeout}")
 
         // Subscribe to CmdStateChanged for the target axis
         val cmdStateAdapter = ctx.messageAdapter[InternalStateActor.CmdStateChanged](CmdStateUpdate(_))
@@ -180,7 +198,7 @@ object CommandWatcherActor:
         // Start timeout timer
         timers.startSingleTimer(CommandTimeout, config.timeout)
 
-        watching(config, cmdStateAdapter, timers)
+        watching(config, cmdStateAdapter, timers, log)
       }
     }
 
@@ -195,27 +213,27 @@ object CommandWatcherActor:
   private def watching(
     config: WatchConfig,
     cmdStateAdapter: ActorRef[InternalStateActor.CmdStateChanged],
-    timers: TimerScheduler[Command]
+    timers: TimerScheduler[Command],
+    log: csw.logging.api.scaladsl.Logger
   ): Behavior[Command] =
     Behaviors.receive { (ctx, msg) =>
       msg match
         case CmdStateUpdate(InternalStateActor.CmdStateChanged(axis, cmdState, changedFields)) =>
-          ctx.log.debug(s"CommandWatcher ${config.commandName}/${config.axis}: " +
+          log.debug(s"CommandWatcher ${config.commandName}/${config.axis}: " +
             s"changed=$changedFields, thread=${cmdState.activeThread}, " +
             s"inPos=${cmdState.inPosition}, moving=${cmdState.moving}, " +
             s"err='${cmdState.axisErrorMsg}', halted=${cmdState.commandHalted}")
 
           // Check 1: Command interruption (SDD 4.8.1)
           if cmdState.commandHalted then
-            ctx.log.info(s"CommandWatcher ${config.commandName}/${config.axis}: " +
-              s"command was interrupted (commandHalted=true)")
+            log.info(s"Watch ${config.commandName}/${config.axis}: INTERRUPTED")
             // Clear the halted flag in IS actor
             config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
               config.axis,
               Map("commandHalted" -> false, "clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx)
+            cleanup(config, cmdStateAdapter, ctx, log)
             reportResult(config, false,
               s"${config.commandName} on axis ${config.axis} was interrupted", ctx)
             Behaviors.stopped
@@ -224,23 +242,23 @@ object CommandWatcherActor:
           else if cmdState.axisErrorMsg.nonEmpty &&
                   config.mask.axisErrorMsg.contains("") then
             // Mask expects empty error but we have one — this is a failure
-            ctx.log.warn(s"CommandWatcher ${config.commandName}/${config.axis}: " +
-              s"axis error: '${cmdState.axisErrorMsg}'")
+            log.warn(s"Watch ${config.commandName}/${config.axis}: FAILED — '${cmdState.axisErrorMsg}' " +
+              s"(inPos=${cmdState.inPosition} moving=${cmdState.moving})")
             // Clear activeCommand in IS actor
             config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
               config.axis,
               Map("clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx)
+            cleanup(config, cmdStateAdapter, ctx, log)
             reportResult(config, false,
               s"${config.commandName} on axis ${config.axis} failed: ${cmdState.axisErrorMsg}", ctx)
             Behaviors.stopped
 
           // Check 3: Completion mask satisfied
           else if config.mask.isSatisfied(cmdState) then
-            ctx.log.info(s"CommandWatcher ${config.commandName}/${config.axis}: " +
-              s"completion mask satisfied — command complete")
+            log.info(s"Watch ${config.commandName}/${config.axis}: COMPLETE " +
+              s"(thread=${cmdState.activeThread} inPos=${cmdState.inPosition} moving=${cmdState.moving})")
             // Transition axisState to configured completion state (Idle for most, Tracking for trackAxis)
             config.internalStateActor ! InternalStateActor.UpdateAxisState(
               config.axis,
@@ -253,7 +271,7 @@ object CommandWatcherActor:
               Map("clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx)
+            cleanup(config, cmdStateAdapter, ctx, log)
             reportResult(config, true, "completed", ctx)
             Behaviors.stopped
 
@@ -262,14 +280,13 @@ object CommandWatcherActor:
             Behaviors.same
 
         case CommandTimeout =>
-          ctx.log.warn(s"CommandWatcher ${config.commandName}/${config.axis}: " +
-            s"TIMEOUT after ${config.timeout}")
+          log.warn(s"Watch ${config.commandName}/${config.axis}: TIMEOUT after ${config.timeout}")
           config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
             config.axis,
             Map("clearActiveCommand" -> true),
             ctx.system.ignoreRef
           )
-          cleanup(config, cmdStateAdapter, ctx)
+          cleanup(config, cmdStateAdapter, ctx, log)
           reportResult(config, false,
             s"${config.commandName} on axis ${config.axis} timed out after ${config.timeout}", ctx)
           Behaviors.stopped
@@ -281,10 +298,11 @@ object CommandWatcherActor:
   private def cleanup(
     config: WatchConfig,
     cmdStateAdapter: ActorRef[InternalStateActor.CmdStateChanged],
-    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command]
+    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
+    log: csw.logging.api.scaladsl.Logger
   ): Unit =
     config.internalStateActor ! InternalStateActor.UnsubscribeCmdState(cmdStateAdapter)
-    ctx.log.debug(s"CommandWatcher ${config.commandName}/${config.axis}: cleaned up")
+    log.debug(s"Watch ${config.commandName}/${config.axis}: cleaned up")
 
   /**
    * Report result to both CRM and optional resultReporter.

@@ -124,22 +124,22 @@ object CommandHandlerActor {
               commandName match {
                 case "positionAxis" =>
                   handlePositionAxis(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "homeAxis" =>
                   handleHomeAxis(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "stopAxis" =>
                   handleStopAxis(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "offsetAxis" =>
                   handleOffsetAxis(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "selectWheel" =>
                   handleSelectWheel(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "trackAxis" =>
                   handleTrackAxis(setup, runId, controllerInterfaceActor, internalStateActor,
-                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor)
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case other =>
                   commandResponseManager.updateCommand(
                     Error(runId, s"Long-running command '$other' not yet implemented"))
@@ -454,10 +454,92 @@ object CommandHandlerActor {
   }
 
   // ========================================
+  // Command interruption protocol (SDD 4.8.1)
+  // ========================================
+
+  /**
+   * Interrupt the currently active command on this axis before starting a new one.
+   *
+   * Called by positionAxis, offsetAxis, and selectWheel when the axis is in Moving
+   * state — SDD 4.8.1 permits these commands to preempt an active move.
+   *
+   * Sequence:
+   *   1. Query IS CmdState for activeThread and activeCommand
+   *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills thread + ST stops motor)
+   *   3. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
+   *   4. 10ms delay for watcher to observe the flag
+   *   5. Clear commandHalted — new command will set its own activeCommand
+   *
+   * Tracking special case: #TrackX ends with EN so the motor continues jogging
+   * but the thread has already released. activeThread will be 0. HaltExecution is
+   * skipped, but commandHalted is still set in case a slow watcher is still running.
+   */
+  private def checkAndInterrupt(
+    commandName: String,
+    axis: Axis,
+    ciActor: ActorRef[GalilCommandMessage],
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    log: csw.logging.api.scaladsl.Logger,
+    askTimeout: Timeout,
+    askScheduler: org.apache.pekko.actor.typed.Scheduler,
+    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command]
+  ): Unit = {
+    // Step 1: Query activeThread and activeCommand from IS
+    val (activeThread, activeCmd) = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
+        ref => InternalStateActor.GetAxisCmdState(axis, ref)
+      )(askTimeout, askScheduler)
+      val cmdState = Await.result(future, askTimeout.duration)
+      (cmdState.map(_.activeThread).getOrElse(0),
+       cmdState.flatMap(_.activeCommand))
+    }.getOrElse((0, None))
+
+    log.info(s"checkAndInterrupt: $commandName on Moving axis $axis " +
+      s"(thread=$activeThread, cmd=$activeCmd) — interruption needed")
+
+    // Step 2: Halt the active thread if one is running (HX + ST via CI actor)
+    if activeThread > 0 then
+      log.info(s"checkAndInterrupt: halting axis $axis thread=$activeThread for $commandName")
+      val haltResult = Try {
+        val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.HaltExecutionResult](
+          ref => GalilCommandMessage.HaltExecution(activeThread, axis, ref)
+        )(askTimeout, askScheduler)
+        Await.result(future, askTimeout.duration)
+      }
+      haltResult match {
+        case Failure(ex) =>
+          log.warn(s"checkAndInterrupt: HaltExecution error for $axis thread=$activeThread: " +
+            s"${ex.getMessage} — proceeding")
+        case Success(result) if !result.success =>
+          log.warn(s"checkAndInterrupt: HaltExecution failed for $axis thread=$activeThread: " +
+            s"${result.error.getOrElse("unknown")} — proceeding")
+        case Success(_) =>
+          log.info(s"checkAndInterrupt: axis $axis halted successfully")
+      }
+    else
+      log.info(s"checkAndInterrupt: axis $axis activeThread=0, skipping HX (already released)")
+
+    // Step 3: Signal existing watcher (if any) that its command was interrupted
+    internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("commandHalted" -> true),
+      ctx.system.ignoreRef)
+
+    // Step 4: Brief delay for watcher to observe the flag and self-terminate
+    Thread.sleep(10)
+
+    // Step 5: Clear flag — new command handler will set its own activeCommand
+    internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("commandHalted" -> false),
+      ctx.system.ignoreRef)
+
+    log.info(s"checkAndInterrupt: interruption complete for axis $axis — " +
+      s"new command $commandName may proceed")
+  }
+
+  // ========================================
   // Long-running command defaults
   // ========================================
 
-  /** Default timeout for motion commands when motor config is unavailable */
   private val defaultMotionTimeout = 30.seconds
 
   /** Minimum timeout floor — even very short moves get this much time */
@@ -603,6 +685,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
+    loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout
   ): Unit = {
     // Step 1: Pre-escalate polling rate so StatusMonitor is at action rate
@@ -630,17 +713,15 @@ object CommandHandlerActor {
 
       case Success(execResult) if execResult.threadWasActive =>
         // Thread confirmed active — normal path.
-        // Push activeThread to CmdState BEFORE spawning watcher so the watcher's
-        // initial snapshot reflects the true state. Without this, the watcher sees
-        // stale activeThread=0 from the last QR poll and may immediately satisfy
-        // completion masks that check activeThread==0 (selectWheel, homeAxis, stopAxis).
+        // Register thread→axis in IS before spawning watcher. IS sets activeThread
+        // on the axis CmdState immediately so the watcher's initial snapshot sees
+        // the running thread and does not prematurely satisfy activeThread==0 masks.
+        // IS will clear activeThread when UpdateThreadStatus reports the thread done.
         val thread = execResult.thread
-        log.info(s"$commandName $axis: thread $thread confirmed active, pushing to CmdState and spawning watcher")
-        internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
-          Map("activeThread" -> thread),
-          ctx.system.ignoreRef)
+        log.info(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
+        internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
-          timeout, completionAxisState)
+          loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
 
       case Success(execResult) =>
         // Thread already finished — command completed faster than MG _NO.
@@ -672,7 +753,7 @@ object CommandHandlerActor {
             // No error — spawn watcher to wait for full completion mask.
             // Thread already released, so no thread to release on watcher completion.
             spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
-              timeout, completionAxisState)
+              loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
         }
     }
   }
@@ -723,7 +804,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(PositionAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -746,6 +828,11 @@ object CommandHandlerActor {
       )(askTimeout, askScheduler)
       Await.result(future, askTimeout.duration)
     }.getOrElse(None)
+
+    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
+    // the new command: halt active thread (HX + ST), signal watcher, then proceed.
+    if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
+      checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
 
     // Check if axis is already at the requested position
     maybeAxisState match {
@@ -804,6 +891,7 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
+      loggerFactory = loggerFactory,
       timeout = moveTimeout
     )
   }
@@ -830,7 +918,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(HomeAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -869,7 +958,8 @@ object CommandHandlerActor {
       log = log,
       askTimeout = askTimeout,
       askScheduler = askScheduler,
-      ctx = ctx
+      ctx = ctx,
+      loggerFactory = loggerFactory
     )
   }
 
@@ -878,18 +968,20 @@ object CommandHandlerActor {
   // ========================================
 
   /**
-   * Stops any active motion on the specified axis.
+   * Stops any active motion on the specified axis (SDD 4.8.1, 4.8.5, ICD 2.2.1.11).
    *
-   * Sequence:
-   *   1. Execute embedded stop program: XQ #StopX,thread
-   *      (The embedded #StopX sends ST command which decels and stops)
-   *   2. If there's an active CommandWatcher, it will detect the thread
-   *      release and motion stop via its own mask evaluation
-   *   3. Spawn a new CommandWatcher with stopAxis mask for THIS stop command
+   * Implements the full command interruption protocol from SDD 4.8.1:
+   *   1. Query IS for active thread and current axisState
+   *   2. Send HaltExecution to CI actor: kills active thread (HX) + stops motor (ST)
+   *   3. Set commandHalted=true so active CommandWatcher reports CommandFailure
+   *   4. Execute embedded #StopX program for clean deceleration handoff
+   *   5. Spawn CommandWatcher with stopAxis mask for this stop command
    *
-   * Note: The previous command's watcher (if any) will detect commandHalted
-   * or thread release and self-terminate with an error. The stop command's
-   * own watcher monitors the stop completion independently.
+   * Valid from any axis state (Lost, Idle, Homing, Moving, Tracking, Error).
+   * Completion state depends on prior state:
+   *   Lost/Idle/Error → Idle  (no change to homed status)
+   *   Homing          → Lost  (homing interrupted; position unknown)
+   *   Moving/Tracking → Idle  (was homed; position known)
    */
   private def handleStopAxis(
     setup: Setup,
@@ -901,7 +993,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(StopAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -915,37 +1008,62 @@ object CommandHandlerActor {
     if guardAxisState("stopAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
     then return
 
-    // Query current axisState to determine completion state (SDD Figure 4-2):
-    //   Homing interrupted → Lost (axis not homed)
-    //   Moving/Tracking interrupted → Idle (position is known)
+    // Query current axis and command state:
+    //   - axisState → determines completion state after stop (SDD Figure 4-2)
+    //   - activeThread → needed to halt the running program (SDD 4.8.1)
     //
-    // NOTE: stopAxis from Homing or Moving requires AB (program abort) before
-    // XQ #StopX to prevent the running program from restarting motion after ST.
-    // This interruption logic is NOT YET IMPLEMENTED — currently stopAxis is
-    // only accepted from Tracking (where #TrackX has already ended, so ST is safe).
-    // Full interruption support will be added in a future implementation step.
-    val completionState = Try {
-      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+    // SDD 4.8.1 interruption sequence:
+    //   1. HaltExecution: CI actor sends HX to kill the active thread, then ST to stop motor
+    //   2. commandHalted: signals the active watcher to report CommandFailure
+    //   3. XQ #StopX: runs the embedded stop program for clean deceleration
+    //
+    // HX (halt execution) rather than AB (abort program) is used here because HX
+    // stops the thread immediately without allowing the program to execute further
+    // motion commands, which AB does not guarantee on the DMC-500x0.
+    val (completionState, activeThread) = Try {
+      val axisFuture = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
         ref => InternalStateActor.GetAxisState(axis, ref)
       )(askTimeout, askScheduler)
-      Await.result(future, askTimeout.duration) match {
-        case Some(as) =>
-          val target = as.axisState.stopCompletionState
-          log.info(s"stopAxis $axis: current state=${as.axisState}, completion→$target")
-          target
-        case None => AxisStateEnum.Idle
-      }
-    }.getOrElse(AxisStateEnum.Idle)
+      val cmdFuture = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
+        ref => InternalStateActor.GetAxisCmdState(axis, ref)
+      )(askTimeout, askScheduler)
+      val axisStateOpt = Await.result(axisFuture, askTimeout.duration)
+      val cmdStateOpt  = Await.result(cmdFuture,  askTimeout.duration)
+      val target  = axisStateOpt.map(_.axisState.stopCompletionState).getOrElse(AxisStateEnum.Idle)
+      val thread  = cmdStateOpt.map(_.activeThread).getOrElse(0)
+      log.info(s"stopAxis $axis: current state=${axisStateOpt.map(_.axisState).getOrElse("unknown")}, " +
+        s"activeThread=$thread, completion→$target")
+      (target, thread)
+    }.getOrElse((AxisStateEnum.Idle, 0))
 
-    // Signal any existing watcher that the command was halted
+    // Step 1: Halt the active execution thread and stop the motor (SDD 4.8.1).
+    // This is the key step that enables stopAxis from Moving or Homing states —
+    // without HaltExecution, the running #HomeX or #MoveX program would restart
+    // motion after ST, making the stop ineffective.
+    val haltResult = Try {
+      val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.HaltExecutionResult](
+        ref => GalilCommandMessage.HaltExecution(activeThread, axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }
+    haltResult match {
+      case Failure(ex) =>
+        log.warn(s"stopAxis $axis: HaltExecution communication error: ${ex.getMessage} — proceeding anyway")
+      case Success(result) if !result.success =>
+        log.warn(s"stopAxis $axis: HaltExecution reported failure: ${result.error.getOrElse("unknown")} — proceeding anyway")
+      case Success(_) =>
+        log.info(s"stopAxis $axis: HaltExecution succeeded (thread=$activeThread halted)")
+    }
+
+    // Step 2: Signal any existing watcher that the command was halted
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> true),
       ctx.system.ignoreRef)
 
-    // Brief delay for the halted notification to propagate
+    // Brief delay for the halted notification to propagate to the watcher
     Thread.sleep(10)
 
-    // Clear halted flag and set new active command
+    // Step 3: Clear halted flag and set new active command for this stop
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> false, "activeCommand" -> ActiveCommand.Stop, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
@@ -966,6 +1084,7 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
+      loggerFactory = loggerFactory,
       timeout = 5.seconds
     )
   }
@@ -989,7 +1108,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(OffsetAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -1011,6 +1131,11 @@ object CommandHandlerActor {
       ref => InternalStateActor.GetAxisState(axis, ref)
     )
     val currentState = Await.result(posFuture, askTimeout.duration)
+
+    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
+    // the new command: halt active thread (HX + ST), signal watcher, then proceed.
+    if currentState.exists(_.axisState == AxisStateEnum.Moving) then
+      checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
 
     val currentPosition = currentState match {
       case Some(state) => state.position
@@ -1066,6 +1191,7 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
+      loggerFactory = loggerFactory,
       timeout = moveTimeout
     )
   }
@@ -1098,7 +1224,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(SelectWheelCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -1113,6 +1240,18 @@ object CommandHandlerActor {
     // been applied before the next command's onValidate() query.
     if guardAxisState("selectWheel", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
     then return
+
+    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
+    // the new command: halt active thread (HX + ST), signal watcher, then proceed.
+    val maybeWheelState = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+        ref => InternalStateActor.GetAxisState(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }.getOrElse(None)
+
+    if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
+      checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
 
     // 1. Set position demand in embedded variable
     sendToController(ciActor, s"dmd[$idx]=$position", log, askTimeout, askScheduler) match {
@@ -1147,7 +1286,8 @@ object CommandHandlerActor {
       log = log,
       askTimeout = askTimeout,
       askScheduler = askScheduler,
-      ctx = ctx
+      ctx = ctx,
+      loggerFactory = loggerFactory
     )
   }
 
@@ -1190,7 +1330,8 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(TrackAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
@@ -1247,7 +1388,8 @@ object CommandHandlerActor {
       log = log,
       askTimeout = askTimeout,
       askScheduler = askScheduler,
-      ctx = ctx
+      ctx = ctx,
+      loggerFactory = loggerFactory
     )
   }
 
@@ -1268,6 +1410,7 @@ object CommandHandlerActor {
     crm: CommandResponseManager,
     log: csw.logging.api.scaladsl.Logger,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
+    loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout,
     completionAxisState: AxisStateEnum = AxisStateEnum.Idle
   ): Unit = {
@@ -1279,6 +1422,7 @@ object CommandHandlerActor {
       timeout = timeout,
       internalStateActor = internalStateActor,
       commandResponseManager = crm,
+      loggerFactory = loggerFactory,
       completionAxisState = completionAxisState
     )
     val watcherName = s"watcher-${commandName}-${axis}-${runId.id.take(8)}"

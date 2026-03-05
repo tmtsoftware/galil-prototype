@@ -1,6 +1,7 @@
 package csw.proto.galil.hcd
 
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
+import csw.logging.client.scaladsl.LoggerFactory
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import csw.proto.galil.io.DataRecord
 import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
@@ -97,13 +98,14 @@ object StatusMonitor:
   def apply(
     controllerInterface: ActorRef[GalilCommandMessage],
     internalState: ActorRef[InternalStateActor.Command],
+    loggerFactory: LoggerFactory,
     standbyPollingRateHz: Double = 1.0,
     actionPollingRateHz: Double = 10.0
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
         new StatusMonitor(context, timers, controllerInterface, internalState,
-          standbyPollingRateHz, actionPollingRateHz)
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz)
       }
     }
 
@@ -115,12 +117,15 @@ class StatusMonitor(
   timers: TimerScheduler[StatusMonitor.Command],
   controllerInterface: ActorRef[GalilCommandMessage],
   internalState: ActorRef[InternalStateActor.Command],
+  loggerFactory: LoggerFactory,
   standbyPollingRateHz: Double,
   actionPollingRateHz: Double
 ) extends AbstractBehavior[StatusMonitor.Command](context):
   
   import StatusMonitor._
-  
+
+  private val log = loggerFactory.getLogger(context)
+
   // Active axis states that require action polling rate
   private val ActiveAxisStates: Set[AxisStateEnum] =
     Set(AxisStateEnum.Homing, AxisStateEnum.Moving, AxisStateEnum.Tracking)
@@ -144,7 +149,7 @@ class StatusMonitor(
   // Start periodic polling at standby rate
   startPolling()
   
-  context.log.info(s"StatusMonitor started - standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
+  log.info(s"StatusMonitor started - standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
   override def onMessage(msg: Command): Behavior[Command] =
     msg match
@@ -184,11 +189,11 @@ class StatusMonitor(
   private def handlePollController(): Behavior[Command] =
     // Guard: Skip if paused for file operations (handles queued timer messages)
     if pollingPaused then
-      context.log.debug("Skipping QR - polling is paused for file operation")
+      log.debug("Skipping QR - polling is paused for file operation")
       return Behaviors.same
     
     if pollingEnabled then
-      context.log.debug("Polling controller for QR data")
+      log.debug("Polling controller for QR data")
       
       // Create adapter to convert GalilCommandMessage.QRResult → StatusMonitor.QRResponse
       val adapter = context.messageAdapter[GalilCommandMessage.QRResult] {
@@ -208,9 +213,8 @@ class StatusMonitor(
       lastPollTime = Some(System.currentTimeMillis())
       errorCount = 0  // Reset error count on success
       
-      context.log.debug(s"Received QR data, sample: ${dataRecord.generalState.sampleNumber}")
+      log.debug(s"Received QR data, sample: ${dataRecord.generalState.sampleNumber}")
       
-      // Update HCD-level state (including thread status → per-axis activeThread)
       val activeAxisChars = dataRecord.header.blocksPresent.filter(axis => DataRecord.axes.contains(axis))
       updateHcdState(dataRecord.generalState, activeAxisChars)
       
@@ -224,7 +228,7 @@ class StatusMonitor(
       Behaviors.same
     catch
       case ex: Exception =>
-        context.log.error(s"Error processing QR response: ${ex.getMessage}", ex)
+        log.error(s"Error processing QR response: ${ex.getMessage}")
         errorCount += 1
         Behaviors.same
   
@@ -232,7 +236,7 @@ class StatusMonitor(
    * Handle QR error from controller
    */
   private def handleQRError(error: String): Behavior[Command] =
-    context.log.error(s"QR request failed: $error")
+    log.error(s"QR request failed: $error")
     errorCount += 1
     Behaviors.same
   
@@ -248,11 +252,11 @@ class StatusMonitor(
    */
   private def handlePauseQRPolling(): Behavior[Command] =
     if !pollingPaused then
-      context.log.info("Pausing QR polling for file operation")
+      log.info("Pausing QR polling for file operation")
       pollingPaused = true
       stopPolling()
     else
-      context.log.debug("QR polling already paused")
+      log.debug("QR polling already paused")
     Behaviors.same
   
   /**
@@ -260,12 +264,12 @@ class StatusMonitor(
    */
   private def handleResumeQRPolling(): Behavior[Command] =
     if pollingPaused then
-      context.log.info("Resuming QR polling after file operation")
+      log.info("Resuming QR polling after file operation")
       pollingPaused = false
       if pollingEnabled then
         startPolling()
     else
-      context.log.debug("QR polling was not paused")
+      log.debug("QR polling was not paused")
     Behaviors.same
   
   /**
@@ -275,10 +279,10 @@ class StatusMonitor(
     if enabled != pollingEnabled then
       pollingEnabled = enabled
       if enabled then
-        context.log.info("Polling enabled")
+        log.info("Polling enabled")
         startPolling()
       else
-        context.log.info("Polling disabled")
+        log.info("Polling disabled")
         stopPolling()
     Behaviors.same
   
@@ -288,7 +292,7 @@ class StatusMonitor(
   private def handleSetPollingRate(newRateHz: Double): Behavior[Command] =
     if newRateHz > 0 && newRateHz != pollingRateHz then
       pollingRateHz = newRateHz
-      context.log.info(s"Polling rate changed to ${pollingRateHz}Hz (${pollingPeriod.toMillis}ms)")
+      log.info(s"Polling rate changed to ${pollingRateHz}Hz (${pollingPeriod.toMillis}ms)")
       if pollingEnabled then
         stopPolling()
         startPolling()
@@ -319,7 +323,7 @@ class StatusMonitor(
         "all axes standby"
       
       pollingRateHz = targetRate
-      context.log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
+      log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
       if pollingEnabled && !pollingPaused then
         stopPolling()
         startPolling()
@@ -333,42 +337,27 @@ class StatusMonitor(
     Behaviors.same
   
   /**
-   * Update HCD-level state from GeneralState.
-   * Also decodes threadStatus bitmask and updates per-axis activeThread in AxisCmdState.
+   * Update HCD-level state from GeneralState and report thread status to IS.
+   * IS owns the thread→axis registry and resolves completions from the bitmask.
    */
   private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
-    
+
     val updates = Map(
-      "digitalInputs"       -> generalState.inputs.map(_ != 0),
-      "digitalOutputs"      -> generalState.outputs.map(_ != 0),
-      "threadStatus"        -> threadStatusByte,
-      "lastPollingTime"     -> Instant.ofEpochMilli(System.currentTimeMillis()),
-      // Include current rate on every poll so the HMI always reflects the live
-      // rate without a separate message. Avoids the race where a fast move
-      // completes before the rate-change UpdateHcdState reaches subscribers.
+      "digitalInputs"        -> generalState.inputs.map(_ != 0),
+      "digitalOutputs"       -> generalState.outputs.map(_ != 0),
+      "threadStatus"         -> threadStatusByte,
+      "lastPollingTime"      -> Instant.ofEpochMilli(System.currentTimeMillis()),
       "currentPollingRateHz" -> pollingRateHz
     )
-    
-    // Send HCD-level update
+
+    // Send HCD-level update (position, I/O, timing)
     internalState ! InternalStateActor.UpdateHcdState(updates, context.system.ignoreRef)
-    
-    // Decode threadStatus and update per-axis activeThread in AxisCmdState.
-    // Simple mapping: axis index + 1 = thread number (A->1, B->2, ..., G->7)
-    // Thread 0 is reserved for error handling.
-    activeAxisChars.foreach { axisChar =>
-      if DataRecord.axes.contains(axisChar) then
-        val axis = Axis.fromChar(axisChar)
-        val thread = axis.index + 1  // A=1, B=2, ... G=7
-        val threadActive = (threadStatusByte & (1 << thread)) != 0
-        val activeThread = if threadActive then thread else 0
-        
-        internalState ! InternalStateActor.UpdateAxisCmdState(
-          axis,
-          Map("activeThread" -> activeThread),
-          context.system.ignoreRef
-        )
-    }
+
+    // Report raw thread status to IS. IS compares against its thread→axis registry
+    // to detect completions and set activeThread=0 on the correct axis.
+    // No axis↔thread mapping here — IS owns that knowledge.
+    internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte)
   
   /**
    * Update axis state from GalilAxisStatus.
@@ -411,15 +400,16 @@ class StatusMonitor(
     // Send operational state update
     internalState ! InternalStateActor.UpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
     
-    // Build command state update
-    // moving: bit 15 of status word ("Move in Progress") — reliable for ALL motor types
-    // Note: inPosition is mirrored automatically by InternalStateActor
+    // Build command state update.
+    // moving: bit 15 of status word ("Move in Progress") — reliable for ALL motor types.
+    // activeThread is NOT set here — IS owns the thread→axis registry and updates
+    // activeThread via RegisterThread (set) and UpdateThreadStatus (clear).
+    // inPosition is mirrored automatically by InternalStateActor from AxisState.
     val cmdUpdates = Map[String, Any](
-      "moving" -> status.moveInProgress,
+      "moving"   -> status.moveInProgress,
       "stopCode" -> (axisStatus.stopCode & 0xFF)  // unsigned byte
     )
-    
-    // Send command state update
+
     internalState ! InternalStateActor.UpdateAxisCmdState(axis, cmdUpdates, context.system.ignoreRef)
   
   /**

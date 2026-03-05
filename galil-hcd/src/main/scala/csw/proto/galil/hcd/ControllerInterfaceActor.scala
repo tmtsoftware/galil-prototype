@@ -469,6 +469,58 @@ private[hcd] object ControllerInterfaceActor {
             }
             Behaviors.same
 
+          // Halt an active execution thread and stop the axis motor (SDD 4.8.1).
+          //
+          // The thread parameter comes from IS.activeThread (set by CH when the program
+          // started). CI performs a hardware confirmation via MG _NO before sending HX:
+          // if the thread bit is no longer set, the program already finished and HX is
+          // skipped (ST is still sent to ensure the motor is stopped).
+          //
+          // This avoids relying solely on IS.activeThread, which can be transiently
+          // stale if a QR poll or CommandWatcher update races with this call.
+          case GalilCommandMessage.HaltExecution(thread, axis, replyTo) =>
+            try {
+              galilIo.synchronized {
+                // Confirm thread is still active in hardware before sending HX
+                if thread >= 1 then
+                  val threadStatus = queryThreadStatus()
+                  val threadBit = 1 << thread
+                  if (threadStatus & threadBit) != 0 then
+                    val hxCmd = s"HX $thread"
+                    log.info(s"HaltExecution: thread $thread confirmed active (_NO=0x${threadStatus.toHexString}), sending $hxCmd")
+                    val hxResponses = galilIo.send(hxCmd)
+                    val hxError = hxResponses.find { case (_, bs) =>
+                      bs.utf8String.trim.startsWith("?")
+                    }
+                    if hxError.isDefined then
+                      log.warn(s"HaltExecution: HX $thread returned error — thread may have stopped between check and HX")
+                    else
+                      log.info(s"HaltExecution: thread $thread halted")
+                  else
+                    log.info(s"HaltExecution: thread $thread already finished (_NO=0x${threadStatus.toHexString}), skipping HX")
+
+                // Always send ST to stop any residual motor motion on the axis
+                val stCmd = s"ST ${axis.char}"
+                log.info(s"HaltExecution: stopping motor with $stCmd")
+                val stResponses = galilIo.send(stCmd)
+                val stError = stResponses.find { case (_, bs) =>
+                  bs.utf8String.trim.startsWith("?")
+                }
+                if stError.isDefined then
+                  val errMsg = s"ST ${axis.char} rejected: ${stError.get._2.utf8String.trim}"
+                  log.error(s"HaltExecution: $errMsg")
+                  replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(errMsg))
+                else
+                  log.info(s"HaltExecution: axis ${axis.char} stopped successfully")
+                  replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
+              }
+            } catch {
+              case ex: Exception =>
+                log.error(s"HaltExecution failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
           // GetQR handler for StatusMonitor integration
           case GalilCommandMessage.GetQR(replyTo) =>
             try {

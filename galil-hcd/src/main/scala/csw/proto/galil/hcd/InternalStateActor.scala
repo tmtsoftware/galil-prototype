@@ -2,6 +2,7 @@ package csw.proto.galil.hcd
 
 import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
+import csw.logging.client.scaladsl.LoggerFactory
 
 import java.time.Instant
 
@@ -119,6 +120,24 @@ object InternalStateActor:
    * Unsubscribe from command state changes.
    */
   case class UnsubscribeCmdState(subscriber: ActorRef[CmdStateChanged]) extends Command
+
+  /**
+   * Register a thread as executing a command on behalf of an axis.
+   * IS will track the thread→axis mapping and automatically clear the axis's
+   * activeThread when UpdateThreadStatus reports the thread has stopped.
+   * This replaces the former UpdateAxisCmdState(activeThread=N) approach and
+   * eliminates any hardcoded axis-index-to-thread-number mapping.
+   */
+  case class RegisterThread(thread: Int, axis: Axis) extends Command
+
+  /**
+   * Report current hardware thread status bitmask (_NO register value).
+   * IS compares against registered threads to detect completions:
+   * for each registered (thread→axis), if the thread's bit is now clear,
+   * IS sets activeThread=0 on the owning axis and fires CmdStateChanged.
+   * Sent by StatusMonitor on every poll cycle.
+   */
+  case class UpdateThreadStatus(threadStatusByte: Int) extends Command
   
   // ========================================
   // Responses
@@ -182,16 +201,30 @@ object InternalStateActor:
   // Factory
   // ========================================
   
-  def apply(initialState: HcdState = HcdState()): Behavior[Command] =
+  def apply(loggerFactory: LoggerFactory, initialState: HcdState = HcdState()): Behavior[Command] =
     Behaviors.setup { context =>
-      new InternalStateActor(context, initialState)
+      new InternalStateActor(context, loggerFactory, initialState)
     }
+
+  /**
+   * Convenience overloads for unit tests — avoids requiring a LoggerFactory in every test.
+   * Uses a no-prefix LoggerFactory that satisfies the type contract but produces minimal output.
+   */
+  private def testLoggerFactory: LoggerFactory =
+    new LoggerFactory(csw.prefix.models.Prefix("CSW.test"))
+
+  def apply(initialState: HcdState): Behavior[Command] =
+    apply(testLoggerFactory, initialState)
+
+  def apply(): Behavior[Command] =
+    apply(testLoggerFactory, HcdState())
 
 /**
  * Actor implementation using Pekko Typed.
  */
 class InternalStateActor(
   context: ActorContext[InternalStateActor.Command],
+  loggerFactory: LoggerFactory,
   initialState: HcdState
 ) extends AbstractBehavior[InternalStateActor.Command](context):
   
@@ -207,8 +240,14 @@ class InternalStateActor(
   // Command state subscribers (CommandWatcher actors)
   // Maps subscriber to the axis they're watching
   private var cmdSubscribers: Map[ActorRef[CmdStateChanged], Axis] = Map.empty
+
+  // Thread→axis registry: tracks which Galil thread is executing for which axis.
+  // Written by RegisterThread (from CH after XQ), cleared when UpdateThreadStatus
+  // detects the thread has stopped. No hardcoded axis↔thread mapping.
+  private var threadRegistry: Map[Int, Axis] = Map.empty
+  private var lastThreadStatusByte: Int = 0
   
-  context.log.info("InternalStateActor started")
+  private val log = loggerFactory.getLogger(context)
   
   override def onMessage(msg: Command): Behavior[Command] =
     msg match
@@ -234,26 +273,32 @@ class InternalStateActor(
         Behaviors.same
         
       case Subscribe(subscriber, filter) =>
-        context.log.debug(s"New state subscriber: $subscriber")
+        log.debug(s"New state subscriber: $subscriber")
         subscribers = subscribers + subscriber
         subscriptionFilters = subscriptionFilters + (subscriber -> filter)
         Behaviors.same
         
       case Unsubscribe(subscriber) =>
-        context.log.debug(s"Unsubscribing state: $subscriber")
+        log.debug(s"Unsubscribing state: $subscriber")
         subscribers = subscribers - subscriber
         subscriptionFilters = subscriptionFilters - subscriber
         Behaviors.same
         
       case SubscribeCmdState(axis, subscriber) =>
-        context.log.debug(s"New cmd state subscriber for axis $axis: $subscriber")
         cmdSubscribers = cmdSubscribers + (subscriber -> axis)
+        log.debug(s"IS SubscribeCmdState: axis=$axis total=${cmdSubscribers.size}")
         Behaviors.same
         
       case UnsubscribeCmdState(subscriber) =>
-        context.log.debug(s"Unsubscribing cmd state: $subscriber")
+        log.debug(s"Unsubscribing cmd state: $subscriber")
         cmdSubscribers = cmdSubscribers - subscriber
         Behaviors.same
+
+      case RegisterThread(thread, axis) =>
+        handleRegisterThread(thread, axis)
+
+      case UpdateThreadStatus(threadStatusByte) =>
+        handleUpdateThreadStatus(threadStatusByte)
 
   /**
    * Update HCD-level state and notify operational state subscribers.
@@ -272,7 +317,7 @@ class InternalStateActor(
       Behaviors.same
     catch
       case ex: Exception =>
-        context.log.error("Error updating HCD state", ex)
+        log.error("Error updating HCD state" + s": ${ex.getMessage}")
         replyTo ! UpdateResponse(success = false, message = ex.getMessage)
         Behaviors.same
 
@@ -331,7 +376,7 @@ class InternalStateActor(
       Behaviors.same
     catch
       case ex: Exception =>
-        context.log.error(s"Error updating axis $axis state", ex)
+        log.error(s"Error updating axis $axis state" + s": ${ex.getMessage}")
         replyTo ! UpdateResponse(success = false, message = ex.getMessage)
         Behaviors.same
 
@@ -382,9 +427,65 @@ class InternalStateActor(
       Behaviors.same
     catch
       case ex: Exception =>
-        context.log.error(s"Error updating axis $axis cmd state", ex)
+        log.error(s"Error updating axis $axis cmd state" + s": ${ex.getMessage}")
         replyTo ! UpdateResponse(success = false, message = ex.getMessage)
         Behaviors.same
+
+  /**
+   * Register a thread as executing a command on behalf of an axis.
+   * Sets activeThread on the axis CmdState to the thread number and stores
+   * the thread→axis mapping for UpdateThreadStatus to resolve completions.
+   */
+  private def handleRegisterThread(thread: Int, axis: Axis): Behavior[Command] =
+    log.info(s"IS RegisterThread: thread=$thread → axis=$axis")
+    threadRegistry = threadRegistry + (thread -> axis)
+
+    // Set activeThread on the axis CmdState immediately so the watcher's
+    // initial snapshot reflects the running thread. This prevents premature
+    // completion on the stale activeThread=0 from the last QR poll.
+    val oldCmdState = currentState.getCmdState(axis)
+    currentState = currentState.updateCmdState(axis, Map("activeThread" -> thread))
+    val newCmdState = currentState.getCmdState(axis)
+
+    // Only notify if value actually changed (it will have, from 0 to thread#)
+    val changed = (oldCmdState, newCmdState) match
+      case (Some(old), Some(nw)) => old.activeThread != nw.activeThread
+      case _ => true
+    if changed then
+      newCmdState.foreach(cs => notifyCmdSubscribers(axis, cs, Set("activeThread")))
+
+    Behaviors.same
+
+  /**
+   * Process hardware thread status bitmask from StatusMonitor QR poll.
+   * For each registered (thread→axis): if the thread bit is now clear, the
+   * thread has finished — set activeThread=0 on the owning axis, remove from
+   * registry, and fire CmdStateChanged so the watcher can evaluate its mask.
+   */
+  private def handleUpdateThreadStatus(threadStatusByte: Int): Behavior[Command] =
+    // Find threads that were registered and are now inactive
+    val completed = threadRegistry.filter { (thread, _) =>
+      val bit = 1 << thread
+      (threadStatusByte & bit) == 0
+    }
+
+    completed.foreach { (thread, axis) =>
+      log.info(s"IS UpdateThreadStatus: thread=$thread completed → axis=$axis activeThread→0")
+      threadRegistry = threadRegistry - thread
+
+      val oldCmdState = currentState.getCmdState(axis)
+      currentState = currentState.updateCmdState(axis, Map("activeThread" -> 0))
+      val newCmdState = currentState.getCmdState(axis)
+
+      val changed = (oldCmdState, newCmdState) match
+        case (Some(old), Some(nw)) => old.activeThread != nw.activeThread
+        case _ => true
+      if changed then
+        newCmdState.foreach(cs => notifyCmdSubscribers(axis, cs, Set("activeThread")))
+    }
+
+    lastThreadStatusByte = threadStatusByte
+    Behaviors.same
 
   /**
    * Notify operational state subscribers that match the filter.
@@ -405,6 +506,10 @@ class InternalStateActor(
    * Notify command state subscribers watching the specified axis.
    */
   private def notifyCmdSubscribers(axis: Axis, cmdState: AxisCmdState, changedFields: Set[String]): Unit =
+    val matching = cmdSubscribers.count((_, watchedAxis) => watchedAxis == axis)
+    log.info(s"IS notifyCmdSubscribers: axis=$axis changed=$changedFields " +
+      s"subscribers=${cmdSubscribers.size} matching=$matching " +
+      s"thread=${cmdState.activeThread} moving=${cmdState.moving} err='${cmdState.axisErrorMsg}'")
     cmdSubscribers.foreach { (subscriber, watchedAxis) =>
       if watchedAxis == axis then
         subscriber ! CmdStateChanged(axis, cmdState, changedFields)

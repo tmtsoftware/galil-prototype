@@ -44,30 +44,37 @@ enum AxisStateEnum:
   /**
    * Check if the given command is accepted in this axis state (SDD Figure 4-2).
    * Returns None if accepted, or Some(reason) if rejected.
+   *
+   * Interruption-eligible combinations (SDD 4.8.1) return None here so the
+   * CommandHandler can execute the full interruption protocol. The CommandHandler
+   * is responsible for the actual interruption logic; this method only gates out
+   * truly invalid state transitions.
    */
   def validateCommand(commandName: String): Option[String] =
     import AxisStateEnum._
     (this, commandName) match
-      // homeAxis: accepted from Lost, Idle, Error only.
-      // Re-homing from Homing/Moving requires command interruption (AB) — not yet implemented.
+      // stopAxis: valid from ANY state — it is a safety command.
+      // Also required to escape Error state (Error → Idle via stopAxis, SDD Figure 4-2).
+      // CommandHandler executes interruption protocol when a program is active.
+      case (_, "stopAxis") => None
+
+      // homeAxis: accepted from Lost, Idle, Error only (SDD Figure 4-2).
+      // Cannot interrupt Homing or Moving — those require stopAxis first.
       case (Lost,  "homeAxis") => None
       case (Idle,  "homeAxis") => None
       case (Error, "homeAxis") => None
 
-      // positionAxis, offsetAxis, selectWheel: only from Idle
-      case (Idle, "positionAxis") => None
-      case (Idle, "offsetAxis")   => None
-      case (Idle, "selectWheel")  => None
+      // positionAxis, offsetAxis, selectWheel: from Idle, or Moving via interruption
+      case (Idle,   "positionAxis") => None
+      case (Moving, "positionAxis") => None  // CommandHandler will interrupt
+      case (Idle,   "offsetAxis")   => None
+      case (Moving, "offsetAxis")   => None  // CommandHandler will interrupt
+      case (Idle,   "selectWheel")  => None
+      case (Moving, "selectWheel")  => None  // CommandHandler will interrupt
 
       // trackAxis: from Idle or Tracking (re-issue updates velocity/target)
       case (Idle,     "trackAxis") => None
       case (Tracking, "trackAxis") => None
-
-      // stopAxis: currently only from Tracking.
-      // Stopping from Homing or Moving requires AB (program abort) before #StopX
-      // to prevent the running program from restarting motion — NOT YET IMPLEMENTED.
-      // Those cases are rejected here until interruption support is added.
-      case (Tracking, "stopAxis") => None
 
       // Reject everything else with a descriptive message
       case (state, cmd) =>
@@ -76,13 +83,20 @@ enum AxisStateEnum:
   /**
    * Determine the axis state after a stopAxis command completes,
    * based on the state the axis was in when stop was issued.
-   * Homing interrupted → Lost (axis is not homed)
-   * Moving/Tracking interrupted → Idle (axis was homed, position is known)
+   *
+   * Per SDD Figure 4-2:
+   *   Lost     → stopAxis → Lost     (still not homed; stop is safe but changes nothing)
+   *   Homing   → stopAxis → Lost     (homing interrupted; axis position unknown)
+   *   Moving   → stopAxis → Idle     (was homed; position is known)
+   *   Tracking → stopAxis → Idle     (was homed; position is known)
+   *   Error    → stopAxis → Idle     (stop clears the fault condition)
+   *   Idle     → stopAxis → Idle     (no-op; already stopped)
    */
   def stopCompletionState: AxisStateEnum =
     this match
-      case Homing => Lost
-      case _      => Idle
+      case Lost    => Lost   // stopAxis on Lost axis — remains Lost; only homeAxis escapes
+      case Homing  => Lost   // homing interrupted — axis position unknown
+      case _       => Idle   // Moving, Tracking, Error, Idle → all transition to Idle
 
 enum MechanismType:
   case Linear, Rotating
@@ -278,7 +292,7 @@ case class AxisCmdState(
       case ("inPosition", v: Boolean) => updated = updated.copy(inPosition = v)
       case ("moving", v: Boolean) => updated = updated.copy(moving = v)
       case ("activeCommand", v: ActiveCommand) => updated = updated.copy(activeCommand = Some(v))
-      case ("clearActiveCommand", _: Boolean) => updated = updated.copy(activeCommand = None)
+      case ("clearActiveCommand", _: Boolean) => updated = updated.copy(activeCommand = None, activeThread = 0)
       case ("commandHalted", v: Boolean) => updated = updated.copy(commandHalted = v)
       case ("stopCode", v: Int) => updated = updated.copy(stopCode = v)
       case (key, value) =>
