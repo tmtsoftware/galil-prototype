@@ -88,18 +88,52 @@ class HmiLogAppender(stdHeaders: JsObject) extends LogAppender {
     val message   = (baseMsg \ "message").asOpt[String].getOrElse(
                       (baseMsg \ "msg").asOpt[String].getOrElse("")
                     )
-    val component = (baseMsg \ "class").asOpt[String]
-                      .map(_.split("\\.").last)   // short class name only
-                      .getOrElse(
-                        (baseMsg \ "@componentName").asOpt[String].getOrElse("")
-                      )
+
+    // "actor" = full Pekko actor path (Serialization.serializedActorPath format).
+    // Walk backwards past noise segments to find the last meaningful actor name.
+    //
+    // Noise predicates (all observed empirically):
+    //   starts with "$"         — Pekko synthetic refs ($$a-adapter, $a, etc.)
+    //   contains "#"            — actor incarnation suffixes (actorName#12345)
+    //   equals "user"           — Pekko guardian segment
+    //   empty                   — leading slash artifact
+    //
+    // CSW structural segments (contain ".") are handled separately:
+    //   ends with "-component-actor"  → "ComponentActor"  (GalilHcdHandlers runs here)
+    //   otherwise (just the prefix)   → "Supervisor"      (CSW lifecycle messages)
+    //
+    // Console output: ControllerConsoleActor emits MG lines via log.info with the message
+    // text matching "[prefix] ..." — these technically show ControllerInterfaceActor as the
+    // actor path (shared logger context), but we relabel them "Console" to reflect true origin.
+    val rawActor: String = (baseMsg \ "actor").asOpt[String] match {
+      case Some(path) =>
+        val segments = path.split("/").toList.reverse
+        // Check the deepest segment first for CSW structural names (contain ".")
+        segments.headOption.filter(_.contains(".")) match {
+          case Some(seg) if seg.endsWith("-component-actor") => "ComponentActor"
+          case Some(_)                                       => "Supervisor"
+          case None =>
+            // Walk backwards past synthetic/noise segments
+            segments
+              .dropWhile(s => s.startsWith("$") || s.contains("#") || s == "user" || s.isEmpty)
+              .headOption.getOrElse("Console")
+        }
+      case None =>
+        // No actor field — should not occur now that all actors use getLogger(ctx).
+        "Unknown"
+    }
+
+    // Override: ControllerConsoleActor MG lines are logged via ControllerInterfaceActor's
+    // logger context, but their message always starts with "[prefix] " — relabel as "Console"
+    // to reflect the true origin (embedded Galil program MG output).
+    val actor = if (message.matches("""\[[\w.:]+\] .*""")) "Console" else rawActor
 
     // Apply HMI-level severity filter (independent of CSW logger level)
     val msgOrder = severityOrder.getOrElse(severity, 2)
     val minOrder = severityOrder.getOrElse(minSeverity, 2)
     if (msgOrder < minOrder) return
 
-    val json = HmiJsonProtocol.logLineToJson(severity, timestamp, message, component)
+    val json = HmiJsonProtocol.logLineToJson(severity, timestamp, message, actor)
     try { bc(json) } catch { case _: Exception => /* never crash the log pipeline */ }
   }
 

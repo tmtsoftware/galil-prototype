@@ -193,9 +193,15 @@ abstract class GalilIo {
   // We must use split(":", -1) to preserve them: ":::" → Array("", "", "", "")
   private def splitResponses(data: ByteString): Array[ByteString] = {
     val str = data.utf8String
-    if (!str.endsWith(":")) return Array.empty  // incomplete response
+    // A complete compound response ends with ":" (success) or "?" (error on last sub-command).
+    // Without this check we'd loop forever if the last sub-command returns an error on hardware.
+    if (!str.endsWith(":") && !str.endsWith("?")) return Array.empty  // incomplete response
     
-    val parts = str.split(":", -1)  // -1 preserves trailing empty strings
+    // Normalise: replace "?" error terminators with ":" so we can split uniformly.
+    // Each "?" represents one rejected sub-command response.
+    val normalised = str.replace("?", ":")
+    
+    val parts = normalised.split(":", -1)  // -1 preserves trailing empty strings
     // For ":::" → ["", "", "", ""]  (4 parts, 3 responses)
     // For "500.0000\r\n:" → ["500.0000\r\n", ""]  (2 parts, 1 response)
     // For ":500.0000\r\n:" → ["", "500.0000\r\n", ""]  (3 parts, 2 responses)

@@ -1,532 +1,560 @@
 package csw.proto.galil.hcd
 
-import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
-import org.apache.pekko.actor.typed.{ActorRef, Behavior}
+import org.apache.pekko.actor.testkit.typed.scaladsl.ActorTestKit
+import org.scalatest.BeforeAndAfterAll
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+import csw.logging.client.scaladsl.LoggerFactory
+import csw.prefix.models.Prefix
 import csw.proto.galil.io.DataRecord
-import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
+import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState, Header}
 
-import java.time.Instant
 import scala.concurrent.duration._
 
 /**
- * StatusMonitor Actor (SDD Section 4.6.3)
- * 
- * Responsibilities:
- * - Periodically poll controller with QR command
- * - Parse DataRecord response
- * - Update InternalStateActor with current positions, velocities, switches, etc.
- * - Handle errors and maintain polling even on failures
- * 
- * Integration:
- * - Requests QR from ControllerInterfaceActor
- * - Updates state via InternalStateActor
- * - Runs at configurable rate (default: 10Hz / 100ms)
+ * Tests for StatusMonitor Actor
  */
-object StatusMonitor:
+class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   
-  // Protocol
-  sealed trait Command
+  private val testKit = ActorTestKit()
+  private val loggerFactory = new LoggerFactory(Prefix("APS.ICS.HCD.GalilMotion"))
   
-  /**
-   * Periodic polling trigger (internal timer message)
-   */
-  private case object PollController extends Command
+  override def afterAll(): Unit =
+    testKit.shutdownTestKit()
   
-  /**
-   * Response from ControllerInterface with QR data
-   */
-  case class QRResponse(dataRecord: DataRecord) extends Command
-  
-  /**
-   * Error from ControllerInterface
-   */
-  case class QRError(error: String) extends Command
-  
-  /**
-   * Command to pause QR polling (for file operations - UL/DL)
-   * CRITICAL: Must be called before file operations to prevent buffer corruption
-   */
-  case object PauseQRPolling extends Command
-  
-  /**
-   * Command to resume QR polling (after file operations)
-   */
-  case object ResumeQRPolling extends Command
-  
-  /**
-   * Command to start/stop polling (deprecated - use Pause/Resume instead)
-   */
-  case class SetPolling(enabled: Boolean) extends Command
-  
-  /**
-   * Command to change polling rate
-   */
-  case class SetPollingRate(rateHz: Double) extends Command
-  
-  /**
-   * Query current polling status
-   */
-  case class GetPollingStatus(replyTo: ActorRef[PollingStatus]) extends Command
-  
-  /**
-   * Internal: axis state changed notification from InternalStateActor.
-   * Used to detect when axes transition between active/standby states
-   * and adjust polling rate accordingly.
-   */
-  private[hcd] case class AxisStateChanged(stateChanged: InternalStateActor.StateChanged) extends Command
-  
-  /**
-   * Response to GetPollingStatus
-   */
-  case class PollingStatus(
-    enabled: Boolean, 
-    rateHz: Double, 
-    lastPollTime: Option[Long], 
-    errorCount: Int,
-    paused: Boolean  // NEW: Indicates if paused for file operations
-  )
-  
-  /**
-   * Create StatusMonitor actor
-   * 
-   * @param controllerInterface Actor to request QR data from
-   * @param internalState Actor to update with parsed data
-   * @param standbyPollingRateHz Polling rate when all axes idle (default: 1Hz)
-   * @param actionPollingRateHz Polling rate when any axis active (default: 10Hz)
-   */
-  def apply(
-    controllerInterface: ActorRef[GalilCommandMessage],
-    internalState: ActorRef[InternalStateActor.Command],
-    standbyPollingRateHz: Double = 1.0,
-    actionPollingRateHz: Double = 10.0
-  ): Behavior[Command] =
-    Behaviors.setup { context =>
-      Behaviors.withTimers { timers =>
-        new StatusMonitor(context, timers, controllerInterface, internalState,
-          standbyPollingRateHz, actionPollingRateHz)
-      }
-    }
+  private def createTestDataRecord(
+    motorPositionA: Int = 0,
+    velocityA: Int = 0,
+    motorPositionB: Int = 0,
+    velocityB: Int = 0
+  ): DataRecord =
+    val header = Header(List("A", "B"))
+    val generalState = GeneralState(
+      sampleNumber = 12345,
+      inputs = Array.fill(10)(0.toByte),
+      outputs = Array.fill(10)(0.toByte),
+      ethernetHandleStatus = Array.fill(8)(0.toByte),
+      errorCode = 0,
+      threadStatus = 0,
+      amplifierStatus = 0,
+      contourModeSegmentCount = 0,
+      contourModeBufferSpaceRemaining = 0,
+      sPlaneSegmentCount = 0,
+      sPlaneMoveStatus = 0,
+      sPlaneDistanceTraveled = 0,
+      sPlaneBufferSpaceRemaining = 0,
+      tPlaneSegmentCount = 0,
+      tPlaneMoveStatus = 0,
+      tPlaneDistanceTraveled = 0,
+      tPlaneBufferSpaceRemaining = 0
+    )
+    val axisA = GalilAxisStatus(motorPosition = motorPositionA, velocity = velocityA)
+    val axisB = GalilAxisStatus(motorPosition = motorPositionB, velocity = velocityB)
+    DataRecord(header, generalState, Array(axisA, axisB))
 
-/**
- * Actor implementation
- */
-class StatusMonitor(
-  context: ActorContext[StatusMonitor.Command],
-  timers: TimerScheduler[StatusMonitor.Command],
-  controllerInterface: ActorRef[GalilCommandMessage],
-  internalState: ActorRef[InternalStateActor.Command],
-  standbyPollingRateHz: Double,
-  actionPollingRateHz: Double
-) extends AbstractBehavior[StatusMonitor.Command](context):
-  
-  import StatusMonitor._
-  
-  // Active axis states that require action polling rate
-  private val ActiveAxisStates: Set[AxisStateEnum] =
-    Set(AxisStateEnum.Homing, AxisStateEnum.Moving, AxisStateEnum.Tracking)
-  
-  // Current state (mutable, but only accessed within actor)
-  private var pollingEnabled: Boolean = true
-  private var pollingPaused: Boolean = false  // Pause for file operations
-  private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
-  private var lastPollTime: Option[Long] = None
-  private var errorCount: Int = 0
-  
-  // Subscribe to IS axisState changes via message adapter
-  private val stateChangedAdapter = context.messageAdapter[InternalStateActor.StateChanged](
-    sc => AxisStateChanged(sc)
-  )
-  internalState ! InternalStateActor.Subscribe(
-    stateChangedAdapter,
-    Some(InternalStateActor.FieldFilter(Set("axisState")))
-  )
-  
-  // Start periodic polling at standby rate
-  startPolling()
-  
-  context.log.info(s"StatusMonitor started - standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
-  
-  override def onMessage(msg: Command): Behavior[Command] =
-    msg match
-      case PollController =>
-        handlePollController()
-        
-      case QRResponse(dataRecord) =>
-        handleQRResponse(dataRecord)
-        
-      case QRError(error) =>
-        handleQRError(error)
-        
-      case PauseQRPolling =>
-        handlePauseQRPolling()
-        
-      case ResumeQRPolling =>
-        handleResumeQRPolling()
-        
-      case SetPolling(enabled) =>
-        handleSetPolling(enabled)
-        
-      case SetPollingRate(newRateHz) =>
-        handleSetPollingRate(newRateHz)
-        
-      case GetPollingStatus(replyTo) =>
-        replyTo ! PollingStatus(pollingEnabled, pollingRateHz, lastPollTime, errorCount, pollingPaused)
-        Behaviors.same
-      
-      case AxisStateChanged(stateChanged) =>
-        handleAxisStateChanged(stateChanged)
-  
-  /**
-   * Handle periodic poll trigger
-   * 
-   * CRITICAL: Checks pollingPaused flag to prevent interference with file operations
-   */
-  private def handlePollController(): Behavior[Command] =
-    // Guard: Skip if paused for file operations (handles queued timer messages)
-    if pollingPaused then
-      context.log.debug("Skipping QR - polling is paused for file operation")
-      return Behaviors.same
-    
-    if pollingEnabled then
-      context.log.debug("Polling controller for QR data")
-      
-      // Create adapter to convert GalilCommandMessage.QRResult → StatusMonitor.QRResponse
-      val adapter = context.messageAdapter[GalilCommandMessage.QRResult] {
-        case GalilCommandMessage.QRResult(dr: DataRecord) => QRResponse(dr)
-      }
-      
-      // Request QR from ControllerInterface
-      controllerInterface ! GalilCommandMessage.GetQR(adapter)
-    
-    Behaviors.same
-  
-  /**
-   * Handle QR response from controller
-   */
-  private def handleQRResponse(dataRecord: DataRecord): Behavior[Command] =
-    try
-      lastPollTime = Some(System.currentTimeMillis())
-      errorCount = 0  // Reset error count on success
-      
-      context.log.debug(s"Received QR data, sample: ${dataRecord.generalState.sampleNumber}")
-      
-      // Update HCD-level state (including thread status → per-axis activeThread)
-      val activeAxisChars = dataRecord.header.blocksPresent.filter(axis => DataRecord.axes.contains(axis))
-      updateHcdState(dataRecord.generalState, activeAxisChars)
-      
-      // Update each active axis
-      activeAxisChars
-        .zip(dataRecord.axisStatuses)
-        .foreach { case (axisChar, axisStatus) =>
-          updateAxisState(axisChar, axisStatus)
-        }
-      
-      Behaviors.same
-    catch
-      case ex: Exception =>
-        context.log.error(s"Error processing QR response: ${ex.getMessage}", ex)
-        errorCount += 1
-        Behaviors.same
-  
-  /**
-   * Handle QR error from controller
-   */
-  private def handleQRError(error: String): Behavior[Command] =
-    context.log.error(s"QR request failed: $error")
-    errorCount += 1
-    Behaviors.same
-  
-  /**
-   * Pause QR polling for file operations (UL/DL)
-   * 
-   * CRITICAL: Must be called BEFORE file operations to prevent buffer corruption.
-   * Pattern from existing ControllerInterfaceActor:
-   * 1. Set pause flag (prevents new QR requests)
-   * 2. Cancel timer (stops scheduling new requests)
-   * 3. Caller should wait ~100ms for in-flight QR to complete
-   * 4. Then safe to execute file operation
-   */
-  private def handlePauseQRPolling(): Behavior[Command] =
-    if !pollingPaused then
-      context.log.info("Pausing QR polling for file operation")
-      pollingPaused = true
-      stopPolling()
-    else
-      context.log.debug("QR polling already paused")
-    Behaviors.same
-  
-  /**
-   * Resume QR polling after file operations
-   */
-  private def handleResumeQRPolling(): Behavior[Command] =
-    if pollingPaused then
-      context.log.info("Resuming QR polling after file operation")
-      pollingPaused = false
-      if pollingEnabled then
-        startPolling()
-    else
-      context.log.debug("QR polling was not paused")
-    Behaviors.same
-  
-  /**
-   * Enable/disable polling
-   */
-  private def handleSetPolling(enabled: Boolean): Behavior[Command] =
-    if enabled != pollingEnabled then
-      pollingEnabled = enabled
-      if enabled then
-        context.log.debug("Polling enabled")
-        startPolling()
-      else
-        context.log.debug("Polling disabled")
-        stopPolling()
-    Behaviors.same
-  
-  /**
-   * Change polling rate
-   */
-  private def handleSetPollingRate(newRateHz: Double): Behavior[Command] =
-    if newRateHz > 0 && newRateHz != pollingRateHz then
-      pollingRateHz = newRateHz
-      context.log.info(s"Polling rate changed to ${pollingRateHz}Hz (${pollingPeriod.toMillis}ms)")
-      if pollingEnabled then
-        stopPolling()
-        startPolling()
-    Behaviors.same
-  
-  /**
-   * Handle axis state change notification from InternalStateActor.
-   * 
-   * Adapts polling rate based on aggregate axis activity:
-   *   - If ANY axis is in an active state (Homing, Moving, Tracking) → action rate
-   *   - If ALL axes are in standby states (Lost, Idle, Error) → standby rate
-   * 
-   * Also updates currentPollingRateHz in IS so it's visible to the rest of the system.
-   */
-  private def handleAxisStateChanged(stateChanged: InternalStateActor.StateChanged): Behavior[Command] =
-    val hcdState = stateChanged.hcdState
-    val anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
-    val targetRate = if anyAxisActive then actionPollingRateHz else standbyPollingRateHz
-    
-    if targetRate != pollingRateHz then
-      val reason = if anyAxisActive then
-        val activeAxes = hcdState.axes.collect {
-          case (axis, ax) if ActiveAxisStates.contains(ax.axisState) =>
-            s"${axis}:${ax.axisState}"
-        }.mkString(", ")
-        s"active axes [$activeAxes]"
-      else
-        "all axes standby"
-      
-      pollingRateHz = targetRate
-      context.log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
-      if pollingEnabled && !pollingPaused then
-        stopPolling()
-        startPolling()
-      
-      // Update IS with current rate
-      internalState ! InternalStateActor.UpdateHcdState(
-        Map("currentPollingRateHz" -> pollingRateHz),
-        context.system.ignoreRef
-      )
-    
-    Behaviors.same
-  
-  /**
-   * Update HCD-level state from GeneralState.
-   * Also decodes threadStatus bitmask and updates per-axis activeThread in AxisCmdState.
-   */
-  private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
-    val threadStatusByte = generalState.threadStatus & 0xFF
-    
-    val updates = Map(
-      "digitalInputs"       -> generalState.inputs.map(_ != 0),
-      "digitalOutputs"      -> generalState.outputs.map(_ != 0),
-      "threadStatus"        -> threadStatusByte,
-      "lastPollingTime"     -> Instant.ofEpochMilli(System.currentTimeMillis()),
-      // Include current rate on every poll so the HMI always reflects the live
-      // rate without a separate message. Avoids the race where a fast move
-      // completes before the rate-change UpdateHcdState reaches subscribers.
-      "currentPollingRateHz" -> pollingRateHz
+  private def createExtendedDataRecord(
+    statusA: Short = 0,
+    motorPositionA: Int = 0,
+    velocityA: Int = 0,
+    switchesA: Byte = 0,
+    stopCodeA: Byte = 0,
+    positionErrorA: Int = 0,
+    statusB: Short = 0,
+    motorPositionB: Int = 0,
+    velocityB: Int = 0,
+    switchesB: Byte = 0,
+    stopCodeB: Byte = 0,
+    positionErrorB: Int = 0,
+    threadStatus: Byte = 0
+  ): DataRecord =
+    val header = Header(List("A", "B"))
+    val generalState = GeneralState(
+      sampleNumber = 12345,
+      inputs = Array.fill(10)(0.toByte),
+      outputs = Array.fill(10)(0.toByte),
+      ethernetHandleStatus = Array.fill(8)(0.toByte),
+      errorCode = 0,
+      threadStatus = threadStatus,
+      amplifierStatus = 0,
+      contourModeSegmentCount = 0,
+      contourModeBufferSpaceRemaining = 0,
+      sPlaneSegmentCount = 0,
+      sPlaneMoveStatus = 0,
+      sPlaneDistanceTraveled = 0,
+      sPlaneBufferSpaceRemaining = 0,
+      tPlaneSegmentCount = 0,
+      tPlaneMoveStatus = 0,
+      tPlaneDistanceTraveled = 0,
+      tPlaneBufferSpaceRemaining = 0
     )
-    
-    // Send HCD-level update
-    internalState ! InternalStateActor.UpdateHcdState(updates, context.system.ignoreRef)
-    
-    // threadStatus (HcdState) is the controller-wide active-thread bitmask from QR _NO.
-    // CommandWatcher uses AxisCmdState.activeThread (the specific thread allocated by CI
-    // for the current command) and checks it against threadStatus to detect completion.
-    // SM must NOT write AxisCmdState.activeThread — that is owned by CH (set at program
-    // start) and cleared by CommandWatcher via clearActiveCommand on completion.
-  
-  /**
-   * Update axis state from GalilAxisStatus.
-   * Sends operational state (position, velocity, switches) to AxisState
-   * and command-relevant state (moving, stopCode) to AxisCmdState.
-   */
-  private def updateAxisState(axisChar: Char, axisStatus: GalilAxisStatus): Unit =
-    // Map axis character to Axis enum
-    val axis = Axis.fromChar(axisChar)
-    
-    // Parse both the status word and switches byte from QR DataRecord
-    val status = parseAxisStatus(axisStatus.status)
-    val switches = parseSwitches(axisStatus.switches)
-    
-    // Stepper mode is reported by the controller in switches byte bit 0.
-    // For stepper motors (no encoder), position comes from auxiliaryPosition (TD / step count).
-    // For servo motors, position comes from motorPosition (TP / encoder count).
-    val isStepper = switches.stepperMode
-    val position = if isStepper then
-      axisStatus.auxiliaryPosition.toDouble
-    else
-      axisStatus.motorPosition.toDouble
-    
-    // Velocity in QR DataRecord is 64x the TV command value (per Galil docs)
-    val velocity = axisStatus.velocity.toDouble / 64.0
-    
-    // Build operational state update (position, velocity, named switches)
-    val axisUpdates = Map(
-      "position" -> position,
-      "velocity" -> velocity,
-      "positionError" -> axisStatus.positionError.toDouble,
-      "forwardLimit" -> switches.forwardLimit,
-      "reverseLimit" -> switches.reverseLimit,
-      "homeSwitch" -> switches.homeInput,
-      "isStepper" -> isStepper,
-      "negativeDirection" -> status.negativeDirection,
-      "motorOff" -> status.motorOff
+    val axisA = GalilAxisStatus(
+      status = statusA, motorPosition = motorPositionA, velocity = velocityA,
+      switches = switchesA, stopCode = stopCodeA, positionError = positionErrorA)
+    val axisB = GalilAxisStatus(
+      status = statusB, motorPosition = motorPositionB, velocity = velocityB,
+      switches = switchesB, stopCode = stopCodeB, positionError = positionErrorB)
+    DataRecord(header, generalState, Array(axisA, axisB))
+
+  test("StatusMonitor should update InternalState from QR response") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    
-    // Send operational state update
-    internalState ! InternalStateActor.UpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
-    
-    // Build command state update
-    // moving: bit 15 of status word ("Move in Progress") — reliable for ALL motor types
-    // Note: inPosition is mirrored automatically by InternalStateActor
-    val cmdUpdates = Map[String, Any](
-      "moving" -> status.moveInProgress,
-      "stopCode" -> (axisStatus.stopCode & 0xFF)  // unsigned byte
+    val dataRecord = createTestDataRecord(
+      motorPositionA = 123456, velocityA = 5000 * 64,
+      motorPositionB = 789012, velocityB = -3000 * 64
     )
-    
-    // Send command state update
-    internalState ! InternalStateActor.UpdateAxisCmdState(axis, cmdUpdates, context.system.ignoreRef)
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val probeA = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
+    val stateA = probeA.receiveMessage()
+    stateA should not be None
+    stateA.get.position should be (123456.0)
+    stateA.get.velocity should be (5000.0)
+    val probeB = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.B, probeB.ref)
+    val stateB = probeB.receiveMessage()
+    stateB should not be None
+    stateB.get.position should be (789012.0)
+    stateB.get.velocity should be (-3000.0)
+  }
   
-  /**
-   * Parsed status data from Galil QR DataRecord axis status WORD (2 bytes).
-   * Per DMC-41x3 User Manual, Data Record section:
-   *
-   *   Bit 15: Move in Progress
-   *   Bit 14: Mode of Motion PA or PR
-   *   Bit 13: Mode of Motion PA only
-   *   Bit 12: Find Edge (FE) in Progress
-   *   Bit 11: Home (HM) in Progress
-   *   Bit 10: 1st Phase of HM complete
-   *   Bit  9: 2nd Phase of HM complete (or FI command issued)
-   *   Bit  8: Mode of Motion Coord. Motion
-   *   Bit  7: Negative Direction Move
-   *   Bit  6: Mode of Motion Contour
-   *   Bit  5: Motion is slewing
-   *   Bit  4: Motion is stopping due to ST or Limit Switch
-   *   Bit  3: Motion is making final decel
-   *   Bit  2: Latch is armed
-   *   Bit  1: 3rd Phase of HM in Progress
-   *   Bit  0: Motor Off
-   */
-  private case class AxisStatusData(
-    moveInProgress: Boolean,       // bit 15 — THE reliable moving flag
-    motionModePA_PR: Boolean,      // bit 14
-    motionModePAonly: Boolean,     // bit 13
-    findEdgeInProgress: Boolean,   // bit 12
-    homeInProgress: Boolean,       // bit 11
-    hmPhase1Complete: Boolean,     // bit 10
-    hmPhase2Complete: Boolean,     // bit  9
-    coordMotion: Boolean,          // bit  8
-    negativeDirection: Boolean,    // bit  7
-    contourMode: Boolean,          // bit  6
-    slewing: Boolean,              // bit  5
-    stopping: Boolean,             // bit  4
-    finalDecel: Boolean,           // bit  3
-    latchArmed: Boolean,           // bit  2
-    hmPhase3InProgress: Boolean,   // bit  1
-    motorOff: Boolean              // bit  0
-  )
-  
-  /**
-   * Parse axis status word from QR DataRecord
-   */
-  private def parseAxisStatus(statusWord: Short): AxisStatusData =
-    val s = statusWord & 0xFFFF  // unsigned
-    AxisStatusData(
-      moveInProgress = (s & (1 << 15)) != 0,
-      motionModePA_PR = (s & (1 << 14)) != 0,
-      motionModePAonly = (s & (1 << 13)) != 0,
-      findEdgeInProgress = (s & (1 << 12)) != 0,
-      homeInProgress = (s & (1 << 11)) != 0,
-      hmPhase1Complete = (s & (1 << 10)) != 0,
-      hmPhase2Complete = (s & (1 << 9)) != 0,
-      coordMotion = (s & (1 << 8)) != 0,
-      negativeDirection = (s & (1 << 7)) != 0,
-      contourMode = (s & (1 << 6)) != 0,
-      slewing = (s & (1 << 5)) != 0,
-      stopping = (s & (1 << 4)) != 0,
-      finalDecel = (s & (1 << 3)) != 0,
-      latchArmed = (s & (1 << 2)) != 0,
-      hmPhase3InProgress = (s & (1 << 1)) != 0,
-      motorOff = (s & (1 << 0)) != 0
+  test("StatusMonitor should handle QR errors gracefully") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    statusMonitor ! StatusMonitor.QRError("Communication timeout")
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val status = statusProbe.receiveMessage()
+    status.errorCount should be (1)
+    statusMonitor ! StatusMonitor.QRError("Buffer overflow")
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val status2 = statusProbe.receiveMessage()
+    status2.errorCount should be (2)
+    val dataRecord = createTestDataRecord()
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(50)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val status3 = statusProbe.receiveMessage()
+    status3.errorCount should be (0)
+  }
   
-  /**
-   * Parsed data from Galil QR DataRecord axis switches BYTE.
-   * Per DMC-500x0 User Manual, Data Record section:
-   *
-   *   Bit 7: Latch Occurred
-   *   Bit 6: State of Latch Input
-   *   Bit 5: N/A
-   *   Bit 4: N/A
-   *   Bit 3: State of Forward Limit
-   *   Bit 2: State of Reverse Limit
-   *   Bit 1: State of Home Input
-   *   Bit 0: Stepper Mode
-   *
-   * NOTE: These are RAW I/O states, NOT the same as the TS command output.
-   * The TS command has its own different bit layout.
-   */
-  private case class SwitchData(
-    latchOccurred: Boolean,     // bit 7
-    latchInput: Boolean,        // bit 6
-    forwardLimit: Boolean,      // bit 3 — raw state (CN config determines active high/low)
-    reverseLimit: Boolean,      // bit 2
-    homeInput: Boolean,         // bit 1
-    stepperMode: Boolean        // bit 0 — stepper mode indicator
-  )
-  
-  /**
-   * Parse switches byte from QR DataRecord
-   */
-  private def parseSwitches(switchByte: Byte): SwitchData =
-    SwitchData(
-      latchOccurred = (switchByte & (1 << 7)) != 0,
-      latchInput = (switchByte & (1 << 6)) != 0,
-      forwardLimit = (switchByte & (1 << 3)) != 0,
-      reverseLimit = (switchByte & (1 << 2)) != 0,
-      homeInput = (switchByte & (1 << 1)) != 0,
-      stepperMode = (switchByte & (1 << 0)) != 0
+  test("StatusMonitor should support enabling/disabling polling") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().enabled should be (true)
+    statusMonitor ! StatusMonitor.SetPolling(false)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().enabled should be (false)
+    statusMonitor ! StatusMonitor.SetPolling(true)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().enabled should be (true)
+  }
   
-  /**
-   * Calculate polling period from rate
-   */
-  private def pollingPeriod: FiniteDuration =
-    (1000.0 / pollingRateHz).toInt.milliseconds
+  test("StatusMonitor should support changing polling rate") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be (10.0)
+    statusMonitor ! StatusMonitor.SetPollingRate(20.0)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be (20.0)
+    statusMonitor ! StatusMonitor.SetPollingRate(5.0)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be (5.0)
+  }
   
-  /**
-   * Start periodic polling timer
-   */
-  private def startPolling(): Unit =
-    timers.startTimerWithFixedDelay(PollController, pollingPeriod)
+  test("StatusMonitor should update lastPollTime on successful QR") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().lastPollTime should be (None)
+    val dataRecord = createTestDataRecord()
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(50)
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val status2 = statusProbe.receiveMessage()
+    status2.lastPollTime should not be None
+    status2.lastPollTime.get should be > 0L
+  }
   
-  /**
-   * Stop polling timer
-   */
-  private def stopPolling(): Unit =
-    timers.cancel(PollController)
+  test("StatusMonitor should pause QR polling for file operations") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().paused should be (false)
+    statusMonitor ! StatusMonitor.PauseQRPolling
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().paused should be (true)
+  }
+  
+  test("StatusMonitor should skip queued QR when paused") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    statusMonitor ! StatusMonitor.PauseQRPolling
+    Thread.sleep(50)
+    val dataRecord = createTestDataRecord(motorPositionA = 999)
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(50)
+    val axisProbe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, axisProbe.ref)
+    axisProbe.receiveMessage().get.position should be (999.0)
+  }
+  
+  test("StatusMonitor should resume QR polling after file operations") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    statusMonitor ! StatusMonitor.PauseQRPolling
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().paused should be (true)
+    statusMonitor ! StatusMonitor.ResumeQRPolling
+    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().paused should be (false)
+  }
+  
+  test("StatusMonitor should parse multiple axes from QR") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B).initializeAxis(Axis.C).initializeAxis(Axis.D)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val header = Header(List("A", "B", "C", "D"))
+    val generalState = GeneralState(
+      sampleNumber = 1, inputs = Array.fill(10)(0.toByte), outputs = Array.fill(10)(0.toByte),
+      ethernetHandleStatus = Array.fill(8)(0.toByte), errorCode = 0, threadStatus = 0,
+      amplifierStatus = 0, contourModeSegmentCount = 0, contourModeBufferSpaceRemaining = 0,
+      sPlaneSegmentCount = 0, sPlaneMoveStatus = 0, sPlaneDistanceTraveled = 0,
+      sPlaneBufferSpaceRemaining = 0, tPlaneSegmentCount = 0, tPlaneMoveStatus = 0,
+      tPlaneDistanceTraveled = 0, tPlaneBufferSpaceRemaining = 0
+    )
+    val axisStatuses = Array(
+      GalilAxisStatus(motorPosition = 1000, velocity = 100 * 64),
+      GalilAxisStatus(motorPosition = 2000, velocity = 200 * 64),
+      GalilAxisStatus(motorPosition = 3000, velocity = 300 * 64),
+      GalilAxisStatus(motorPosition = 4000, velocity = 400 * 64)
+    )
+    val dataRecord = DataRecord(header, generalState, axisStatuses)
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val axes = List(Axis.A, Axis.B, Axis.C, Axis.D)
+    val expectedPositions = List(1000.0, 2000.0, 3000.0, 4000.0)
+    val expectedVelocities = List(100.0, 200.0, 300.0, 400.0)
+    axes.zip(expectedPositions).zip(expectedVelocities).foreach {
+      case ((axis, expectedPos), expectedVel) =>
+        val probe = testKit.createTestProbe[Option[AxisState]]()
+        internalState ! InternalStateActor.GetAxisState(axis, probe.ref)
+        val state = probe.receiveMessage()
+        state should not be None
+        state.get.position should be (expectedPos)
+        state.get.velocity should be (expectedVel)
+    }
+  }
+  
+  test("StatusMonitor should send GetQR requests to ControllerInterface") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val controllerProbe = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(controllerProbe.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    Thread.sleep(150)
+    val getQrMessage = controllerProbe.receiveMessage(200.millis)
+    getQrMessage shouldBe a[GalilCommandMessage.GetQR]
+    val replyTo = getQrMessage.asInstanceOf[GalilCommandMessage.GetQR].replyTo
+    val dataRecord = createTestDataRecord(motorPositionA = 98765, velocityA = 1234 * 64)
+    replyTo ! GalilCommandMessage.QRResult(dataRecord)
+    Thread.sleep(100)
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
+    val state = probe.receiveMessage()
+    state should not be None
+    state.get.position should be (98765.0)
+    state.get.velocity should be (1234.0)
+    val getQrMessage2 = controllerProbe.receiveMessage(200.millis)
+    getQrMessage2 shouldBe a[GalilCommandMessage.GetQR]
+  }
+  
+  test("StatusMonitor should pause polling when PauseQRPolling is sent") {
+    val internalState = testKit.spawn(InternalStateActor(HcdState()))
+    val controllerProbe = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(controllerProbe.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    controllerProbe.receiveMessage(200.millis) shouldBe a[GalilCommandMessage.GetQR]
+    statusMonitor ! StatusMonitor.PauseQRPolling
+    Thread.sleep(50)
+    controllerProbe.expectNoMessage(250.millis)
+    statusMonitor ! StatusMonitor.ResumeQRPolling
+    Thread.sleep(50)
+    controllerProbe.receiveMessage(200.millis) shouldBe a[GalilCommandMessage.GetQR]
+  }
+
+  test("StatusMonitor should decode named switch fields from QR response") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val switchesA: Byte = (0x08 | 0x02).toByte  // forwardLimit + homeInput
+    val switchesB: Byte = 0x04.toByte            // reverseLimit only
+    val dataRecord = createExtendedDataRecord(
+      motorPositionA = 1000, switchesA = switchesA,
+      motorPositionB = 2000, switchesB = switchesB,
+      statusB = 0x0001.toShort  // motorOff in status word bit 0
+    )
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val probeA = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
+    val stateA = probeA.receiveMessage().get
+    stateA.forwardLimit should be(true)
+    stateA.reverseLimit should be(false)
+    stateA.homeSwitch should be(true)
+    stateA.isStepper should be(false)
+    stateA.negativeDirection should be(false)
+    stateA.motorOff should be(false)
+    val probeB = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.B, probeB.ref)
+    val stateB = probeB.receiveMessage().get
+    stateB.forwardLimit should be(false)
+    stateB.reverseLimit should be(true)
+    stateB.homeSwitch should be(false)
+    stateB.isStepper should be(false)
+    stateB.negativeDirection should be(false)
+    stateB.motorOff should be(true)
+  }
+
+  test("StatusMonitor should route moving and stopCode to AxisCmdState") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    val dataRecord = createExtendedDataRecord(
+      statusA = 0x8000.toShort, stopCodeA = 0,
+      statusB = 0x0000.toShort, stopCodeB = 1
+    )
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
+    val cmdA = probeA.receiveMessage().get
+    cmdA.moving should be(true)
+    cmdA.stopCode should be(0)
+    val probeB = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.B, probeB.ref)
+    val cmdB = probeB.receiveMessage().get
+    cmdB.moving should be(false)
+    cmdB.stopCode should be(1)
+  }
+
+  // These tests verify that QR threadStatus bitmask changes are correctly reflected in
+  // AxisCmdState.activeThread via the registry path. RegisterThread must be called first
+  // (as CommandHandlerActor does after XQ) to establish the axis↔thread mapping; the
+  // registry is the only authoritative source since thread assignment is dynamic.
+
+  test("StatusMonitor should decode threadStatus into per-axis activeThread") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    // Register axis A on thread 1 (as CommandHandlerActor does after XQ #HomeA,1)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // QR reports thread 1 active (bit 1 = 0x02)
+    val dataRecord = createExtendedDataRecord(threadStatus = 0x02.toByte)
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
+    probeA.receiveMessage().get.activeThread should be(1)
+    val probeB = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.B, probeB.ref)
+    probeB.receiveMessage().get.activeThread should be(0)
+  }
+
+  test("StatusMonitor should decode multiple active threads") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    // Register A on thread 1, B on thread 2 (as CommandHandlerActor does after XQ)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    internalState ! InternalStateActor.RegisterThread(2, Axis.B)
+    Thread.sleep(20)
+    // QR reports both threads active (bits 1+2 = 0x06)
+    val dataRecord = createExtendedDataRecord(threadStatus = 0x06.toByte)
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
+    probeA.receiveMessage().get.activeThread should be(1)
+    val probeB = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.B, probeB.ref)
+    probeB.receiveMessage().get.activeThread should be(2)
+  }
+
+  test("StatusMonitor should set activeThread to 0 when thread stops") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    // Register axis A on thread 1, then simulate QR with thread active
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    val dr1 = createExtendedDataRecord(threadStatus = 0x02.toByte)
+    statusMonitor ! StatusMonitor.QRResponse(dr1)
+    Thread.sleep(100)
+    val probeA1 = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA1.ref)
+    probeA1.receiveMessage().get.activeThread should be(1)
+    // Now thread 1 stops — registry clears it and sets activeThread=0
+    val dr2 = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    statusMonitor ! StatusMonitor.QRResponse(dr2)
+    Thread.sleep(100)
+    val probeA2 = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA2.ref)
+    probeA2.receiveMessage().get.activeThread should be(0)
+  }
+
+  test("StatusMonitor QR should update both AxisState and AxisCmdState") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A)
+    ))
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val statusMonitor = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    // Register axis A on thread 1 before sending QR data
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    val switchByte: Byte = 0x00.toByte
+    val statusWord: Short = (0x8000 | 0x0080 | 0x0001).toShort
+    val dataRecord = createExtendedDataRecord(
+      statusA = statusWord, motorPositionA = 50000, velocityA = 25000 * 64,
+      positionErrorA = 5, switchesA = switchByte, stopCodeA = 0,
+      threadStatus = 0x02.toByte
+    )
+    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    Thread.sleep(100)
+    val axisProbe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, axisProbe.ref)
+    val axisState = axisProbe.receiveMessage().get
+    axisState.position should be(50000.0)
+    axisState.velocity should be(25000.0)
+    axisState.positionError should be(5.0)
+    axisState.negativeDirection should be(true)
+    axisState.motorOff should be(true)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    val cmdState = cmdProbe.receiveMessage().get
+    cmdState.moving should be(true)
+    cmdState.stopCode should be(0)
+    cmdState.activeThread should be(1)
+  }
+  
+  test("StatusMonitor should switch to action rate when axis state becomes active") {
+    val internalState = testKit.spawn(InternalStateActor(), "is-adaptive-rate")
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val sm = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory,
+        standbyPollingRateHz = 1.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(1.0)
+    val replyProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("axisState" -> AxisStateEnum.Moving), replyProbe.ref)
+    replyProbe.receiveMessage()
+    Thread.sleep(100)
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(10.0)
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
+    replyProbe.receiveMessage()
+    Thread.sleep(100)
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(1.0)
+  }
+  
+  test("StatusMonitor should stay at action rate while any axis is active") {
+    val internalState = testKit.spawn(InternalStateActor(), "is-multi-axis-rate")
+    val mockController = testKit.createTestProbe[GalilCommandMessage]()
+    val sm = testKit.spawn(
+      StatusMonitor(mockController.ref, internalState, loggerFactory,
+        standbyPollingRateHz = 1.0, actionPollingRateHz = 10.0)
+    )
+    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    val replyProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("axisState" -> AxisStateEnum.Moving), replyProbe.ref)
+    replyProbe.receiveMessage()
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.B, Map("axisState" -> AxisStateEnum.Homing), replyProbe.ref)
+    replyProbe.receiveMessage()
+    Thread.sleep(100)
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(10.0)
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
+    replyProbe.receiveMessage()
+    Thread.sleep(100)
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(10.0)  // B still active
+    internalState ! InternalStateActor.UpdateAxisState(
+      Axis.B, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
+    replyProbe.receiveMessage()
+    Thread.sleep(100)
+    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusProbe.receiveMessage().rateHz should be(1.0)  // Both idle now
+  }

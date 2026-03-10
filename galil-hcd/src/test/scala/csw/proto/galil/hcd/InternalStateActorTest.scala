@@ -26,7 +26,17 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
   
   override def afterAll(): Unit =
     testKit.shutdownTestKit()
-  
+
+  /**
+   * Drain the initial snapshot delivered by IS Subscribe handler.
+   * Subscribe sends an immediate StateChanged(currentState, Set.empty, Set.empty)
+   * so late subscribers don't miss the initial state. Tests that subscribe and
+   * then assert on a *subsequent* change must drain this snapshot first.
+   */
+  private def drainSnapshot(probe: org.apache.pekko.actor.testkit.typed.scaladsl.TestProbe[InternalStateActor.StateChanged]): Unit =
+    probe.receiveMessage(500.millis)
+    ()
+
   // ========================================
   // State Model Tests — AxisState
   // ========================================
@@ -169,14 +179,14 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
   // State Machine Tests — AxisStateEnum (SDD Figure 4-2)
   // ========================================
 
-  test("Lost state should only accept homeAxis") {
+  test("Lost state should only accept homeAxis and stopAxis") {
     import AxisStateEnum._
     Lost.validateCommand("homeAxis") shouldBe None
+    Lost.validateCommand("stopAxis") shouldBe None   // safety command, valid from any state
     Lost.validateCommand("positionAxis") shouldBe defined
     Lost.validateCommand("offsetAxis") shouldBe defined
     Lost.validateCommand("selectWheel") shouldBe defined
     Lost.validateCommand("trackAxis") shouldBe defined
-    Lost.validateCommand("stopAxis") shouldBe defined
   }
 
   test("Homing state should only accept stopAxis") {
@@ -187,22 +197,24 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     Homing.validateCommand("trackAxis") shouldBe defined
   }
 
-  test("Idle state should accept homeAxis, motion commands, and trackAxis") {
+  test("Idle state should accept homeAxis, motion commands, trackAxis, and stopAxis") {
     import AxisStateEnum._
     Idle.validateCommand("homeAxis") shouldBe None
     Idle.validateCommand("positionAxis") shouldBe None
     Idle.validateCommand("offsetAxis") shouldBe None
     Idle.validateCommand("selectWheel") shouldBe None
     Idle.validateCommand("trackAxis") shouldBe None
-    Idle.validateCommand("stopAxis") shouldBe defined  // nothing to stop
+    Idle.validateCommand("stopAxis") shouldBe None   // safety command, valid from any state
   }
 
-  test("Moving state should accept stopAxis only") {
+  test("Moving state should accept stopAxis and interruptible motion commands") {
     import AxisStateEnum._
-    Moving.validateCommand("stopAxis") shouldBe None
-    Moving.validateCommand("homeAxis") shouldBe defined
-    Moving.validateCommand("positionAxis") shouldBe defined
-    Moving.validateCommand("trackAxis") shouldBe defined
+    Moving.validateCommand("stopAxis")      shouldBe None
+    Moving.validateCommand("positionAxis")  shouldBe None   // CommandHandler will interrupt
+    Moving.validateCommand("offsetAxis")    shouldBe None   // CommandHandler will interrupt
+    Moving.validateCommand("selectWheel")   shouldBe None   // CommandHandler will interrupt
+    Moving.validateCommand("homeAxis")      shouldBe defined
+    Moving.validateCommand("trackAxis")     shouldBe defined
   }
 
   test("Tracking state should accept stopAxis and trackAxis (re-issue)") {
@@ -213,11 +225,11 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     Tracking.validateCommand("positionAxis") shouldBe defined
   }
 
-  test("Error state should only accept homeAxis (recovery)") {
+  test("Error state should accept homeAxis and stopAxis (recovery)") {
     import AxisStateEnum._
     Error.validateCommand("homeAxis") shouldBe None
+    Error.validateCommand("stopAxis") shouldBe None   // safety command, valid from any state
     Error.validateCommand("positionAxis") shouldBe defined
-    Error.validateCommand("stopAxis") shouldBe defined
     Error.validateCommand("trackAxis") shouldBe defined
   }
 
@@ -437,9 +449,10 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val actor = testKit.spawn(InternalStateActor())
     val subscriberProbe = testKit.createTestProbe[InternalStateActor.StateChanged]()
     
-    // Subscribe
+    // Subscribe — IS sends an immediate snapshot; drain it before asserting on changes
     actor ! InternalStateActor.Subscribe(subscriberProbe.ref)
-    
+    drainSnapshot(subscriberProbe)
+
     // Update state
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateHcdState(
@@ -459,9 +472,10 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val actor = testKit.spawn(InternalStateActor(initialState))
     val subscriberProbe = testKit.createTestProbe[InternalStateActor.StateChanged]()
     
-    // Subscribe
+    // Subscribe — drain initial snapshot before asserting on changes
     actor ! InternalStateActor.Subscribe(subscriberProbe.ref)
-    
+    drainSnapshot(subscriberProbe)
+
     // Update axis
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateAxisState(
@@ -485,10 +499,11 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val actor = testKit.spawn(InternalStateActor(initialState))
     val subscriberProbe = testKit.createTestProbe[InternalStateActor.StateChanged]()
     
-    // Subscribe only to Axis A changes
+    // Subscribe only to Axis A changes — drain initial snapshot first
     val filter = InternalStateActor.AxisFilter(Set(Axis.A))
     actor ! InternalStateActor.Subscribe(subscriberProbe.ref, Some(filter))
-    
+    drainSnapshot(subscriberProbe)
+
     // Update Axis B (should NOT notify)
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateAxisState(
@@ -518,9 +533,10 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val actor = testKit.spawn(InternalStateActor())
     val subscriberProbe = testKit.createTestProbe[InternalStateActor.StateChanged]()
     
-    // Subscribe
+    // Subscribe — drain initial snapshot, then unsubscribe
     actor ! InternalStateActor.Subscribe(subscriberProbe.ref)
-    
+    drainSnapshot(subscriberProbe)
+
     // Unsubscribe
     actor ! InternalStateActor.Unsubscribe(subscriberProbe.ref)
     
@@ -718,11 +734,14 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val subscriber2 = testKit.createTestProbe[InternalStateActor.StateChanged]()
     val subscriber3 = testKit.createTestProbe[InternalStateActor.StateChanged]()
     
-    // All subscribe
+    // All subscribe — drain initial snapshots before asserting on changes
     actor ! InternalStateActor.Subscribe(subscriber1.ref)
     actor ! InternalStateActor.Subscribe(subscriber2.ref)
     actor ! InternalStateActor.Subscribe(subscriber3.ref)
-    
+    drainSnapshot(subscriber1)
+    drainSnapshot(subscriber2)
+    drainSnapshot(subscriber3)
+
     // Update
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateHcdState(
@@ -752,8 +771,9 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val cmdWatcher = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     
-    // CSP subscribes to all state changes
+    // CSP subscribes to all state changes — drain initial snapshot
     actor ! InternalStateActor.Subscribe(stateWatcher.ref)
+    drainSnapshot(stateWatcher)
     // CommandWatcher subscribes to Axis D cmd state
     actor ! InternalStateActor.SubscribeCmdState(Axis.D, cmdWatcher.ref)
     

@@ -11,6 +11,8 @@ import csw.location.api.models.TrackingEvent
 import csw.params.commands.CommandResponse.{SubmitResponse, ValidateCommandResponse}
 import csw.params.commands._
 import csw.params.core.models.{Id, ObsId}
+import csw.logging.client.commons.LogAdminUtil
+import csw.logging.models.Level
 import csw.prefix.models.Subsystem
 import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
 import csw.proto.galil.hcd.ControllerInterfaceActor.ControllerIdentity
@@ -126,7 +128,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   import cswCtx._
 
-  private val log                           = loggerFactory.getLogger
+  private val log                           = loggerFactory.getLogger(ctx)
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
   private val config                        = ConfigFactory.load("GalilCommands.conf")
   private val adapter                       = new CSWDeviceAdapter(config)
@@ -206,7 +208,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         componentInfo.prefix,
         internalStateActor,
         cswCtx.currentStatePublisher,  // Pass CSW's publisher directly!
-        loggerFactory.getLogger
+        loggerFactory
       ),
       "CurrentStatePublisher"
     )
@@ -226,6 +228,30 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val timeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
     
+    // Set the component log level explicitly at the very start of initialize(), before any
+    // actor or framework code has a chance to emit DEBUG messages.
+    //
+    // BACKGROUND: CSW's ComponentLoggingStateManager.from() builds the per-component level map
+    // from the component-log-levels HOCON block at startup.  The map key is constructed by
+    // calling Prefix.apply(entrySet().getKey()) on the raw HOCON path string.  For component
+    // names that contain multiple internal dots (e.g. "ICS.HCD.GalilMotion.1" or ".one"),
+    // the Typesafe Config path rendering does not round-trip cleanly back to the runtime Prefix
+    // value: the key is stored under the wrong string, causing a silent miss, and all loggers
+    // fall back to defaultLogLevel (= logLevel in application.conf = DEBUG).
+    //
+    // The fix uses the same runtime path as the HMI: LogAdminUtil.setComponentLogLevel()
+    // accepts the live Prefix object directly — no HOCON string round-trip — and writes into
+    // the same ConcurrentHashMap that LoggerImpl.componentLoggingState reads on every log call.
+    //
+    // logLevel in application.conf must remain "debug" (Gate 2 open) so that runtime elevation
+    // to DEBUG via the HMI is not permanently blocked by LogActor's global level floor.
+    //
+    // TODO: identify the exact Typesafe Config entrySet() key-rendering rule for multi-dot
+    // component names and file a CSW issue / workaround so component-log-levels can be used
+    // reliably for such prefixes in the future.  Testing confirmed the numeric-suffix theory
+    // ("1" -> "one") does NOT fix the problem; the issue is the depth of nesting.
+    LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
+
     log.info("Initializing Galil HCD")
     
     // Phase 1: Load controller and axis-specific parameters from CSW Configuration Service
@@ -308,11 +334,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // (including [GALIL:prefix] console lines) streams to connected browsers.
     // HTTP binding is non-blocking so this adds negligible latency to init.
     try {
-      val hmiPort = hcdConfig.controller.port match {
-        case 23   => 9090  // Real hardware default
-        case 8888 => 9091  // Simulator — different port to allow both
-        case _    => 9090
-      }
+      val hmiPort = if (hcdConfig.simulate) 9090 else 9090 + hcdConfig.controller.id
       hmiServer = new hmi.HmiServer(
         internalStateActor  = internalStateActor,
         commandHandlerActor = commandHandlerActor,
@@ -325,7 +347,6 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     } catch {
       case ex: Exception =>
         log.warn(s"HMI server failed to start (non-fatal): ${ex.getMessage}")
-        // HMI failure is non-fatal — the HCD still functions without it
     }
 
     // Phase 3c: Initialize InternalState with per-axis config values

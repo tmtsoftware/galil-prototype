@@ -361,10 +361,11 @@ object GalilSimulatorActor {
       case _ if cmdString.contains('=') && !cmdString.contains("=?") && cmdString.head.isLower =>
         handleVarAssignment(state, cmdString)
 
-      // ---- Unknown — return acknowledgment (many Galil commands just need ":") ----
+      // ---- Unknown — return error response matching real Galil behavior ----
+      // Real DMC-500x0 returns "?" for any unrecognized command.
       case _ =>
-        println(s"[SIM] Unhandled command (acknowledging): '$cmdString'")
-        (formatReply(None), state)
+        println(s"[SIM] Unrecognized command (returning ?): '$cmdString'")
+        (formatReply(None, isError = true), state)
     }
   }
 

@@ -11,6 +11,8 @@ import org.apache.pekko.stream.scaladsl.{BroadcastHub, Flow, Keep, Sink, Source}
 import org.apache.pekko.stream.OverflowStrategy
 import org.apache.pekko.util.Timeout
 import csw.logging.api.scaladsl.Logger
+import csw.logging.client.commons.LogAdminUtil
+import csw.logging.models.Level
 import csw.params.commands.{CommandName, Setup}
 import csw.params.core.models.Id
 import csw.prefix.models.Prefix
@@ -101,6 +103,32 @@ class HmiServer(
       }
     },
 
+    // REST: get/set HCD component log level via the same mechanism as CSW Admin API
+    // (LogAdminUtil is what SupervisorBehavior uses for SetComponentLogLevel messages)
+    path("api" / "loglevel") {
+      get {
+        val metadata = LogAdminUtil.getLogMetadata(hcdPrefix)
+        val level    = metadata.componentLevel.name
+        complete(HttpEntity(ContentTypes.`application/json`, s"""{"logLevel":"$level"}"""))
+      } ~
+      post {
+        entity(as[String]) { body =>
+          try {
+            val json      = Json.parse(body)
+            val levelName = (json \ "logLevel").as[String]
+            val level     = Level(levelName)
+            LogAdminUtil.setComponentLogLevel(hcdPrefix, level)
+            HmiLogAppender.minSeverity = level.name  // keep HMI display in sync
+            log.info(s"HCD component log level changed to ${level.name} via HMI")
+            complete(HttpEntity(ContentTypes.`application/json`, s"""{"logLevel":"${level.name}"}"""))
+          } catch {
+            case ex: Exception =>
+              complete(StatusCodes.BadRequest, s"""{"error":"${ex.getMessage}"}""")
+          }
+        }
+      }
+    },
+
     // REST: one-shot status snapshot
     path("api" / "status") {
       get {
@@ -134,6 +162,8 @@ class HmiServer(
       wsSource.map(json => TextMessage.Strict(json): Message)
     )
   }
+
+  // ── Log level helpers ───────────────────────────────────────────────
 
   // ── Command handling ────────────────────────────────────────────────
 

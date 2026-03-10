@@ -133,8 +133,8 @@ appropriate port:
 
 | Mode | HMI URL | Controller |
 |------|---------|------------|
-| Hardware | `http://localhost:9090` | DMC-500x0 at 192.168.86.41:23 |
-| Simulator | `http://localhost:9091` | GalilSimulatorApp at 127.0.0.1:8888 |
+| Hardware (id=1) | `http://localhost:9091` | DMC-500x0 at 192.168.86.41:23 |
+| Simulator | `http://localhost:9090` | GalilSimulatorApp at 127.0.0.1:8888 |
 
 #### With Real Hardware
 
@@ -149,10 +149,15 @@ sbt stage
   --local galil-hcd/src/main/resources/GalilHcd.conf \
   -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 
-# Open browser to http://localhost:9090
+# Open browser to http://localhost:9091  (9090 + controller id=1)
 ```
 
 #### With Simulator
+
+The simulator must use `GalilHcdSim.conf` (not `GalilHcd.conf`) so that it
+registers under the distinct prefix `aps.ICS.HCD.GalilMotion.Sim`. Using
+`GalilHcd.conf` would register the same prefix as a hardware instance,
+causing Location Service conflicts.
 
 ```bash
 # Terminal 1: Start CSW Location Service (required)
@@ -165,10 +170,10 @@ sbt "galil-simulator/run"
 sbt stage
 ./target/universal/stage/bin/galil-hcd \
   -main csw.proto.galil.hcd.GalilHcdApp \
-  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  --local galil-hcd/src/main/resources/GalilHcdSim.conf \
   -Dgalil.config.path=GalilHcdConfig-Simulator.conf
 
-# Open browser to http://localhost:9091
+# Open browser to http://localhost:9090
 ```
 
 **Note:** Hardware and simulator HCDs cannot run simultaneously — both register
@@ -231,22 +236,31 @@ sbt "galil-hcd/testOnly *CommandWatcherActorTest"      # 16 tests — completion
 sbt "galil-hcd/testOnly *LongRunningCommandTest"       # 29 tests — motion command handlers
 ```
 
-### Simulator-Dependent Tests
+### Controller/Simulator-Dependent Tests (no CSW services)
 
-These require the Galil simulator running on `127.0.0.1:8888`:
+These tests connect directly to a Galil device or simulator. No CSW services
+are required or desired — stop `csw-services` before running.
+
+`ControllerInterfaceActorTest` can run against either hardware or simulator:
+
+```bash
+# Against simulator (default — starts simulator first):
+sbt "galil-simulator/run"   # Terminal 1
+sbt "galil-hcd/testOnly *ControllerInterfaceActorTest"     # 16 tests
+
+# Against hardware (uses GALIL_HOST/GALIL_PORT env vars or galil.host/galil.port props):
+sbt "galil-hcd/testOnly *ControllerInterfaceActorTest"     # 16 tests
+```
+
+`CurrentStatePublisherActorTest` requires the simulator only:
 
 ```bash
 # Terminal 1: Start the simulator
 sbt "galil-simulator/run"
 
-# Terminal 2: Run tests (CLUSTER_SEEDS must be unset)
-unset CLUSTER_SEEDS
-sbt "galil-hcd/testOnly *ControllerInterfaceActorTest"     # 16 tests
+# Terminal 2: Run test (no CSW services)
 sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"   # 4 tests
 ```
-
-**Note:** `CLUSTER_SEEDS` must be unset for tests that use FrameworkTestKit.
-The environment variable conflicts with the test kit's internal cluster formation.
 
 ### HCD Integration Tests
 
@@ -257,13 +271,15 @@ moves, configuration commands, and tracking.
 
 All 13 tests pass against both real hardware and the simulator.
 
+`HcdIntegrationTest` uses `FrameworkTestKit` which starts its own embedded CSW
+cluster. **CSW services must not be running** when executing this test.
+
 ```bash
-# Against real hardware (default config, requires Galil DMC-500x0 at 192.168.86.41:23):
-unset CLUSTER_SEEDS
+# Against real hardware (requires Galil DMC-500x0 at 192.168.86.41:23):
 sbt "galil-hcd/testOnly *HcdIntegrationTest"              # 13 tests, ~26s
 
 # Against simulator (requires GalilSimulatorApp running on 127.0.0.1:8888):
-unset CLUSTER_SEEDS
+sbt "galil-simulator/run"   # Terminal 1
 sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf "galil-hcd/testOnly *HcdIntegrationTest"  # 13 tests, ~21s
 ```
 
@@ -275,12 +291,12 @@ use FrameworkTestKit which binds the same Pekko Remoting TCP port.
 | Suite | Tests | Dependencies |
 |-------|------:|-------------|
 | GalilHcdConfigTest | 9 | None |
-| InternalStateActorTest | 30 | None |
+| InternalStateActorTest | 41 | None |
 | StatusMonitorTest | 19 | None |
-| CommandHandlerActorTest | 16 | None |
-| CommandWatcherActorTest | 16 | None |
+| CommandHandlerActorTest | 17 | None |
+| CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
-| ControllerInterfaceActorTest | 16 | Simulator |
-| CurrentStatePublisherActorTest | 4 | Simulator |
-| **HcdIntegrationTest** | **13** | **Hardware or Simulator** |
-| **Total** | **152 + 13 integration** | |
+| ControllerInterfaceActorTest | 16 | Hardware or Simulator (no CSW services) |
+| CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
+| **HcdIntegrationTest** | **13** | **Hardware or Simulator (no CSW services)** |
+| **Total** | **150 standalone + 13 integration** | |

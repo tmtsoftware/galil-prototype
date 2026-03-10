@@ -125,14 +125,14 @@ object HmiJsonProtocol {
    * @param severity  CSW severity string: "TRACE","DEBUG","INFO","WARN","ERROR","FATAL"
    * @param timestamp ISO-8601 timestamp string (set by CSW logger at call time)
    * @param message   Log message text extracted from the CSW log JsObject
-   * @param component Component/class name from the log record, e.g. "GalilHcd"
+   * @param actor     Last Pekko actor path segment, e.g. "StatusMonitor"; "Console" for non-actor loggers
    */
-  def logLineToJson(severity: String, timestamp: String, message: String, component: String): String =
+  def logLineToJson(severity: String, timestamp: String, message: String, actor: String): String =
     Json.obj(
       "type"      -> "logLine",
       "severity"  -> severity,
       "timestamp" -> timestamp,
       "message"   -> message,
-      "component" -> component
+      "actor"     -> actor
     ).toString()
 }

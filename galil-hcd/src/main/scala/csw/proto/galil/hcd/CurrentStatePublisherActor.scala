@@ -6,6 +6,7 @@ import csw.framework.CurrentStatePublisher
 import csw.params.core.states.{CurrentState, StateName}
 import csw.prefix.models.Prefix
 import csw.logging.api.scaladsl.Logger
+import csw.logging.client.scaladsl.LoggerFactory
 import csw.proto.galil.GalilMotionKeys
 
 import scala.concurrent.duration.*
@@ -62,7 +63,7 @@ object CurrentStatePublisherActor:
     prefix: Prefix,
     internalStateActor: ActorRef[InternalStateActor.Command],
     currentStatePublisher: CurrentStatePublisher,  // CSW's publisher directly!
-    logger: Logger
+    loggerFactory: LoggerFactory
   ): Behavior[Command] =
     Behaviors.setup { ctx =>
       Behaviors.withTimers { timers =>
@@ -72,7 +73,7 @@ object CurrentStatePublisherActor:
           prefix,
           internalStateActor,
           currentStatePublisher,
-          logger
+          loggerFactory.getLogger(ctx)
         )
       }
     }
@@ -94,6 +95,11 @@ class CurrentStatePublisherActor(
   
   // Latest state snapshot
   private var latestState: Option[HcdState] = None
+
+  // Last-published snapshots for change detection.
+  // CurrentStateAxis[A-H] is always published at rate (position/velocity stream).
+  // CurrentState and InputOutputState are published only on change.
+  private var lastPublishedHcdState: Option[HcdState] = None
   
   // Subscribe to state changes
   private val stateUpdateAdapter = ctx.messageAdapter[InternalStateActor.StateChanged](StateUpdate(_))
@@ -127,15 +133,36 @@ class CurrentStatePublisherActor(
       this
       
     case Publish1Hz =>
+      // CurrentState published unconditionally at 1Hz so late subscribers always
+      // receive a message within 1 second. Change-detection caused starvation:
+      // after initialization state stabilizes, hcdChanged stays false and
+      // a subscriber that arrives after the first publish never receives anything.
+      // InputOutputState keeps change-detection (no tests block on it).
       latestState.foreach { state =>
         publishCurrentState(state)
-        publishInputOutputState(state)
+
+        val prev = lastPublishedHcdState
+        val ioChanged = prev.isEmpty ||
+          prev.get.digitalInputs  != state.digitalInputs  ||
+          prev.get.digitalOutputs != state.digitalOutputs ||
+          prev.get.analogInputs   != state.analogInputs
+        if ioChanged then publishInputOutputState(state)
+
+        lastPublishedHcdState = Some(state)
       }
       this
-      
+
     case Publish10Hz =>
       latestState.foreach { state =>
+        // CurrentStateAxis[A-H] always published at 10 Hz — position/velocity is
+        // a continuous stream that Assemblies need at rate, not just on change.
         publishAllAxisStates(state)
+
+        // CommandStateAxis[A-H] published unconditionally at 10Hz alongside
+        // position/velocity. Change-detection causes late-subscriber starvation:
+        // after a command completes, cmd state stabilizes and stops changing,
+        // so any subscriber that arrives after the last change never receives
+        // anything. Consistent with the unconditional position stream.
         publishAllCommandStates(state)
       }
       this
@@ -301,8 +328,8 @@ class CurrentStatePublisherActor(
     currentStatePublisher.publish(cs)
   
   /**
-   * Publish CommandStateAxis[A-H] for all active axes (10 Hz)
-   * Now reads from AxisCmdState (separate from AxisState).
+   * Publish CommandStateAxis[A-H] unconditionally for all active axes.
+   * Called at 10Hz alongside position/velocity stream.
    */
   private def publishAllCommandStates(hcdState: HcdState): Unit =
     Axis.values.foreach { axis =>
@@ -310,7 +337,7 @@ class CurrentStatePublisherActor(
         publishCommandState(axis, cmdState)
       }
     }
-  
+
   /**
    * Publish CommandStateAxis for a single axis (10 Hz)
    * Uses keys from CommandStateAxis[A-H]CurrentState

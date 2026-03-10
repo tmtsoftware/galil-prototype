@@ -69,12 +69,12 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
   test("should handle multiple semicolon-separated commands") {
     info("Testing compound command handling")
     
-    // Send multiple commands in one line
-    val responses = galilIo.send("MG TIME; MG version")
+    // Send multiple commands in one line.
+    val responses = galilIo.send("MG TIME; MG TIME")
     
     responses should have size 2
     responses(0)._1.trim shouldBe "MG TIME"
-    responses(1)._1.trim shouldBe "MG version"
+    responses(1)._1.trim shouldBe "MG TIME"
     
     // Both should have responses
     responses.foreach { case (cmd, resp) =>
@@ -86,7 +86,7 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
   test("should detect error responses") {
     info("Testing error detection (? response)")
     
-    // Send invalid command - should return '?'
+    // Send invalid command - Galil returns '?' for unrecognized commands.
     val responses = galilIo.send("INVALID_COMMAND_XYZ")
     
     responses should have size 1

@@ -65,26 +65,43 @@ After `sbt stage`, start scripts are generated in `./target/universal/stage/bin/
 
 ### With Simulator
 
-Start the simulator and HCD in separate terminals:
+The simulator uses `GalilHcdSim.conf` so it registers under a distinct prefix
+(`aps.ICS.HCD.GalilMotion.Sim`) and serves the HMI on port 9090.
 
 ```bash
 # Terminal 1: Start the Galil simulator
 sbt "galil-simulator/run"
 
-# Terminal 2: Start CSW services, then the HCD
-csw-services start -e
+# Terminal 2: Start CSW services
+csw-services start
+
+# Terminal 3: Build and launch the HCD against the simulator
 sbt stage
-./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Simulator.conf
+./target/universal/stage/bin/galil-hcd \
+  -main csw.proto.galil.hcd.GalilHcdApp \
+  --local galil-hcd/src/main/resources/GalilHcdSim.conf \
+  -Dgalil.config.path=GalilHcdConfig-Simulator.conf
+
+# Open browser to http://localhost:9090
 ```
 
 ### With Hardware
 
-Ensure the Galil controller is powered on and network-accessible, then:
+Hardware instance 1 registers as `aps.ICS.HCD.GalilMotion.1` and serves the
+HMI on port 9091 (9090 + controller id).
 
 ```bash
-csw-services start -e
+# Terminal 1: Start CSW services
+csw-services start
+
+# Terminal 2: Build and launch the HCD against hardware
 sbt stage
-./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp --local galil-hcd/src/main/resources/GalilHcd.conf -Dgalil.config.path=GalilHcdConfig-Hardware.conf
+./target/universal/stage/bin/galil-hcd \
+  -main csw.proto.galil.hcd.GalilHcdApp \
+  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  -Dgalil.config.path=GalilHcdConfig-Hardware.conf
+
+# Open browser to http://localhost:9091
 ```
 
 See the [galil-hcd README](galil-hcd/) for configuration details, test instructions, and

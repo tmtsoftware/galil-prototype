@@ -358,6 +358,26 @@ function HcdLogPanel({lines}) {
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [minLevel, setMinLevel] = useState('INFO');
+  const [hcdLevel, setHcdLevel] = useState('INFO');
+
+  // Fetch current HCD log level on mount
+  useEffect(() => {
+    fetch('/api/loglevel')
+      .then(r => r.json())
+      .then(d => { if (d.logLevel) setHcdLevel(d.logLevel); })
+      .catch(() => {});
+  }, []);
+
+  const changeHcdLevel = (level) => {
+    fetch('/api/loglevel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({logLevel: level})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.logLevel) setHcdLevel(d.logLevel); })
+    .catch(() => {});
+  };
 
   useEffect(() => {
     if (autoScroll && endRef.current) {
@@ -376,18 +396,29 @@ function HcdLogPanel({lines}) {
 
   const fmtTime = (t) => { try { return new Date(t).toISOString().slice(11,23); } catch(e) { return ''; } };
 
+  const selectStyle = {backgroundColor:'#1F2937',color:'#9CA3AF',border:'1px solid #374151',
+                       borderRadius:3,fontSize:9.5,padding:'1px 4px',cursor:'pointer'};
+
   return e('div', {style:{display:'flex',flexDirection:'column',flex:1,
       backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px',
       fontFamily:'var(--mono)',fontSize:11,minHeight:0}},
     e('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4,flexShrink:0}},
       e('span', {style:{color:'#6B7280',fontSize:9.5,fontWeight:700,letterSpacing:1.2}}, 'HCD LOG'),
       e('div', {style:{display:'flex',gap:8,alignItems:'center'}},
-        e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'min level:'),
+        e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'HCD level:'),
+        e('select', {
+            value: hcdLevel,
+            onChange: ev => changeHcdLevel(ev.target.value),
+            style: selectStyle
+          },
+          LOG_LEVELS.map(l => e('option', {key:l, value:l}, l))
+        ),
+        e('span', {style:{color:'#374151',fontSize:9.5}}, '│'),
+        e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'display:'),
         e('select', {
             value: minLevel,
             onChange: ev => setMinLevel(ev.target.value),
-            style:{backgroundColor:'#1F2937',color:'#9CA3AF',border:'1px solid #374151',
-                   borderRadius:3,fontSize:9.5,padding:'1px 4px',cursor:'pointer'}
+            style: selectStyle
           },
           LOG_LEVELS.map(l => e('option', {key:l, value:l}, l))
         ),
@@ -406,10 +437,12 @@ function HcdLogPanel({lines}) {
       ...visible.map((l, i) => {
         const sev = (l.severity || 'INFO').toUpperCase();
         const color = msgColor(l.message || '', sev);
+        const actor = l.actor || '';
         return e('div', {key:i, style:{display:'flex',gap:8,alignItems:'baseline'}},
           e('span', {style:{color:'#374151',flexShrink:0,fontSize:10}}, fmtTime(l.timestamp)),
           e('span', {style:{color:LEVEL_COLOR[sev]||'#6B7280',flexShrink:0,minWidth:36,fontSize:9.5,fontWeight:700}}, sev),
-          e('span', {style:{color}}, l.message || '')
+          actor ? e('span', {style:{color:'#6B7280',flexShrink:0,fontSize:9.5,fontFamily:'var(--mono)',minWidth:140,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, `[${actor}]`) : null,
+          e('span', {style:{color,flex:1}}, l.message || '')
         );
       }),
       e('div', {ref:endRef})

@@ -70,6 +70,12 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
             thread = thread,
             threadWasActive = simulateThreadActive, error = None)
           Behaviors.same
+        case GalilCommandMessage.HaltExecution(thread, axis, replyTo) =>
+          // Simulate successful halt — records HX/ST commands and replies immediately
+          commandLog.add(s"HX $thread")
+          commandLog.add(s"ST ${axis.char}")
+          replyTo ! GalilCommandMessage.HaltExecutionResult(success = true, error = None)
+          Behaviors.same
         case _ =>
           Behaviors.same
       }

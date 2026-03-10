@@ -276,6 +276,10 @@ class InternalStateActor(
         log.debug(s"New state subscriber: $subscriber")
         subscribers = subscribers + subscriber
         subscriptionFilters = subscriptionFilters + (subscriber -> filter)
+        // Send initial snapshot so CSP gets a non-None latestState immediately.
+        // Without this, latestState stays None until the first QR-driven StateChanged
+        // fires, so Publish1Hz silently no-ops and test subscriptions time out.
+        subscriber ! StateChanged(currentState, Set.empty, Set.empty)
         Behaviors.same
         
       case Unsubscribe(subscriber) =>

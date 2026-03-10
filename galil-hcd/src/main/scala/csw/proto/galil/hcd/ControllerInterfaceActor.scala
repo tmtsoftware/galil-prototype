@@ -56,7 +56,7 @@ private[hcd] object ControllerInterfaceActor {
   ): Behavior[GalilCommandMessage] =
     Behaviors.withTimers { timers =>
       Behaviors.setup { ctx =>
-        val log = loggerFactory.getLogger
+        val log = loggerFactory.getLogger(ctx)
 
         // Connect to Galil device and throw error if that doesn't work
         def connectToGalil(): GalilIo = {

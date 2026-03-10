@@ -15,11 +15,15 @@ lazy val `galil-root` = project
   .in(file("."))
   .aggregate(aggregatedProjects: _*)
 
-// The Galil prototype HCD
 lazy val `galil-hcd` = project
   .enablePlugins(DeployApp)
   .settings(
     libraryDependencies ++= GalilHcd,
+    Test / fork := true,
+    Test / javaOptions ++= {
+      val props = sys.props.filter { case (k, _) => k.startsWith("galil.") }
+      props.map { case (k, v) => s"-D$k=$v" }.toSeq
+    }
   )
   .dependsOn(`galil-io`)
 
