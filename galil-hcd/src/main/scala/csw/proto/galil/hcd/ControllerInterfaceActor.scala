@@ -238,50 +238,37 @@ private[hcd] object ControllerInterfaceActor {
             
             ProgramFileManager.readProgramFile(filename, config) match {
               case Success(programText) =>
-                // Prepare program for upload (strip comments, etc.)
                 val cleanedProgram = ProgramFileManager.prepareProgramForUpload(programText)
-                log.info(s"Prepared program: ${cleanedProgram.length} characters")
+                log.debug(s"Program prepared: ${cleanedProgram.length} characters")
                 
                 try {
-                  log.info(s"Program size: ${cleanedProgram.length} characters")
-                  
-                  // Entire upload sequence must be synchronized
                   galilIo.synchronized {
-                    // Step 0: Halt any running programs
-                    log.info("Halting programs (HX)")
+                    log.debug("Halting running programs (HX)")
                     val hxResponses = galilIo.send("HX")
-                    log.info(s"HX got: ${hxResponses.map(_._2.utf8String).mkString}")
+                    log.debug(s"HX response: ${hxResponses.map(_._2.utf8String).mkString}")
                     
-                    // Step 1: Enter DL mode
-                    log.info("Entering DL mode (using writeRaw)")
+                    log.debug("Entering DL mode")
                     galilIo.writeRaw("DL")
                     
-                    // Step 2: Stream program data
-                    log.info(s"Streaming ${cleanedProgram.length} characters of program data")
+                    log.debug(s"Streaming ${cleanedProgram.length} characters of program data")
                     galilIo.writeRaw(cleanedProgram)
                     
-                    // Step 3: Send terminator
-                    log.info("Sending terminator")
+                    log.debug("Sending DL terminator")
                     val termResponses = galilIo.send("\\")
                     val termResponse = termResponses.map(_._2.utf8String).mkString.trim
-                    log.info(s"Terminator response: '$termResponse'")
+                    log.debug(s"Terminator response: '$termResponse'")
                     
                     if (termResponse.nonEmpty && !termResponse.contains(":")) {
                       throw new RuntimeException(s"Upload terminator failed: $termResponse")
                     }
                     
-                    // DIAGNOSTIC: Check for residual data
-                    log.debug("DIAGNOSTIC: Checking for residual data after DL")
                     val residual = galilIo.drainAndShowBuffer()
                     if (residual.nonEmpty) {
-                      log.warn(s"DIAGNOSTIC: Found ${residual.length} bytes of residual data!")
-                      log.warn(s"DIAGNOSTIC: First 200 chars: ${residual.take(200)}")
-                    } else {
-                      log.debug("DIAGNOSTIC: Buffer is clean after DL")
+                      log.warn(s"Residual data after DL (${residual.length} bytes): ${residual.take(200)}")
                     }
                   }
                   
-                  log.info(s"Successfully uploaded program from $filename")
+                  log.info(s"Program uploaded successfully from $filename")
                   commandResponseManager.updateCommand(Completed(runId, new Result()))
                 } catch {
                   case ex: Exception =>
@@ -304,7 +291,7 @@ private[hcd] object ControllerInterfaceActor {
         }
 
         def handledownloadProgram(filename: String, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
-          log.info(s"Downloading programs to file: $filename")
+          log.info(s"Downloading program to file: $filename")
           
           // NOTE: StatusMonitor QR polling is paused by GalilHcd before this is called
           
@@ -312,35 +299,25 @@ private[hcd] object ControllerInterfaceActor {
             // Small delay to let any in-flight QR complete
             Thread.sleep(100)
             
-            log.info("Sending UL command to controller")
             val responses = galilIo.synchronized {
-              log.debug("DIAGNOSTIC: Checking buffer state before UL")
               val preUL = galilIo.drainAndShowBuffer()
-              if (preUL.nonEmpty) {
-                if (preUL.length == 1 && preUL == ":") {
-                  log.debug("DIAGNOSTIC: Found controller prompt (':') - this is normal")
-                } else {
-                  log.warn(s"DIAGNOSTIC: Found ${preUL.length} bytes BEFORE UL command!")
-                }
+              if (preUL.nonEmpty && !(preUL.length == 1 && preUL == ":")) {
+                log.warn(s"Unexpected data before UL command (${preUL.length} bytes)")
               }
-              
               galilIo.send("UL")
             }
-            log.info(s"Received ${responses.size} response chunks from UL")
+            log.debug(s"UL returned ${responses.size} chunks")
             
             val allText = responses.map(_._2.utf8String).mkString
-            log.info(s"Total response: ${allText.length} characters")
-            
             val cleanedProgram = allText
               .stripSuffix("\\")
               .stripSuffix("\u001A")
               .trim
-            
-            log.info(s"Cleaned program: ${cleanedProgram.length} characters")
+            log.debug(s"Program received: ${cleanedProgram.length} characters")
             
             ProgramFileManager.writeProgramFile(filename, cleanedProgram, config) match {
               case Success(filePath) =>
-                log.info(s"Successfully downloaded programs to $filePath")
+                log.info(s"Program downloaded successfully to $filePath")
                 commandResponseManager.updateCommand(
                   Completed(runId, new Result().add(CSWDeviceAdapter.filenameKey.set(filePath)))
                 )
@@ -469,19 +446,17 @@ private[hcd] object ControllerInterfaceActor {
             }
             Behaviors.same
 
-          // Halt an active execution thread and stop the axis motor (SDD 4.8.1).
+          // Halt an active execution thread (SDD 4.8.1).
           //
-          // The thread parameter comes from IS.activeThread (set by CH when the program
-          // started). CI performs a hardware confirmation via MG _NO before sending HX:
-          // if the thread bit is no longer set, the program already finished and HX is
-          // skipped (ST is still sent to ensure the motor is stopped).
+          // The thread parameter comes from IS.activeThread (set by CommandHandlerActor when
+          // the program started). CI confirms via MG _NO before sending HX — if the thread
+          // bit is no longer set, the program already finished and HX is skipped.
           //
-          // This avoids relying solely on IS.activeThread, which can be transiently
-          // stale if a QR poll or CommandWatcher update races with this call.
+          // This handler only kills the thread. The caller is responsible for any motor
+          // stop (ST) or embedded stop program (#StopX) as appropriate for the use case.
           case GalilCommandMessage.HaltExecution(thread, axis, replyTo) =>
             try {
               galilIo.synchronized {
-                // Confirm thread is still active in hardware before sending HX
                 if thread >= 1 then
                   val threadStatus = queryThreadStatus()
                   val threadBit = 1 << thread
@@ -494,24 +469,16 @@ private[hcd] object ControllerInterfaceActor {
                     }
                     if hxError.isDefined then
                       log.warn(s"HaltExecution: HX $thread returned error — thread may have stopped between check and HX")
+                      replyTo ! GalilCommandMessage.HaltExecutionResult(success = false,
+                        error = Some(s"HX $thread returned error"))
                     else
-                      log.info(s"HaltExecution: thread $thread halted")
+                      log.info(s"HaltExecution: axis ${axis.char} thread $thread halted")
+                      replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
                   else
                     log.info(s"HaltExecution: thread $thread already finished (_NO=0x${threadStatus.toHexString}), skipping HX")
-
-                // Always send ST to stop any residual motor motion on the axis
-                val stCmd = s"ST ${axis.char}"
-                log.info(s"HaltExecution: stopping motor with $stCmd")
-                val stResponses = galilIo.send(stCmd)
-                val stError = stResponses.find { case (_, bs) =>
-                  bs.utf8String.trim.startsWith("?")
-                }
-                if stError.isDefined then
-                  val errMsg = s"ST ${axis.char} rejected: ${stError.get._2.utf8String.trim}"
-                  log.error(s"HaltExecution: $errMsg")
-                  replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(errMsg))
+                    replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
                 else
-                  log.info(s"HaltExecution: axis ${axis.char} stopped successfully")
+                  log.info(s"HaltExecution: thread=0, nothing to halt")
                   replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
               }
             } catch {
@@ -539,7 +506,7 @@ private[hcd] object ControllerInterfaceActor {
             Behaviors.same
 
           case GalilRequest(commandString, runId, maybeObsId, commandKey, setup) =>
-            log.info(s"doing command: $commandString")
+            log.debug(s"GalilRequest: ${commandKey.name}")
             
             // Check for special commands that need file handling
             commandKey.name match {

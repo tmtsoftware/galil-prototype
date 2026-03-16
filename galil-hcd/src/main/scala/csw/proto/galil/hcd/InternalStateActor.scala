@@ -290,7 +290,7 @@ class InternalStateActor(
         
       case SubscribeCmdState(axis, subscriber) =>
         cmdSubscribers = cmdSubscribers + (subscriber -> axis)
-        log.debug(s"IS SubscribeCmdState: axis=$axis total=${cmdSubscribers.size}")
+        log.debug(s"SubscribeCmdState: axis=$axis total=${cmdSubscribers.size}")
         Behaviors.same
         
       case UnsubscribeCmdState(subscriber) =>
@@ -441,7 +441,7 @@ class InternalStateActor(
    * the thread→axis mapping for UpdateThreadStatus to resolve completions.
    */
   private def handleRegisterThread(thread: Int, axis: Axis): Behavior[Command] =
-    log.info(s"IS RegisterThread: thread=$thread → axis=$axis")
+    log.info(s"RegisterThread: thread=$thread → axis=$axis")
     threadRegistry = threadRegistry + (thread -> axis)
 
     // Set activeThread on the axis CmdState immediately so the watcher's
@@ -474,7 +474,7 @@ class InternalStateActor(
     }
 
     completed.foreach { (thread, axis) =>
-      log.info(s"IS UpdateThreadStatus: thread=$thread completed → axis=$axis activeThread→0")
+      log.info(s"Thread $thread completed → axis=$axis activeThread→0")
       threadRegistry = threadRegistry - thread
 
       val oldCmdState = currentState.getCmdState(axis)
@@ -510,10 +510,7 @@ class InternalStateActor(
    * Notify command state subscribers watching the specified axis.
    */
   private def notifyCmdSubscribers(axis: Axis, cmdState: AxisCmdState, changedFields: Set[String]): Unit =
-    val matching = cmdSubscribers.count((_, watchedAxis) => watchedAxis == axis)
-    log.info(s"IS notifyCmdSubscribers: axis=$axis changed=$changedFields " +
-      s"subscribers=${cmdSubscribers.size} matching=$matching " +
-      s"thread=${cmdState.activeThread} moving=${cmdState.moving} err='${cmdState.axisErrorMsg}'")
+    log.debug(s"CmdState $axis changed=$changedFields thread=${cmdState.activeThread} moving=${cmdState.moving}")
     cmdSubscribers.foreach { (subscriber, watchedAxis) =>
       if watchedAxis == axis then
         subscriber ! CmdStateChanged(axis, cmdState, changedFields)

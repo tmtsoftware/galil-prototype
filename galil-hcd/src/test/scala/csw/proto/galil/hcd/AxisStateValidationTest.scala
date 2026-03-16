@@ -11,25 +11,23 @@ import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.concurrent.duration._
 
 /**
- * Tests for Command Interruption Strategy (SDD 4.8.1).
+ * Tests for axis state machine enforcement and command interruption mechanics.
  *
  * Section 1: validateCommand — state machine permission matrix
- *            Verifies that all interruption-eligible transitions now return None
+ *            Verifies that all interruption-eligible transitions return None
  *            and that truly invalid transitions are still rejected.
  *
  * Section 2: CommandWatcher interruption response
  *            Verifies the commandHalted→Error path in the watcher actor.
- *            (Already partially covered in CommandWatcherActorTest, extended here
- *            for completeness with stopAxis and homeAxis contexts.)
  *
- * Section 3: checkAndInterrupt logic via IS state
- *            Verifies the interruption decision logic through the InternalStateActor.
- *            Tests that commandHalted is set, the watcher detects it, and the flag is cleared.
+ * Section 3: Interruption decision logic via IS state
+ *            Verifies that commandHalted is set, the watcher detects it, and
+ *            the flag is cleared — without requiring a real CI actor.
  *
- * Note: Full end-to-end hardware tests (KX + ST on real controller) belong in
- * LongRunningCommandTest with the hardware integration suite.
+ * Note: End-to-end interruption tests (HX on real controller, verify Error result
+ * on interrupted command, verify new command completes) are in HcdIntegrationTest.
  */
-class CommandInterruptionTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
+class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
 
   private val testKit = ActorTestKit()
 

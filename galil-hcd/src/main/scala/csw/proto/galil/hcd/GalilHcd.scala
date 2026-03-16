@@ -89,19 +89,19 @@ object GalilCommandMessage {
   )
 
   /**
-   * Halt an active execution thread and stop axis motion (SDD 4.8.1 — Halting the Active Command).
+   * Halt an active execution thread (SDD 4.8.1 — Halting the Active Command).
    *
-   * The CI actor confirms the thread is still active via MG _NO, sends HX to halt it
-   * if so, then sends ST to stop motor motion. All operations are synchronized under
-   * galilIo.synchronized to prevent interleaving with QR polling.
+   * The CI actor confirms the thread is still active via MG _NO and sends HX to halt
+   * it if so. All operations are synchronized under galilIo.synchronized to prevent
+   * interleaving with QR polling.
    *
-   * This message is sent by CommandHandlerActor when it needs to interrupt an active
-   * long-running command before starting a new one on the same axis.
+   * This message only kills the thread — it does NOT send ST. The caller is responsible
+   * for any subsequent motor stop (ST) or embedded stop program (#StopX) as appropriate:
+   *   - checkAndInterrupt: sends ST after HaltExecution, then starts a new embedded program
+   *   - stopAxis: does not need ST — #StopX handles motor deceleration
    *
-   * @param thread  Thread number from IS.activeThread (set at program start from the
-   *                actual allocated thread). Use 0 if no thread is known (CI will skip
-   *                HX and only send ST).
-   * @param axis    Axis for the ST command
+   * @param thread  Thread number from IS.activeThread. Use 0 to skip HX entirely.
+   * @param axis    Axis identifier (used for logging context)
    * @param replyTo Actor to receive HaltExecutionResult
    */
   case class HaltExecution(
@@ -113,7 +113,7 @@ object GalilCommandMessage {
   /**
    * Result of HaltExecution.
    *
-   * @param success true if KX and ST both succeeded (or thread was -1 and ST succeeded)
+   * @param success true if HX succeeded (or thread was already finished and was skipped)
    * @param error   None on success, Some(message) on failure
    */
   case class HaltExecutionResult(

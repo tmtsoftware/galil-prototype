@@ -545,6 +545,148 @@ class HcdIntegrationTest
   }
 
   // ==========================================================================
+  // Test: stopAxis interrupts an active positionAxis (Moving state)
+  // Verifies the full interruption sequence:
+  //   HX kills the move thread → positionAxis reports Error(interrupted)
+  //   #StopX executes cleanly → stopAxis reports Completed
+  //   Axis ends in Idle state → a subsequent move succeeds (controller is clean)
+  // ==========================================================================
+
+  test("stopAxis should interrupt an active positionAxis and leave axis ready for new commands") {
+    val commandService = getCommandService
+    val farTarget = 10000.0f  // far enough that motion is still in progress when stop arrives
+
+    // Start a long move
+    val moveSetup = makeSetup("positionAxis", "axis" -> "A", "target" -> farTarget)
+    val moveResponse = Await.result(commandService.submit(moveSetup), 5.seconds)
+    assert(moveResponse.isInstanceOf[Started], s"positionAxis should return Started, got: $moveResponse")
+    println(s"  Started positionAxis A to $farTarget")
+
+    // Wait for Moving state to be confirmed via CurrentState
+    val states = collectStatesUntil(
+      commandService,
+      StateName(CurrentStateAxisACurrentState.eventKey.eventName.name),
+      s => s(CurrentStateAxisACurrentState.axisStateKey).head.name == "moving"
+    )
+    println(s"  Moving confirmed: ${states.lastOption.map(_(CurrentStateAxisACurrentState.axisStateKey).head.name)}")
+
+    // Submit stopAxis — arrives while axis is Moving
+    val stopSetup = makeSetup("stopAxis", "axis" -> "A")
+    val stopResponse = Await.result(commandService.submit(stopSetup), 5.seconds)
+    assert(stopResponse.isInstanceOf[Started], s"stopAxis should return Started, got: $stopResponse")
+    println(s"  stopAxis A submitted")
+
+    // The interrupted positionAxis should report Error
+    val moveResult = Await.result(
+      commandService.queryFinal(moveResponse.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    println(s"  positionAxis result after stop: $moveResult")
+    assert(moveResult.isInstanceOf[Error],
+      s"Interrupted positionAxis should report Error, got: $moveResult")
+
+    // The stopAxis itself should complete
+    val stopResult = Await.result(
+      commandService.queryFinal(stopResponse.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    println(s"  stopAxis result: $stopResult")
+    assert(stopResult.isInstanceOf[Completed],
+      s"stopAxis should complete, got: $stopResult")
+
+    // Axis should be Idle after stop
+    val idleStates = collectStatesUntil(
+      commandService,
+      StateName(CurrentStateAxisACurrentState.eventKey.eventName.name),
+      s => s(CurrentStateAxisACurrentState.axisStateKey).head.name == "idle"
+    )
+    val finalAxisState = idleStates.lastOption
+      .map(_(CurrentStateAxisACurrentState.axisStateKey).head.name)
+      .getOrElse("unknown")
+    println(s"  Axis A state after stop: $finalAxisState")
+    assert(finalAxisState == "idle", s"Axis A should be idle after stop, was: $finalAxisState")
+
+    // Issue a new move to verify the controller is in a clean state
+    val recoverySetup = makeSetup("positionAxis", "axis" -> "A", "target" -> 500.0f)
+    val recoveryResponse = Await.result(commandService.submit(recoverySetup), 5.seconds)
+    assert(recoveryResponse.isInstanceOf[Started], s"Recovery move should start, got: $recoveryResponse")
+    val recoveryResult = Await.result(
+      commandService.queryFinal(recoveryResponse.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    println(s"  Recovery positionAxis result: $recoveryResult")
+    assert(recoveryResult.isInstanceOf[Completed],
+      s"Recovery move should complete after interruption, got: $recoveryResult")
+  }
+
+  // ==========================================================================
+  // Test: positionAxis interrupts an active positionAxis (Moving state)
+  // Verifies that a new move correctly preempts an in-progress move:
+  //   HX + ST kills the move thread → original positionAxis reports Error(interrupted)
+  //   New positionAxis executes cleanly → reports Completed at the new target
+  // ==========================================================================
+
+  test("positionAxis should interrupt an active positionAxis and complete to the new target") {
+    val commandService = getCommandService
+    val farTarget    = 10000.0f  // long move that will still be running when interrupted
+    val newTarget    = 500.0f    // new target for interrupting command
+
+    // Start a long move
+    val move1Setup = makeSetup("positionAxis", "axis" -> "B", "target" -> farTarget)
+    val move1Response = Await.result(commandService.submit(move1Setup), 5.seconds)
+    assert(move1Response.isInstanceOf[Started], s"First positionAxis should start, got: $move1Response")
+    println(s"  Started positionAxis B to $farTarget")
+
+    // Wait for Moving state
+    collectStatesUntil(
+      commandService,
+      StateName(CurrentStateAxisBCurrentState.eventKey.eventName.name),
+      s => s(CurrentStateAxisBCurrentState.axisStateKey).head.name == "moving"
+    )
+    println(s"  Moving confirmed on axis B")
+
+    // Submit a new positionAxis — interrupts the running move
+    val move2Setup = makeSetup("positionAxis", "axis" -> "B", "target" -> newTarget)
+    val move2Response = Await.result(commandService.submit(move2Setup), 5.seconds)
+    assert(move2Response.isInstanceOf[Started], s"Second positionAxis should start, got: $move2Response")
+    println(s"  Submitted interrupting positionAxis B to $newTarget")
+
+    // Original move should report Error (interrupted)
+    val move1Result = Await.result(
+      commandService.queryFinal(move1Response.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    println(s"  Original positionAxis result: $move1Result")
+    assert(move1Result.isInstanceOf[Error],
+      s"Interrupted positionAxis should report Error, got: $move1Result")
+
+    // New move should complete at the new target
+    val move2Result = Await.result(
+      commandService.queryFinal(move2Response.runId)(Timeout(commandTimeout)),
+      commandTimeout
+    )
+    println(s"  Interrupting positionAxis result: $move2Result")
+    assert(move2Result.isInstanceOf[Completed],
+      s"Interrupting positionAxis should complete, got: $move2Result")
+
+    // Verify axis B is at the new target in Idle state
+    val probe = TestProbe[CurrentState]()
+    val sub = commandService.subscribeCurrentState(
+      Set(StateName(CurrentStateAxisBCurrentState.eventKey.eventName.name)),
+      cs => probe.ref ! cs
+    )
+    val finalState = probe.receiveMessage(stateTimeout)
+    sub.cancel()
+    val pos = finalState(CurrentStateAxisBCurrentState.positionKey).head
+    val axisState = finalState(CurrentStateAxisBCurrentState.axisStateKey).head
+    val inPos = finalState(CurrentStateAxisBCurrentState.inPositionKey).head
+    println(s"  Axis B final: state=${axisState.name}, pos=$pos, inPos=$inPos")
+    assert(axisState.name == "idle", s"Axis B should be idle, was: ${axisState.name}")
+    assert(inPos, "Axis B should be inPosition at new target")
+    assert(pos == newTarget.toDouble, s"Axis B should be at $newTarget, was: $pos")
+  }
+
+  // ==========================================================================
   // Test: positionAxis on axis B -- verify correct axis mapping
   // ==========================================================================
   

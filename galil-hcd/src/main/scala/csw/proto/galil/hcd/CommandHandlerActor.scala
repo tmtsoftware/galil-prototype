@@ -460,19 +460,25 @@ object CommandHandlerActor {
   /**
    * Interrupt the currently active command on this axis before starting a new one.
    *
-   * Called by positionAxis, offsetAxis, and selectWheel when the axis is in Moving
-   * state — SDD 4.8.1 permits these commands to preempt an active move.
+   * Called by positionAxis, offsetAxis, selectWheel, and stopAxis when the axis is
+   * in Moving or Homing state — SDD 4.8.1 permits these commands to preempt an active move.
+   *
+   * @param sendST  If true (default), sends ST after HX to leave the motor stationary for
+   *                the next embedded program. Pass false when the next program is #StopX,
+   *                which handles motor deceleration itself.
    *
    * Sequence:
-   *   1. Query IS CmdState for activeThread and activeCommand
-   *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills thread + ST stops motor)
-   *   3. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
-   *   4. 10ms delay for watcher to observe the flag
-   *   5. Clear commandHalted — new command will set its own activeCommand
+   *   1. Query IS CmdState for activeThread
+   *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills the thread)
+   *   3. If sendST: send ST to stop motor motion
+   *   4. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
+   *   5. 10ms delay for watcher to observe the flag
+   *   6. Clear commandHalted — new command will set its own activeCommand
    *
    * Tracking special case: #TrackX ends with EN so the motor continues jogging
    * but the thread has already released. activeThread will be 0. HaltExecution is
-   * skipped, but commandHalted is still set in case a slow watcher is still running.
+   * skipped, but ST is still sent (if sendST=true) to stop jogging motion, and
+   * commandHalted is set in case a slow watcher is still running.
    */
   private def checkAndInterrupt(
     commandName: String,
@@ -482,9 +488,10 @@ object CommandHandlerActor {
     log: csw.logging.api.scaladsl.Logger,
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
-    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command]
+    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
+    sendST: Boolean = true
   ): Unit = {
-    // Step 1: Query activeThread and activeCommand from IS
+    // Step 1: Query activeThread from IS
     val (activeThread, activeCmd) = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
         ref => InternalStateActor.GetAxisCmdState(axis, ref)
@@ -497,7 +504,7 @@ object CommandHandlerActor {
     log.info(s"checkAndInterrupt: $commandName on Moving axis $axis " +
       s"(thread=$activeThread, cmd=$activeCmd) — interruption needed")
 
-    // Step 2: Halt the active thread if one is running (HX + ST via CI actor)
+    // Step 2: Halt the active thread if one is running (HX via CI actor)
     if activeThread > 0 then
       log.info(s"checkAndInterrupt: halting axis $axis thread=$activeThread for $commandName")
       val haltResult = Try {
@@ -514,20 +521,31 @@ object CommandHandlerActor {
           log.warn(s"checkAndInterrupt: HaltExecution failed for $axis thread=$activeThread: " +
             s"${result.error.getOrElse("unknown")} — proceeding")
         case Success(_) =>
-          log.info(s"checkAndInterrupt: axis $axis halted successfully")
+          log.info(s"checkAndInterrupt: axis $axis thread $activeThread halted")
       }
     else
       log.info(s"checkAndInterrupt: axis $axis activeThread=0, skipping HX (already released)")
 
-    // Step 3: Signal existing watcher (if any) that its command was interrupted
+    // Step 3: Stop motor motion if requested. Omitted when the next program is #StopX,
+    // which handles deceleration itself. Always sent for other interrupting commands
+    // (including the Tracking case where the thread has released but motor is still jogging).
+    if sendST then
+      sendToController(ciActor, s"ST ${axis.char}", log, askTimeout, askScheduler) match {
+        case Failure(ex) =>
+          log.warn(s"checkAndInterrupt: ST ${axis.char} failed: ${ex.getMessage} — proceeding")
+        case _ =>
+          log.info(s"checkAndInterrupt: axis $axis motor stopped")
+      }
+
+    // Step 4: Signal existing watcher (if any) that its command was interrupted
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> true),
       ctx.system.ignoreRef)
 
-    // Step 4: Brief delay for watcher to observe the flag and self-terminate
+    // Step 5: Brief delay for watcher to observe the flag and self-terminate
     Thread.sleep(10)
 
-    // Step 5: Clear flag — new command handler will set its own activeCommand
+    // Step 6: Clear flag — new command handler will set its own activeCommand
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> false),
       ctx.system.ignoreRef)
@@ -968,14 +986,20 @@ object CommandHandlerActor {
   // ========================================
 
   /**
-   * Stops any active motion on the specified axis (SDD 4.8.1, 4.8.5, ICD 2.2.1.11).
+   * Stops any active motion on the specified axis by executing the embedded #StopX program.
    *
-   * Implements the full command interruption protocol from SDD 4.8.1:
-   *   1. Query IS for active thread and current axisState
-   *   2. Send HaltExecution to CI actor: kills active thread (HX) + stops motor (ST)
-   *   3. Set commandHalted=true so active CommandWatcher reports CommandFailure
-   *   4. Execute embedded #StopX program for clean deceleration handoff
-   *   5. Spawn CommandWatcher with stopAxis mask for this stop command
+   * If the axis is Moving or Homing, the active embedded program is halted first via
+   * checkAndInterrupt (HX only — no ST) before #StopX runs. #StopX handles motor
+   * deceleration itself, so a separate ST would be redundant.
+   *
+   * For Tracking, #StopX runs directly — #TrackX ends with EN so the thread has already
+   * released, and ST from #StopX is sufficient to stop the jogging motor.
+   *
+   * Sequence:
+   *   1. Query axisState to determine whether interruption is needed and the completion state
+   *   2. If Moving or Homing: checkAndInterrupt (HX active thread only — no ST, #StopX handles deceleration)
+   *   3. Execute embedded #StopX program (full application stop: deceleration, brakes, I/O)
+   *   4. Spawn CommandWatcher with stopAxis mask
    *
    * Valid from any axis state (Lost, Idle, Homing, Moving, Tracking, Error).
    * Completion state depends on prior state:
@@ -1008,67 +1032,31 @@ object CommandHandlerActor {
     if guardAxisState("stopAxis", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
     then return
 
-    // Query current axis and command state:
-    //   - axisState → determines completion state after stop (SDD Figure 4-2)
-    //   - activeThread → needed to halt the running program (SDD 4.8.1)
-    //
-    // SDD 4.8.1 interruption sequence:
-    //   1. HaltExecution: CI actor sends HX to kill the active thread, then ST to stop motor
-    //   2. commandHalted: signals the active watcher to report CommandFailure
-    //   3. XQ #StopX: runs the embedded stop program for clean deceleration
-    //
-    // HX (halt execution) rather than AB (abort program) is used here because HX
-    // stops the thread immediately without allowing the program to execute further
-    // motion commands, which AB does not guarantee on the DMC-500x0.
-    val (completionState, activeThread) = Try {
-      val axisFuture = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+    // Query axisState to determine: (a) whether interruption is needed, (b) completion state.
+    val (completionState, currentAxisState) = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
         ref => InternalStateActor.GetAxisState(axis, ref)
       )(askTimeout, askScheduler)
-      val cmdFuture = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
-        ref => InternalStateActor.GetAxisCmdState(axis, ref)
-      )(askTimeout, askScheduler)
-      val axisStateOpt = Await.result(axisFuture, askTimeout.duration)
-      val cmdStateOpt  = Await.result(cmdFuture,  askTimeout.duration)
-      val target  = axisStateOpt.map(_.axisState.stopCompletionState).getOrElse(AxisStateEnum.Idle)
-      val thread  = cmdStateOpt.map(_.activeThread).getOrElse(0)
-      log.info(s"stopAxis $axis: current state=${axisStateOpt.map(_.axisState).getOrElse("unknown")}, " +
-        s"activeThread=$thread, completion→$target")
-      (target, thread)
-    }.getOrElse((AxisStateEnum.Idle, 0))
+      val axisStateOpt = Await.result(future, askTimeout.duration)
+      val target = axisStateOpt.map(_.axisState.stopCompletionState).getOrElse(AxisStateEnum.Idle)
+      val current = axisStateOpt.map(_.axisState).getOrElse(AxisStateEnum.Idle)
+      log.info(s"stopAxis $axis: current state=$current, completion→$target")
+      (target, current)
+    }.getOrElse((AxisStateEnum.Idle, AxisStateEnum.Idle))
 
-    // Step 1: Halt the active execution thread and stop the motor (SDD 4.8.1).
-    // This is the key step that enables stopAxis from Moving or Homing states —
-    // without HaltExecution, the running #HomeX or #MoveX program would restart
-    // motion after ST, making the stop ineffective.
-    val haltResult = Try {
-      val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.HaltExecutionResult](
-        ref => GalilCommandMessage.HaltExecution(activeThread, axis, ref)
-      )(askTimeout, askScheduler)
-      Await.result(future, askTimeout.duration)
-    }
-    haltResult match {
-      case Failure(ex) =>
-        log.warn(s"stopAxis $axis: HaltExecution communication error: ${ex.getMessage} — proceeding anyway")
-      case Success(result) if !result.success =>
-        log.warn(s"stopAxis $axis: HaltExecution reported failure: ${result.error.getOrElse("unknown")} — proceeding anyway")
-      case Success(_) =>
-        log.info(s"stopAxis $axis: HaltExecution succeeded (thread=$activeThread halted)")
-    }
+    // If an embedded program is running (Moving or Homing), halt it and stop the motor
+    // before executing #StopX. Without this, the running #MoveX or #HomeX program would
+    // restart motion after #StopX sends ST, making the stop ineffective.
+    if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
+      checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx, sendST = false)
 
-    // Step 2: Signal any existing watcher that the command was halted
+    // Update active command for this stop
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("commandHalted" -> true),
+      Map("activeCommand" -> ActiveCommand.Stop, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // Brief delay for the halted notification to propagate to the watcher
-    Thread.sleep(10)
-
-    // Step 3: Clear halted flag and set new active command for this stop
-    internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("commandHalted" -> false, "activeCommand" -> ActiveCommand.Stop, "axisErrorMsg" -> ""),
-      ctx.system.ignoreRef)
-
-    // Execute embedded stop program with thread confirmation + watcher
+    // Execute the embedded stop program. #StopX is responsible for the full
+    // application-defined stop sequence: motor deceleration, brakes, I/O updates, etc.
     executeProgramAndWatch(
       label = s"Stop${axis.char}",
       axis = axis,

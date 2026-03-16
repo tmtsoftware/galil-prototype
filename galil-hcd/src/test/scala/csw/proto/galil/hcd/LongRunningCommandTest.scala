@@ -411,8 +411,9 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
   // Section 3: stopAxis
   // ========================================
-  // Note: stopAxis is only permitted from Tracking state until command interruption
-  // is implemented. All tests here must set the axis to Tracking first.
+  // stopAxis is valid from any state. From Moving or Homing states, checkAndInterrupt
+  // (called upstream in the command dispatch path) halts the active thread and stops
+  // the motor before stopAxis runs. stopAxis then simply executes #StopX.
 
   test("stopAxis should send XQ #StopX command") {
     val (handler, isActor, _) = createTestActors()
@@ -426,11 +427,13 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     MockCIActor.commands should contain("XQ #StopA,1")
   }
 
-  test("stopAxis should signal commandHalted then clear it") {
+  test("stopAxis should NOT signal commandHalted — interruption is handled by checkAndInterrupt before stopAxis runs") {
     val (handler, isActor, _) = createTestActors()
     setAxisTracking(isActor, Axis.A)
 
-    // Subscribe to CmdState changes to observe halted flag
+    // Subscribe to CmdState changes to observe any halted flag.
+    // Note: SubscribeCmdState does NOT deliver an initial snapshot (unlike Subscribe),
+    // so no drain is needed.
     val cmdProbe = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
     isActor ! InternalStateActor.SubscribeCmdState(Axis.A, cmdProbe.ref)
 
@@ -438,22 +441,20 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val setup = makeSetup("stopAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
 
-    // We should see the halted flag set then cleared in the CmdStateChanged stream
-    // Collect notifications (may arrive in various orderings)
+    // stopAxis from Tracking does NOT signal commandHalted — #TrackX ends with EN so
+    // the thread has already released. checkAndInterrupt is only called from Moving/Homing.
+    // This test confirms the Tracking case runs #StopX directly without any interruption signal.
     var sawHalted = false
-    var sawCleared = false
-    val deadline = System.currentTimeMillis() + 2000
-    while (System.currentTimeMillis() < deadline && !(sawHalted && sawCleared)) {
+    val deadline = System.currentTimeMillis() + 500
+    while (System.currentTimeMillis() < deadline) {
       try {
-        val notification = cmdProbe.receiveMessage(200.millis)
+        val notification = cmdProbe.receiveMessage(100.millis)
         if (notification.cmdState.commandHalted) sawHalted = true
-        if (sawHalted && !notification.cmdState.commandHalted) sawCleared = true
       } catch {
         case _: AssertionError => // timeout, continue
       }
     }
-    sawHalted should be(true)
-    sawCleared should be(true)
+    sawHalted should be(false)
   }
 
   test("stopAxis should complete when thread released and not moving") {

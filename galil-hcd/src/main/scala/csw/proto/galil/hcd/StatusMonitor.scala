@@ -149,7 +149,7 @@ class StatusMonitor(
   // Start periodic polling at standby rate
   startPolling()
   
-  log.info(s"StatusMonitor started - standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
+  log.info(s"Started — standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
   override def onMessage(msg: Command): Behavior[Command] =
     msg match
@@ -279,10 +279,10 @@ class StatusMonitor(
     if enabled != pollingEnabled then
       pollingEnabled = enabled
       if enabled then
-        log.info("Polling enabled")
+        log.info("QR polling enabled")
         startPolling()
       else
-        log.info("Polling disabled")
+        log.info("QR polling disabled")
         stopPolling()
     Behaviors.same
   

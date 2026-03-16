@@ -222,18 +222,19 @@ These tests use mock actors and run without any external dependencies:
 
 ```bash
 # All standalone unit tests
-sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest"
+sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest *AxisStateValidationTest"
 ```
 
 Individual test suites:
 
 ```bash
 sbt "galil-hcd/testOnly *GalilHcdConfigTest"          # 9 tests — config parsing
-sbt "galil-hcd/testOnly *InternalStateActorTest"       # 30 tests — state management
+sbt "galil-hcd/testOnly *InternalStateActorTest"       # 41 tests — state management
 sbt "galil-hcd/testOnly *StatusMonitorTest"            # 19 tests — QR polling, adaptive rate
-sbt "galil-hcd/testOnly *CommandHandlerActorTest"      # 16 tests — immediate commands
-sbt "galil-hcd/testOnly *CommandWatcherActorTest"      # 16 tests — completion mask evaluation
+sbt "galil-hcd/testOnly *CommandHandlerActorTest"      # 17 tests — immediate commands
+sbt "galil-hcd/testOnly *CommandWatcherActorTest"      # 15 tests — completion mask evaluation
 sbt "galil-hcd/testOnly *LongRunningCommandTest"       # 29 tests — motion command handlers
+sbt "galil-hcd/testOnly *AxisStateValidationTest"      # 14 tests — state machine rules, interruption mechanics
 ```
 
 ### Controller/Simulator-Dependent Tests (no CSW services)
@@ -266,21 +267,22 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"   # 4 tests
 
 The integration tests exercise the full stack — CSW framework, actor architecture,
 Galil communication (real or simulated), and embedded program execution. Coverage
-includes homing, positioning, stopping, concurrent multi-axis motion, zero-distance
-moves, configuration commands, and tracking.
+includes homing, positioning, stopping, command interruption (stop-interrupts-move,
+move-interrupts-move), concurrent multi-axis motion, zero-distance moves,
+configuration commands, and tracking.
 
-All 13 tests pass against both real hardware and the simulator.
+All 15 tests pass against both real hardware and the simulator.
 
 `HcdIntegrationTest` uses `FrameworkTestKit` which starts its own embedded CSW
 cluster. **CSW services must not be running** when executing this test.
 
 ```bash
 # Against real hardware (requires Galil DMC-500x0 at 192.168.86.41:23):
-sbt "galil-hcd/testOnly *HcdIntegrationTest"              # 13 tests, ~26s
+sbt "galil-hcd/testOnly *HcdIntegrationTest"              # 15 tests, ~35s
 
 # Against simulator (requires GalilSimulatorApp running on 127.0.0.1:8888):
 sbt "galil-simulator/run"   # Terminal 1
-sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf "galil-hcd/testOnly *HcdIntegrationTest"  # 13 tests, ~21s
+sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf "galil-hcd/testOnly *HcdIntegrationTest"  # 15 tests, ~30s
 ```
 
 **Note:** Do not run hardware and simulator integration tests concurrently — both
@@ -296,7 +298,8 @@ use FrameworkTestKit which binds the same Pekko Remoting TCP port.
 | CommandHandlerActorTest | 17 | None |
 | CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
+| AxisStateValidationTest | 14 | None |
 | ControllerInterfaceActorTest | 16 | Hardware or Simulator (no CSW services) |
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
-| **HcdIntegrationTest** | **13** | **Hardware or Simulator (no CSW services)** |
-| **Total** | **150 standalone + 13 integration** | |
+| **HcdIntegrationTest** | **15** | **Hardware or Simulator (no CSW services)** |
+| **Total** | **164 standalone + 15 integration** | |
