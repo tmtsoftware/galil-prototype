@@ -176,10 +176,6 @@ sbt stage
 # Open browser to http://localhost:9090
 ```
 
-**Note:** Hardware and simulator HCDs cannot run simultaneously — both register
-the same component name (`APS.ICS.HCD.GalilMotion`) with the CSW Location
-Service. Stop one before starting the other.
-
 ### HMI Features
 
 - **Real-time axis cards** — Position, velocity, demand, boolean flags (InPos,
@@ -193,8 +189,12 @@ Service. Stop one before starting the other.
   from controller; Reload refreshes, Apply sends configAxis.
 - **Position chart** — Real-time line chart of axis positions (Recharts, active
   axes only, ~2Hz sampling).
-- **Controller console** — MG output from embedded programs (hardware mode only;
-  skipped in simulation mode). Color-coded: errors red, homed green, moves blue.
+- **Controller console** — Galil MG output from embedded programs, displayed in
+  hardware mode (MG routing not available in simulator). Color-coded: errors red,
+  homed green, moves blue. Arrives via the unified log stream — no separate TCP handle.
+- **Log panel** — Unified CSW log stream from all HCD actors. Runtime log level
+  control via dropdown (INFO/DEBUG/TRACE). Framework actors (e.g. `pub-sub-component`)
+  filtered from display by default to reduce noise.
 - **Simulation indicator** — Amber "SIMULATING" badge and top border when running
   against the simulator.
 - **WebSocket streaming** — State updates at QR polling rate (1Hz standby, 10Hz
@@ -205,12 +205,16 @@ Service. Stop one before starting the other.
 The HMI runs entirely within the HCD process:
 
 - **HmiServer** (Pekko HTTP) — WebSocket `/ws/state` for streaming, REST
-  `POST /api/command` for commands, `GET /api/console` for buffered console
-  history.
+  `POST /api/command` for commands, `GET /api/loglevel` / `POST /api/loglevel`
+  for runtime log level control.
 - **HmiJsonProtocol** — Serializes HcdState/AxisState/AxisCmdState to JSON
   using play-json.
-- **ConsoleMessageReader** — Separate TCP handle to controller for MG output
-  (hardware mode only). Uses `CF I` + `CW 2` for ASCII routing.
+- **HmiLogAppender** — CSW log appender that routes all HCD log output to the
+  HMI WebSocket stream. Galil MG output from embedded programs arrives here
+  automatically — it is emitted via `log.info` by `ControllerInterfaceActor`
+  and labelled "Console" in the display. Per-actor exclusion list suppresses
+  high-frequency CSW framework actors (e.g. `pub-sub-component`) from the HMI
+  panel without affecting file log output.
 - **index.html** — Single-file React SPA (CDN, no build step). Vanilla
   `React.createElement` calls — no JSX transpilation needed.
 

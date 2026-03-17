@@ -70,6 +70,21 @@ object HmiLogAppender extends LogAppenderBuilder {
    */
   @volatile var minSeverity: String = "INFO"
 
+  /**
+   * Actor labels whose log output is suppressed in the HMI display regardless
+   * of severity level. Useful for silencing high-frequency CSW framework actors
+   * that cannot be controlled via LogAdminUtil (they belong to the framework's
+   * own component prefix, not ours).
+   *
+   * Default: pub-sub-component — the CSW CurrentState pub/sub actor fires a
+   * DEBUG message for every published CurrentState (8+ per QR poll cycle at
+   * 10Hz = ~80 messages/second at action rate). These are pure framework
+   * plumbing with no diagnostic value in the HMI log panel.
+   *
+   * Can be modified at runtime — the set is @volatile.
+   */
+  @volatile var excludedActors: Set[String] = Set("pub-sub-component")
+
   /** Called by the CSW framework to construct the appender instance. */
   override def apply(system: ActorSystem[?], stdHeaders: JsObject): LogAppender =
     new HmiLogAppender(stdHeaders)
@@ -127,6 +142,10 @@ class HmiLogAppender(stdHeaders: JsObject) extends LogAppender {
     // logger context, but their message always starts with "[prefix] " — relabel as "Console"
     // to reflect the true origin (embedded Galil program MG output).
     val actor = if (message.matches("""\[[\w.:]+\] .*""")) "Console" else rawActor
+
+    // Drop messages from excluded actors (e.g. CSW framework actors we cannot
+    // suppress via LogAdminUtil because they belong to a different component prefix).
+    if (excludedActors.contains(actor)) return
 
     // Apply HMI-level severity filter (independent of CSW logger level)
     val msgOrder = severityOrder.getOrElse(severity, 2)
