@@ -55,17 +55,24 @@ case class ControllerConfig(
  * @param inPositionThreshold Threshold for in-position status
  * @param indexOffset Offset applied after homing
  *
- * Motion parameters — optional, with defaults matching the prototype hardware.
- * On hardware these are overwritten by readMotionConfig() after #Init/#SetupX run,
- * so values here serve as:
- *   1. Initial IS state before the first readMotionConfig completes
- *   2. Effective values in simulator mode (no real controller to query)
+ * Motion parameters — written to the controller's embedded variables at HCD init
+ * (writeMotionConfig(), Tier 2 authority). These values supplant the embedded
+ * EEPROM defaults (#SetupX) and remain effective until overridden by an Assembly
+ * via configAxis (Tier 3).
+ *
+ * Three-tier authority:
+ *   Tier 1: Embedded EEPROM defaults  — standalone Galil Tools use only
+ *   Tier 2: HCD config file (here)    — written at HCD init
+ *   Tier 3: Assembly configAxis       — runtime session override
  *
  * @param maxSpeed     Maximum move speed (counts/sec)
  * @param acceleration Acceleration rate (counts/sec²)
  * @param deceleration Deceleration rate (counts/sec²)
  * @param motionDelay  Post-move settling time (ms)
  * @param indexSpeed   Homing speed (counts/sec)
+ * @param countsPerRevolution Encoder counts for one full 360° revolution (rotating axes only).
+ *   Integer value — e.g. 400 for a 400-step/rev stepper, 3600 for simulator.
+ *   Written to cpr[] on the controller at init. 0.0 = not configured (warn for rotating).
  */
 case class AxisConfig(
   mechanismType: String,       // "linear" or "rotating"
@@ -79,7 +86,8 @@ case class AxisConfig(
   acceleration: Double = 9216.0,  // counts/sec²
   deceleration: Double = 9216.0,  // counts/sec²
   motionDelay: Double  = 100.0,   // ms (post-move settling)
-  indexSpeed: Double   = 256.0    // counts/sec (homing speed)
+  indexSpeed: Double   = 256.0,   // counts/sec (homing speed)
+  countsPerRevolution: Double = 0.0   // counts/rev (rotating only; 0.0 = not configured)
 )
 
 object GalilHcdConfig {
@@ -150,7 +158,8 @@ object GalilHcdConfig {
             acceleration        = optDouble("acceleration", 9216.0),
             deceleration        = optDouble("deceleration", 9216.0),
             motionDelay         = optDouble("motionDelay",  100.0),
-            indexSpeed          = optDouble("indexSpeed",   256.0)
+            indexSpeed          = optDouble("indexSpeed",   256.0),
+            countsPerRevolution     = optDouble("countsPerRevolution", 0.0)
           ))
         } else {
           None
@@ -189,7 +198,8 @@ object GalilHcdConfig {
         lowerLimit = 0.0,
         algorithm = "shortest",
         inPositionThreshold = 1.0,
-        indexOffset = 0.0
+        indexOffset = 0.0,
+        countsPerRevolution = 3600.0   // 360° × 10 counts/° — simulator
       )
     )
   )

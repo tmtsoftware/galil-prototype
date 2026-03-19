@@ -302,7 +302,18 @@ class CurrentStatePublisherActor(
         CurrentStateAxisHCurrentState.inPositionKey,
         CurrentStateAxisHCurrentState.axisErrorMsgKey
       )
-    
+
+    // Keys for rotating-axis fields — countsPerRevKey for A,B,D-H; axis C pending ICD fix
+    val (angPosKey, cpdKey) = axis match
+      case Axis.A => (CurrentStateAxisACurrentState.angularPositionKey, CurrentStateAxisACurrentState.countsPerRevKey)
+      case Axis.B => (CurrentStateAxisBCurrentState.angularPositionKey, CurrentStateAxisBCurrentState.countsPerRevKey)
+      case Axis.C => (CurrentStateAxisCCurrentState.angularPositionKey, CurrentStateAxisCCurrentState.countsPerRevKey)
+      case Axis.D => (CurrentStateAxisDCurrentState.angularPositionKey, CurrentStateAxisDCurrentState.countsPerRevKey)
+      case Axis.E => (CurrentStateAxisECurrentState.angularPositionKey, CurrentStateAxisECurrentState.countsPerRevKey)
+      case Axis.F => (CurrentStateAxisFCurrentState.angularPositionKey, CurrentStateAxisFCurrentState.countsPerRevKey)
+      case Axis.G => (CurrentStateAxisGCurrentState.angularPositionKey, CurrentStateAxisGCurrentState.countsPerRevKey)
+      case Axis.H => (CurrentStateAxisHCurrentState.angularPositionKey, CurrentStateAxisHCurrentState.countsPerRevKey)
+
     // Map internal enum to ICD choice string
     val stateValue = axisState.axisState match
       case AxisStateEnum.Lost => "lost"
@@ -311,7 +322,7 @@ class CurrentStatePublisherActor(
       case AxisStateEnum.Moving => "moving"
       case AxisStateEnum.Tracking => "tracking"
       case AxisStateEnum.Error => "error"
-    
+
     val cs = CurrentState(
       eventKey.source,
       StateName(eventKey.eventName.name),
@@ -321,10 +332,14 @@ class CurrentStatePublisherActor(
         velKey.set(axisState.velocity.toFloat),
         stateKey.set(stateValue),
         inPosKey.set(axisState.inPosition),
-        errKey.set(axisState.axisError)
+        errKey.set(axisState.axisError),
+        // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
+        angPosKey.set(axisState.angularPosition.getOrElse(0.0).toFloat),
+        // Counts per revolution — integer, published so Assembly can do its own unit conversions
+        cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat)
       )
     )
-    
+
     currentStatePublisher.publish(cs)
   
   /**

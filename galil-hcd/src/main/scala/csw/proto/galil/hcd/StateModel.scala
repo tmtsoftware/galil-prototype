@@ -164,6 +164,11 @@ object Axis:
  * @param indexOffset Home offset applied after finding home switch (encoder counts)
  * @param indexSpeed Homing speed for accurate detection of home switches (counts/sec)
  * @param motionDelay Settling time after motion stopped before reporting done (ms)
+ * @param countsPerRevolution Encoder counts per revolution of rotation (rotating axes only).
+ *   Read from controller embedded cpd[] array via readMotionConfig() after #Init.
+ *   Used by: (1) applyApproachAlgorithm in CommandHandlerActor to resolve the
+ *   algorithm-adjusted count target for positionAxis/offsetAxis; (2) computing
+ *   angularPosition (0-360°) for publication. Not used for linear axes.
  */
 case class AxisState(
   axisState: AxisStateEnum = AxisStateEnum.Lost,
@@ -186,19 +191,31 @@ case class AxisState(
   upperLimit: Option[Double] = None,
   lowerLimit: Option[Double] = None,
   algorithm: Option[RotatingAlgorithm] = None,
-  // Motion configuration (embedded variables, set by configAxis, SDD Table 3-2)
+  // Motion configuration (embedded variables, set by configAxis / readMotionConfig, SDD Table 3-2)
   maxSpeed: Option[Double] = None,
   acceleration: Option[Double] = None,
   deceleration: Option[Double] = None,
   indexOffset: Option[Double] = None,
   indexSpeed: Option[Double] = None,
-  motionDelay: Option[Double] = None
+  motionDelay: Option[Double] = None,
+  countsPerRevolution: Option[Double] = None  // rotating axes only; read from embedded cpd[]
 ):
   /**
    * Calculate inPosition based on position, demand, and threshold.
    */
   def calculateInPosition: Boolean = 
     Math.abs(position - demand) <= inPositionThreshold
+
+  /**
+   * Angular position in degrees [0, 360), computed from raw encoder position.
+   * Only meaningful for rotating axes with countsPerRevolution set.
+   * Returns None for linear axes or when cpd is not yet initialized.
+   */
+  def angularPosition: Option[Double] =
+    countsPerRevolution.filter(_ > 0.0).map { cpr =>
+      val raw = (position / cpr * 360.0) % 360.0
+      if raw < 0.0 then raw + 360.0 else raw
+    }
   
   /**
    * Update this axis state with new values.
@@ -235,6 +252,11 @@ case class AxisState(
       case ("indexOffset", v: Double) => updated = updated.copy(indexOffset = Some(v))
       case ("indexSpeed", v: Double) => updated = updated.copy(indexSpeed = Some(v))
       case ("motionDelay", v: Double) => updated = updated.copy(motionDelay = Some(v))
+      case ("countsPerRevolution", v: Double) =>
+        // Only store nonzero values — 0.0 means "not configured" (linear axis or
+        // uninitialized simulator). Storing Some(0.0) would mislead callers even
+        // though angularPosition already filters it; None is the clearer sentinel.
+        if v > 0.0 then updated = updated.copy(countsPerRevolution = Some(v))
       case (key, value) => 
         // Log unknown keys but don't fail
         println(s"Warning: Unknown axis state field: $key = $value")

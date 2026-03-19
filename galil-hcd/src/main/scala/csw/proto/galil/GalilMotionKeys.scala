@@ -46,6 +46,12 @@ object GalilMotionKeys {
       /** Current position of axis A (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
 
+      /** Current angular position of axis A (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
       /** Current velocity of axis A (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -66,6 +72,12 @@ object GalilMotionKeys {
 
       /** Current position of axis B (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
+
+      /** Current angular position of axis B (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
       /** Current velocity of axis B (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -88,6 +100,12 @@ object GalilMotionKeys {
       /** Current position of axis C (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
 
+      /** Current angular position of axis C (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
       /** Current velocity of axis C (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -108,6 +126,12 @@ object GalilMotionKeys {
 
       /** Current position of axis D (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
+
+      /** Current angular position of axis D (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
       /** Current velocity of axis D (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -130,6 +154,12 @@ object GalilMotionKeys {
       /** Current position of axis E (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
 
+      /** Current angular position of axis E (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
       /** Current velocity of axis E (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -150,6 +180,12 @@ object GalilMotionKeys {
 
       /** Current position of axis F (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
+
+      /** Current angular position of axis F (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
       /** Current velocity of axis F (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -172,6 +208,12 @@ object GalilMotionKeys {
       /** Current position of axis G (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
 
+      /** Current angular position of axis G (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
       /** Current velocity of axis G (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -192,6 +234,12 @@ object GalilMotionKeys {
 
       /** Current position of axis H (in encoder counts). */
       val positionKey: Key[Float] = FloatKey.make("position", Units.encoder)
+
+      /** Current angular position of axis H (in degrees). */
+      val angularPositionKey: Key[Float] = FloatKey.make("angularPosition", Units.degree)
+
+      /** counts in one 360 degree revolution */
+      val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
       /** Current velocity of axis H (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")

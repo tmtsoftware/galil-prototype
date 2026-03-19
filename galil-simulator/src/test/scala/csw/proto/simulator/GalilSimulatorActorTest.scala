@@ -75,10 +75,10 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(response == "0", s"TC0 should return 0, got: '$response'")
   }
 
-  test("unhandled commands should return acknowledgment") {
+  test("unhandled commands should return ? error response") {
     val sim = spawnSimulator()
     val response = send(sim, "BV").utf8String
-    assert(response == ":", s"Unhandled command should return ':' prompt, got: '$response'")
+    assert(response == "?", s"Unhandled command should return '?' error, got: '$response'")
   }
 
   // ==========================================================================
@@ -494,9 +494,9 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     val sim = spawnSimulator()
     val dr = sendQR(sim)
 
-    // Should have header blocks for S, T, I, A, B, C, D
+    // Should have header blocks for S, T, I, A-H
     assert(dr.header != null, "DataRecord should have a valid header")
-    assert(dr.axisStatuses.length == 4, s"Should have 4 axis statuses, got: ${dr.axisStatuses.length}")
+    assert(dr.axisStatuses.length == 8, s"Should have 8 axis statuses, got: ${dr.axisStatuses.length}")
   }
 
   test("QR should reflect motor position correctly") {
@@ -700,8 +700,8 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     send(sim, "DPA=100")
     send(sim, "DPB=200")
     val response = sendText(sim, "TP")
-    // Should be "100, 200, 0, 0" for 4-axis controller
-    assert(response == "100, 200, 0, 0", s"TP should return all axes, got: '$response'")
+    // 8-axis simulator: A=100, B=200, C-H=0
+    assert(response == "100, 200, 0, 0, 0, 0, 0, 0", s"TP should return all axes, got: '$response'")
   }
 
   test("TD with no axis should return all axes comma-separated") {
@@ -709,7 +709,7 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     send(sim, "DPA=300")
     send(sim, "DPB=400")
     val response = sendText(sim, "TD")
-    assert(response == "300, 400, 0, 0", s"TD should return all axes, got: '$response'")
+    assert(response == "300, 400, 0, 0, 0, 0, 0, 0", s"TD should return all axes, got: '$response'")
   }
 
   test("TVA should return velocity for single axis") {
@@ -731,10 +731,10 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
   test("TV with no axis should return all axes") {
     val sim = spawnSimulator()
     val response = sendText(sim, "TV")
-    // All stationary — should be "0.0000, 0.0000, 0.0000, 0.0000"
+    // All stationary — should be 8 comma-separated zero values
     assert(response.contains(", "), s"TV should return comma-separated values, got: '$response'")
     val values = response.split(",").map(_.trim.toDouble)
-    assert(values.length == 4, s"TV should return 4 values, got: ${values.length}")
+    assert(values.length == 8, s"TV should return 8 values, got: ${values.length}")
   }
 
   test("SCA should return stop code for single axis") {
@@ -755,7 +755,7 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
   test("SC with no axis should return all axes") {
     val sim = spawnSimulator()
     val response = sendText(sim, "SC")
-    assert(response == "0, 0, 0, 0", s"SC should return all axes, got: '$response'")
+    assert(response == "0, 0, 0, 0, 0, 0, 0, 0", s"SC should return all axes, got: '$response'")
   }
 
   test("TSA should return switches byte with stepper mode bit") {
@@ -769,8 +769,8 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
   test("TS with no axis should return all axes") {
     val sim = spawnSimulator()
     val response = sendText(sim, "TS")
-    // All default stepper, not homed → 1, 1, 1, 1
-    assert(response == "1, 1, 1, 1", s"TS should return switches for all axes, got: '$response'")
+    // All default stepper, not homed → 1 for each of 8 axes
+    assert(response == "1, 1, 1, 1, 1, 1, 1, 1", s"TS should return switches for all axes, got: '$response'")
   }
 
   test("TS should show homed bit after #Home") {

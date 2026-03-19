@@ -284,10 +284,10 @@ class HmiServer(
     )
     bindingFuture.get.onComplete {
       case Success(binding) =>
-        val address = binding.localAddress
-        log.info(s"HMI server started at http://${address.getHostString}:${address.getPort}/")
-        log.info(s"  WebSocket: ws://${address.getHostString}:${address.getPort}/ws/state")
-        log.info(s"  REST API:  http://${address.getHostString}:${address.getPort}/api/command")
+        val port = binding.localAddress.getPort
+        log.info(s"HMI server started at http://localhost:$port/")
+        log.info(s"  WebSocket: ws://localhost:$port/ws/state")
+        log.info(s"  REST API:  http://localhost:$port/api/command")
       case Failure(ex) =>
         log.error(s"HMI server failed to start on port $port: ${ex.getMessage}")
     }

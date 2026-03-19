@@ -86,7 +86,7 @@ DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
 DM Atarget[2]
-DM cpd[8]
+DM cpr[8]
 aeBusy=0
 ' default the motor parameters to those in flash EEPROM
 accel[0]=_ACA
@@ -192,7 +192,7 @@ LDA=3;       'Both limit switches disabled
 AGA=1;       'D4140 stepper amplifier - 0.85 A phase current
 SPA=1000;   'Value of jog speed in encoder counts/second
 speed[0]=1000; 'Sync embedded speed array 
-cpd[0]=1.13; 'counts per degree for rotational positioning
+cpr[0]=400; 'counts in one 360 degree rotation
 STA;         'SAFETY: Stop Axis A
 MOA;         'SAFETY: Stop Motor A
 MG "Axis A setup done"
@@ -208,7 +208,7 @@ LDB=3;      'Both limit switches disabled
 AGB=1;      'D4140 stepper amplifier - 0.85 A phase current
 SPB=1000;  'Value of jog speed in encoder counts/second
 speed[1]=1000; 'Sync embedded speed array 
-cpd[1]=1.13; 'counts per degree for rotational positioning
+cpr[1]=400; 'counts in one 360 degree rotation
 STB;        'SAFETY: Stop Axis F
 MOB;        'SAFETY: Stop Motor F
 MG "Axis B setup done"
@@ -279,7 +279,7 @@ EN
   ACB=accel[0]
   DCB=decel[0]
   SHA
-  PAA=dmd[0]*45.0*cpd[0]
+  PAA=dmd[0]*(cpr[0]/8)
   stime0=TIME
   BGA
   MCA
@@ -300,7 +300,7 @@ EN
   ACB=accel[1]
   DCB=decel[1]
   SHB
-  PAB=dmd[1]*45.0*cpd[1]
+  PAB=dmd[1]*(cpr[1]/8)
   stime1=TIME
   BGB
   MCB

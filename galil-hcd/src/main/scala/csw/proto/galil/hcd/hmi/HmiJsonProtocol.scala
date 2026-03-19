@@ -27,6 +27,12 @@ object HmiJsonProtocol {
     "homeSwitch"   -> s.homeSwitch,
     "isStepper"    -> s.isStepper,
     "motorOff"     -> s.motorOff,
+    // Mechanism configuration
+    "mechanismType" -> s.mechanismType.toString,
+    "algorithm"     -> s.algorithm.map(_.toString).getOrElse(""),
+    // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
+    "angularPosition"  -> s.angularPosition.getOrElse(0.0),
+    "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
     // Motion configuration (from readMotionConfig + configAxis updates)
     "maxSpeed"            -> s.maxSpeed.getOrElse[Double](0.0),
     "acceleration"        -> s.acceleration.getOrElse[Double](0.0),

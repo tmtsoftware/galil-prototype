@@ -181,6 +181,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   const [cfgIdxSpd,setCfgIdxSpd] = useState('');
   const [cfgThresh,setCfgThresh] = useState('');
   const [cfgLoaded,setCfgLoaded] = useState(false);
+  const [showDemand,setShowDemand] = useState(false);
 
   // Populate config fields from current state when panel first opens
   useEffect(() => {
@@ -199,9 +200,17 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   if (!axState) return null;
   const enabled = active || override;
   const colors = STATE_COLORS[axState.axisState] || STATE_COLORS.Lost;
-  const cmd = (name,extra={}) => { if (enabled) onCommand(name,{axis,...extra}); };
   const cs = cmdSt || {};
   const dim = enabled ? 1 : 0.35;
+
+  // Dispatch a command and toggle demand visibility:
+  // positionAxis and offsetAxis show demand; all other commands hide it.
+  const cmd = (name, extra={}) => {
+    if (!enabled) return;
+    if (name === 'positionAxis' || name === 'offsetAxis') setShowDemand(true);
+    else setShowDemand(false);
+    onCommand(name, {axis, ...extra});
+  };
 
   const sendConfig = () => {
     const params = {};
@@ -225,6 +234,19 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
     setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
   };
 
+  // Collapsed view for inactive axes — just a slim header strip, click INACTIVE to expand
+  if (!active && !override) {
+    return e('div',{style:{backgroundColor:'#0D1117',border:'1px solid #1F2937',
+        borderRadius:8,overflow:'hidden',borderTop:'2px solid #1F2937'}},
+      e('div',{style:{padding:'5px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+        e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:12,color:'#4B5563',letterSpacing:1.5}},
+          `AXIS ${axis}`),
+        e('span',{style:{fontSize:8.5,color:'#4B5563',cursor:'pointer',
+            padding:'2px 6px',borderRadius:3,border:'1px solid #27303f',userSelect:'none'},
+            onClick:()=>setOverride(true),title:'Click to enable commands on this axis'},
+          'INACTIVE')));
+  }
+
   return e('div',{style:{backgroundColor:'#111827',border:`1px solid ${enabled?colors.bdr:'#1F2937'}`,
     borderRadius:8,overflow:'hidden',minWidth:270,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
     opacity:enabled?1:0.85, position:'relative'}},
@@ -232,31 +254,67 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
     // Header
     e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
       e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:14,color:enabled?'#F9FAFB':'#6B7280',letterSpacing:1.5}},`AXIS ${axis}`),
-      !active ? e('span',{style:{fontSize:8.5,color:override?'#F59E0B':'#4B5563',cursor:'pointer',
-        padding:'2px 6px',borderRadius:3,border:`1px solid ${override?'#F59E0B44':'#27303f'}`,
-        backgroundColor:override?'#F59E0B11':'transparent',userSelect:'none'},
-        onClick:()=>setOverride(!override),title:'Override: enable commands on unconfigured axis'},
-        override?'OVERRIDE':'INACTIVE')
-      : e('span',{style:{display:'flex',alignItems:'center',fontSize:11.5,fontWeight:600,color:colors.text}},
-        e(StatusDot,{axisState:axState.axisState}), axState.axisState)),
+      e('span',{style:{display:'flex',alignItems:'center',gap:6}},
+        !active && override
+          ? e('span',{style:{fontSize:8.5,color:'#F59E0B',cursor:'pointer',
+              padding:'2px 6px',borderRadius:3,border:'1px solid #F59E0B44',
+              backgroundColor:'#F59E0B11',userSelect:'none'},
+              onClick:()=>setOverride(false),title:'Click to collapse this axis'},
+              'OVERRIDE')
+          : null,
+        e('span',{style:{display:'flex',alignItems:'center',fontSize:11.5,fontWeight:600,color:colors.text}},
+          e(StatusDot,{axisState:axState.axisState}), axState.axisState))),
 
-    // Status line for inactive+override showing axis state
-    !active && override ? e('div',{style:{padding:'0 12px 0',display:'flex',justifyContent:'flex-end'}},
-      e('span',{style:{display:'flex',alignItems:'center',fontSize:10.5,fontWeight:600,color:colors.text}},
-        e(StatusDot,{axisState:axState.axisState}), axState.axisState)) : null,
-
-    // Telemetry
+    // Telemetry — type badge header + two-column layout (text left, visual right)
     e('div',{style:{padding:'8px 12px 4px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim}},
-      e('div',{style:{display:'grid',gridTemplateColumns:'80px 1fr',rowGap:2}},
-        e('span',{style:{color:'#6B7280'}},'Position'),
-        e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:15,fontVariantNumeric:'tabular-nums'}},
-          (axState.position||0).toFixed(1)),
-        e('span',{style:{color:'#6B7280'}},'Velocity'),
-        e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
-          (axState.velocity||0).toFixed(1)),
-        e('span',{style:{color:'#6B7280'}},'Demand'),
-        e('span',{style:{color:'#93C5FD',fontVariantNumeric:'tabular-nums'}},
-          (axState.demand||0).toFixed(1))),
+
+      // Type badge row — spans full width, consistent for all mechanism types
+      e('div',{style:{display:'flex',gap:5,alignItems:'center',marginBottom:6,
+          paddingBottom:5,borderBottom:'1px solid #1F2937'}},
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
+              backgroundColor:'#2D1B69',color:'#A78BFA',fontWeight:700,letterSpacing:.5}},
+              'ROTATING')
+          : e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
+              backgroundColor:'#1C3240',color:'#67E8F9',fontWeight:700,letterSpacing:.5}},
+              'LINEAR'),
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},'alg:')
+          : null,
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#C4B5FD'}},
+              (axState.algorithm||'\u2014').toLowerCase())
+          : null,
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#374151'}},' \u00b7 ')
+          : null,
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},
+              (axState.countsPerRevolution||0).toFixed(0)+' cnt/rev')
+          : null),
+
+      // Two-column: telemetry grid left, visual right
+      e('div',{style:{display:'flex',gap:8,alignItems:'flex-start'}},
+
+        // Left column — position/velocity/demand
+        e('div',{style:{flex:1,minWidth:0}},
+          e('div',{style:{display:'grid',gridTemplateColumns:'76px 1fr',rowGap:2}},
+            e('span',{style:{color:'#6B7280'}},'Position'),
+            e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:15,
+                fontVariantNumeric:'tabular-nums'}},
+              (axState.position||0).toFixed(1)),
+            e('span',{style:{color:'#6B7280'}},'Velocity'),
+            e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',
+                fontVariantNumeric:'tabular-nums'}},
+              (axState.velocity||0).toFixed(1)),
+            // Demand: visible only after positionAxis/offsetAxis, hidden for all other commands
+            showDemand ? e('span',{style:{color:'#6B7280'}},'Demand') : null,
+            showDemand ? e('span',{style:{color:'#93C5FD',fontVariantNumeric:'tabular-nums'}},
+              (axState.demand||0).toFixed(1)) : null)),
+
+        // Right column — visual
+        e('div',{style:{flexShrink:0}},
+          e(AxisVisual,{axState, colors, showDemand}))),
 
       e('div',{style:{marginTop:6,display:'flex',flexWrap:'wrap'}},
         e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
@@ -265,13 +323,14 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
         e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444'}),
         e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444'})),
 
-      // CmdState
+      // CmdState — single line
       e('div',{style:{marginTop:6,padding:'4px 7px',backgroundColor:'#1F2937',borderRadius:4,
-        fontSize:10.5,color:'#9CA3AF',display:'grid',gridTemplateColumns:'1fr 1fr',gap:1}},
-        e('span',null,'Thread: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
-        e('span',null,'Moving: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Yes':'No')),
-        e('span',{style:{gridColumn:'1/-1'}},'Cmd: ',
-          e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
+        fontSize:10.5,color:'#9CA3AF',display:'flex',gap:10,alignItems:'center'}},
+        e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
+        e('span',{style:{color:'#374151'}},'│'),
+        e('span',null,'Mov: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Y':'N')),
+        e('span',{style:{color:'#374151'}},'│'),
+        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
 
       // Error bar (shows when either source has non-empty msg)
       e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null})),
@@ -319,6 +378,104 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
           e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig}))
       ) : null) : null);
 }
+
+function AxisVisual({axState, colors, showDemand}) {
+  if (!axState) return null;
+  const isRotating = axState.mechanismType === 'Rotating' && axState.countsPerRevolution > 0;
+
+  if (isRotating) {
+    // ── Rotating dial ── 108×108
+    const angDeg = axState.angularPosition || 0;
+    const demandDeg = axState.countsPerRevolution > 0
+      ? ((axState.demand / axState.countsPerRevolution * 360) % 360 + 360) % 360
+      : null;
+    const toRad = d => (d - 90) * Math.PI / 180;
+    const cx = 54, cy = 54, r = 44, rNeedle = 36, rDemand = 40;
+    const nx = cx + rNeedle * Math.cos(toRad(angDeg));
+    const ny = cy + rNeedle * Math.sin(toRad(angDeg));
+    const dx = demandDeg != null ? cx + rDemand * Math.cos(toRad(demandDeg)) : null;
+    const dy = demandDeg != null ? cy + rDemand * Math.sin(toRad(demandDeg)) : null;
+    const ticks = [0, 90, 180, 270];
+    const tickLabels = ['0', '90', '180', '270'];
+
+    return e('svg', {width:108, height:108, style:{flexShrink:0}},
+      e('circle', {cx, cy, r, fill:'none', stroke:'#1F2937', strokeWidth:2}),
+      e('circle', {cx, cy, r:r-2, fill:'#0D1117'}),
+      ...ticks.map((t, i) => {
+        const ra = toRad(t);
+        const x1 = cx + (r-2) * Math.cos(ra), y1 = cy + (r-2) * Math.sin(ra);
+        const x2 = cx + (r-8) * Math.cos(ra), y2 = cy + (r-8) * Math.sin(ra);
+        const lx = cx + (r-16) * Math.cos(ra), ly = cy + (r-16) * Math.sin(ra);
+        return [
+          e('line', {key:'tk'+i, x1, y1, x2, y2, stroke:'#374151', strokeWidth:1.5}),
+          e('text', {key:'tl'+i, x:lx, y:ly, textAnchor:'middle', dominantBaseline:'middle',
+            fontSize:9, fill:'#4B5563', fontFamily:'var(--mono)'}, tickLabels[i])
+        ];
+      }).flat(),
+      dx != null && showDemand ? e('line', {x1:cx, y1:cy, x2:dx, y2:dy,
+        stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.5}) : null,
+      e('line', {x1:cx, y1:cy, x2:nx, y2:ny,
+        stroke:colors.dot, strokeWidth:2, strokeLinecap:'round'}),
+      e('circle', {cx, cy, r:3, fill:colors.dot}),
+      // Angle readout — background rect drawn after needle so text always sits on top
+      e('rect', {x:cx-18, y:cy+10, width:36, height:14, rx:3, fill:'#0D1117', opacity:.85}),
+      e('text', {x:cx, y:cy+20, textAnchor:'middle', dominantBaseline:'middle', fontSize:11,
+        fill:'#A78BFA', fontFamily:'var(--mono)', fontWeight:700},
+        angDeg.toFixed(1)+'\u00b0')
+    );
+  } else {
+    // ── Linear track ── horizontal, 108px tall to match dial height
+    // Layout (left→right within 108×108 box):
+    //   Left edge: position label + arrow pointing right to indicator
+    //   Center: vertical track line
+    //   Right of track: limit labels at top (hi) and bottom (lo) with tick marks
+    const pos    = axState.position || 0;
+    const lo     = axState.lowerLimit != null ? axState.lowerLimit : 0;
+    const hi     = axState.upperLimit != null ? axState.upperLimit : 1000;
+    const demand = axState.demand || 0;
+    const W = 108, H = 108;
+    const trackX = 62;   // x position of the vertical track line
+    const padT = 14, padB = 14;
+    const trackH = H - padT - padB;
+    const clamp  = v => Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)));
+    // Invert: bottom = lo, top = hi
+    const posY   = padT + (1 - clamp(pos))    * trackH;
+    const demY   = padT + (1 - clamp(demand)) * trackH;
+    const inPos  = axState.inPosition;
+    const indColor = inPos ? '#10B981' : colors.dot;
+
+    return e('svg', {width:W, height:H, style:{flexShrink:0}},
+      // Vertical track
+      e('line', {x1:trackX, y1:padT, x2:trackX, y2:H-padB,
+        stroke:'#374151', strokeWidth:2, strokeLinecap:'round'}),
+      // Hi limit tick + label (top)
+      e('line', {x1:trackX-4, y1:padT, x2:trackX+4, y2:padT,
+        stroke:'#4B5563', strokeWidth:1.5}),
+      e('text', {x:trackX+8, y:padT+1, dominantBaseline:'middle', fontSize:11,
+        fill:'#6B7280', fontFamily:'var(--mono)'}, hi.toFixed(0)),
+      // Lo limit tick + label (bottom)
+      e('line', {x1:trackX-4, y1:H-padB, x2:trackX+4, y2:H-padB,
+        stroke:'#4B5563', strokeWidth:1.5}),
+      e('text', {x:trackX+8, y:H-padB, dominantBaseline:'middle', fontSize:11,
+        fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
+      // Demand marker — same length as position arrow, only when demand is meaningful
+      showDemand ? e('line', {x1:30, y1:demY, x2:trackX, y2:demY,
+        stroke:'#93C5FD', strokeWidth:1, strokeDasharray:'2 2', opacity:.5}) : null,
+      // Position arrow — shorter shaft starting at x=30
+      e('line', {x1:30, y1:posY, x2:trackX-6, y2:posY,
+        stroke:indColor, strokeWidth:2}),
+      // Arrowhead pointing right at track
+      e('polygon', {
+        points:`${trackX-6},${posY-4} ${trackX},${posY} ${trackX-6},${posY+4}`,
+        fill:indColor}),
+      // Position label — left edge, larger font
+      e('text', {x:6, y:posY-5, textAnchor:'start', fontSize:11,
+        fill:'#F9FAFB', fontFamily:'var(--mono)', fontWeight:700},
+        pos.toFixed(0))
+    );
+  }
+}
+
 
 function ThreadStatusBar({threadStatus}) {
   if (!threadStatus) return null;

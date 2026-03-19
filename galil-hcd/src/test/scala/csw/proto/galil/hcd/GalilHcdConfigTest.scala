@@ -62,6 +62,7 @@ class GalilHcdConfigTest extends AnyFunSuite {
     assert(axisB.algorithm == "shortest")
     assert(axisB.inPositionThreshold == 1.0)
     assert(axisB.indexOffset == 0.0)
+    assert(axisB.countsPerRevolution == 3600.0)
   }
   
   test("should only contain configurations for active axes") {
@@ -138,14 +139,14 @@ class GalilHcdConfigTest extends AnyFunSuite {
     }
   }
   
-  test("algorithms should be forward or shortest") {
+  test("algorithms should be forward, reverse, or shortest") {
     val config = ConfigFactory.load("GalilHcdConfig.conf")
     val hcdConfig = GalilHcdConfig.fromConfig(config)
     
     // Verify all configured axes have valid algorithms
     hcdConfig.axes.values.foreach { axisConfig =>
       assert(
-        axisConfig.algorithm == "forward" || axisConfig.algorithm == "shortest",
+        axisConfig.algorithm == "forward" || axisConfig.algorithm == "reverse" || axisConfig.algorithm == "shortest",
         s"Invalid algorithm: ${axisConfig.algorithm}"
       )
     }

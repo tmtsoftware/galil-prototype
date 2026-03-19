@@ -166,8 +166,8 @@ object GalilSimulatorActor {
   /** Threshold below which we snap to target (counts) */
   private val SnapThreshold = 0.5
 
-  /** Axes modeled by the simulator (4-axis DMC-500x0) */
-  private val SimulatedAxes = Seq('A', 'B', 'C', 'D')
+  /** Axes modeled by the simulator — always 8 regardless of how many are active in HCD config */
+  private val SimulatedAxes = Seq('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H')
 
   // ========================================
   // Entry point
@@ -493,18 +493,27 @@ object GalilSimulatorActor {
         scheduleThreadComplete(timer, thread, 50.millis)
 
       case s if s.startsWith("Select") =>
-        // #SelectX: same as move — position to demand
+        // #SelectX: positions a rotating mechanism (e.g. filter wheel) to one of 8 slots.
+        // Mirrors the embedded DMC logic: PAX = dmd[idx] * (cpr[idx] / 8)
+        //   dmd[idx]  — wheel position number (0-7), set by the HCD selectWheel command
+        //   cpr[idx]  — counts per revolution (integer, set by #SetupX / writeMotionConfig)
+        //   /8        — 8 equally-spaced slots at 45° each
+        // If cpr is 0 or unset the target falls back to dmd directly (linear/unconfigured axis).
         val axis = s.last
         val idx = axis - 'A'
-        val demand = newState.embeddedVars.getOrElse(s"dmd[$idx]", 0.0)
-        val speed = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
+        val wheelPos = newState.embeddedVars.getOrElse(s"dmd[$idx]", 0.0)
+        val cpr      = newState.embeddedVars.getOrElse(s"cpr[$idx]", 0.0)
+        val speed    = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
+        val demand   = if cpr > 0.0 then wheelPos * (cpr / 8.0) else wheelPos
+
+        println(s"[SIM] #Select$axis: wheel=$wheelPos, cpr=$cpr, target=$demand")
 
         val ax = getAxis(newState, axis).copy(
-          demand = demand,
+          demand   = demand,
           maxSpeed = speed,
-          moving = true,
-          jogging = false,
-          motorOn = true,
+          moving   = true,
+          jogging  = false,
+          motorOn  = true,
           stopCode = 0
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))

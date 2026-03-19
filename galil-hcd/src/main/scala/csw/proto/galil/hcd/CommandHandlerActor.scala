@@ -652,6 +652,58 @@ object CommandHandlerActor {
   }
 
   // ========================================
+  // Approach algorithm for rotating axes
+  // ========================================
+
+  /**
+   * Adjust a raw count target using the configured approach algorithm for a rotating axis.
+   *
+   * For rotating mechanisms the same angular position can be reached from either direction.
+   * Given a raw target (absolute encoder counts) and the axis's current position, this method
+   * returns the count value that the motor should actually move to, according to:
+   *   Forward  — always approach from below (increasing counts)
+   *   Reverse  — always approach from above (decreasing counts)
+   *   Shortest — take the shorter of the two arcs
+   *
+   * The result may differ from the raw target by a whole number of revolutions
+   * (countsPerRev = 360 * cpd). The IS demand and the embedded dmd[] variable are set
+   * to the adjusted value so that the motion profile and inPosition calculations are correct.
+   *
+   * @param rawTarget      Raw count demand supplied by the Assembly
+   * @param currentPos     Current encoder position (from IS AxisState.position)
+   * @param countsPerRev   Counts per revolution (AxisState.countsPerRevolution) — integer value
+   * @param algorithm      Configured approach algorithm
+   * @return               Adjusted absolute count target
+   */
+  private def applyApproachAlgorithm(
+    rawTarget: Double,
+    currentPos: Double,
+    countsPerRev: Double,
+    algorithm: RotatingAlgorithm
+  ): Double =
+    // countsPerRev is the integer count for one full revolution, passed directly from config.
+    // Round to nearest integer defensively in case of any floating-point residual.
+    val cpr = Math.round(countsPerRev).toDouble
+    // Phase of current position within one revolution [0, countsPerRev)
+    val curMod = ((currentPos % cpr) + cpr) % cpr
+    // Phase of raw target within one revolution [0, cpr)
+    val tgtMod = ((rawTarget % cpr) + cpr) % cpr
+    // Base count aligning candidate to the same revolution as current position
+    val base = currentPos - curMod
+    val candidate = base + tgtMod
+    val result = algorithm match
+      case RotatingAlgorithm.Forward =>
+        if candidate >= currentPos then candidate else candidate + cpr
+      case RotatingAlgorithm.Reverse =>
+        if candidate <= currentPos then candidate else candidate - cpr
+      case RotatingAlgorithm.Shortest =>
+        val fwd = if candidate >= currentPos then candidate else candidate + cpr
+        val rev = if candidate <= currentPos then candidate else candidate - cpr
+        if (fwd - currentPos) <= (currentPos - rev) then fwd else rev
+    // Round final result to nearest integer count
+    Math.round(result).toDouble
+
+  // ========================================
   // Execute embedded program with thread-start confirmation
   // ========================================
 
@@ -827,10 +879,10 @@ object CommandHandlerActor {
   ): Unit = {
     val axisChoice = setup(PositionAxisCommand.axisKey).head
     val axis = Axis.fromChar(axisChoice.name.head)
-    val target = setup(PositionAxisCommand.targetKey).head.toDouble
+    val rawTarget = setup(PositionAxisCommand.targetKey).head.toDouble
     val idx = axis.index
 
-    log.info(s"positionAxis $axis: target=$target")
+    log.info(s"positionAxis $axis: rawTarget=$rawTarget")
 
     // Execution-time state machine guard (SDD Figure 4-2).
     // Re-validates here because onValidate() has a race window: the IS update
@@ -851,6 +903,25 @@ object CommandHandlerActor {
     // the new command: halt active thread (HX + ST), signal watcher, then proceed.
     if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
       checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+
+    // For rotating axes with countsPerRevolution configured, apply the approach algorithm
+    // to resolve the algorithm-adjusted count target. This may add or subtract a whole
+    // revolution to ensure the motor approaches from the correct direction.
+    val target = maybeAxisState match {
+      case Some(axisState) if axisState.mechanismType == MechanismType.Rotating =>
+        axisState.countsPerRevolution match {
+          case Some(cpd) if cpd > 0.0 =>
+            val alg = axisState.algorithm.getOrElse(RotatingAlgorithm.Shortest)
+            val adjusted = applyApproachAlgorithm(rawTarget, axisState.position, cpd, alg)
+            if adjusted != rawTarget then
+              log.info(s"positionAxis $axis: approach algorithm $alg adjusted target $rawTarget → $adjusted")
+            adjusted
+          case _ =>
+            log.debug(s"positionAxis $axis: rotating axis but countsPerRevolution not set, using raw target")
+            rawTarget
+        }
+      case _ => rawTarget
+    }
 
     // Check if axis is already at the requested position
     maybeAxisState match {
@@ -1132,8 +1203,27 @@ object CommandHandlerActor {
         return
     }
 
-    val target = currentPosition + distance
-    log.info(s"offsetAxis $axis: distance=$distance, current=$currentPosition, target=$target")
+    // Compute the raw target from offset + current position
+    val rawTarget = currentPosition + distance
+    log.info(s"offsetAxis $axis: distance=$distance, current=$currentPosition, rawTarget=$rawTarget")
+
+    // For rotating axes with countsPerRevolution configured, apply the approach algorithm.
+    // offsetAxis computes an absolute target from the offset and then adjusts for direction.
+    val target = currentState match {
+      case Some(axisState) if axisState.mechanismType == MechanismType.Rotating =>
+        axisState.countsPerRevolution match {
+          case Some(cpd) if cpd > 0.0 =>
+            val alg = axisState.algorithm.getOrElse(RotatingAlgorithm.Shortest)
+            val adjusted = applyApproachAlgorithm(rawTarget, currentPosition, cpd, alg)
+            if adjusted != rawTarget then
+              log.info(s"offsetAxis $axis: approach algorithm $alg adjusted target $rawTarget → $adjusted")
+            adjusted
+          case _ =>
+            log.debug(s"offsetAxis $axis: rotating axis but countsPerRevolution not set, using raw target")
+            rawTarget
+        }
+      case _ => rawTarget
+    }
 
     // Zero-distance offset — already at target, complete immediately
     if Math.abs(distance) <= currentState.get.inPositionThreshold then

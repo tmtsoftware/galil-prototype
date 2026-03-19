@@ -370,15 +370,19 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           "upperLimit"  -> axisConfig.upperLimit,
           "lowerLimit"  -> axisConfig.lowerLimit,
           // Seed IS with motion parameters from config.
-          // On hardware these are overwritten by readMotionConfig() after
-          // #Init/#SetupX run — giving real controller EEPROM values.
-          // In simulator mode readMotionConfig() gets 0.0 from uninitialized
-          // embedded arrays, so these config-file values are the effective values.
+          // These are authoritative — writeMotionConfig() pushes them to the
+          // controller's embedded variables after #SetupX, making the config
+          // file the single source of truth. Assembly overrides via configAxis.
           "maxSpeed"    -> axisConfig.maxSpeed,
           "acceleration"-> axisConfig.acceleration,
           "deceleration"-> axisConfig.deceleration,
           "motionDelay" -> axisConfig.motionDelay,
-          "indexSpeed"  -> axisConfig.indexSpeed
+          "indexSpeed"  -> axisConfig.indexSpeed,
+          // countsPerRevolution is config-file-authoritative for rotating axes.
+          // writeMotionConfig() pushes this to cpr[] on the controller,
+          // supplanting whatever #SetupX initialised. If 0.0 on a rotating
+          // axis, writeMotionConfig() will log a warning and skip it.
+          "countsPerRevolution" -> axisConfig.countsPerRevolution
         ),
         ctx.system.ignoreRef
       )
@@ -402,7 +406,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // has no real embedded program to verify.
     //
     // Controller init (XQ #Init), axis setup (XQ #SetupX), and motion config
-    // readback (MG speed[], accel[], etc.) run in both modes — the simulator
+    // write (speed[], accel[], cpr[], etc.) run in both modes — the simulator
     // handles these commands just like real hardware.
     val initFuture = for {
       _ <- if (!hcdConfig.simulate) {
@@ -419,10 +423,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       }
       _ <- initController()
       _ <- setupAxes()
-      // Read motion config AFTER setupAxes — #SetupX programs set SP, AC, DC
-      // which override the EEPROM defaults that #Init read into speed[], accel[], etc.
-      // Reading now captures the post-setup values (e.g. SPA=10000 from #SetupA).
-      _ <- readMotionConfig()
+      // Write motion config AFTER setupAxes — #SetupX establishes motor type
+      // and hardware config; we then overwrite the motion parameters with the
+      // authoritative values from the HCD config file. This applies to both
+      // hardware (supplanting EEPROM defaults) and simulator (initialising
+      // what would otherwise be unset embedded variables).
+      _ <- writeMotionConfig()
       _ = log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
     } yield ()
     
@@ -732,7 +738,30 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *   - Report current configuration to Assemblies (future ICD extension)
    *   - Operate correctly in stand-alone testing before an Assembly calls configAxis
    */
-  private def readMotionConfig(): Future[Unit] = {
+  /**
+   * Write motion configuration from HCD config file to the controller's embedded variables.
+   *
+   * Called after #SetupX runs. The HCD config file is the authoritative source for all
+   * motion parameters — this write supplants whatever values the embedded #SetupX programs
+   * initialised, making the config file the single source of truth when under HCD control.
+   *
+   * Three-tier parameter authority:
+   *   Tier 1 (embedded EEPROM defaults) — used for standalone Galil Tools testing, no HCD
+   *   Tier 2 (HCD config file)          — written here; effective for HCD standalone or with Assembly
+   *   Tier 3 (Assembly configAxis)      — runtime override for the current session
+   *
+   * Embedded variables written per axis:
+   *   speed[idx]  ← maxSpeed       (counts/sec)
+   *   accel[idx]  ← acceleration   (counts/sec²)
+   *   decel[idx]  ← deceleration   (counts/sec²)
+   *   hspd[idx]   ← indexSpeed     (counts/sec)
+   *   hoff[idx]   ← indexOffset    (encoder counts)
+   *   mdelay[idx] ← motionDelay    (ms)
+   *   cpr[idx]    ← countsPerRevolution (rotating axes only; skipped with warning if 0.0)
+   *
+   * IS is already seeded from config in Phase 3c; no IS updates are needed here.
+   */
+  private def writeMotionConfig(): Future[Unit] = {
     import scala.concurrent.Await
     import scala.concurrent.duration._
     import org.apache.pekko.actor.typed.scaladsl.AskPattern._
@@ -740,7 +769,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
-    log.info("Reading motion configuration from controller")
+    log.info("Writing motion configuration from config file to controller")
 
     val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
     val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
@@ -749,56 +778,50 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val axis = Axis.fromChar(axisName.head)
       val idx = axis.index
 
-      // Query all 6 embedded motion variables for this axis
-      val varNames = Seq(
-        ("speed", "maxSpeed"),
-        ("accel", "acceleration"),
-        ("decel", "deceleration"),
-        ("hspd", "indexSpeed"),
-        ("hoff", "indexOffset"),
-        ("mdelay", "motionDelay")
-      )
+      hcdConfig.axes.get(axisName) match {
+        case None =>
+          log.warn(s"Axis $axisName active but no config entry found — skipping motion config write")
 
-      val stateUpdates = scala.collection.mutable.Map[String, Any]()
-
-      varNames.foreach { case (embeddedName, isFieldName) =>
-        try {
-          val queryCmd = s"MG $embeddedName[$idx]"
-          val future = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
-            ref => GalilCommandMessage.SendCommand(queryCmd, ref)
+        case Some(axisConfig) =>
+          // Build compound command for all motion parameters
+          val commands = scala.collection.mutable.ListBuffer[String](
+            s"speed[$idx]=${axisConfig.maxSpeed}",
+            s"accel[$idx]=${axisConfig.acceleration}",
+            s"decel[$idx]=${axisConfig.deceleration}",
+            s"hspd[$idx]=${axisConfig.indexSpeed}",
+            s"hoff[$idx]=${axisConfig.indexOffset}",
+            s"mdelay[$idx]=${axisConfig.motionDelay}"
           )
-          val result = Await.result(future, 2.seconds)
-          result.error match {
-            case Some(err) =>
-              log.warn(s"Failed to read $embeddedName[$idx]: $err")
-            case None =>
-              // Parse the numeric response
-              val valueStr = result.response.trim
-              try {
-                val value = valueStr.toDouble
-                // Skip zero values — in simulator mode, uninitialized embedded
-                // array variables return 0.0. Storing zero would corrupt the
-                // config-file defaults seeded into IS during Phase 3c.
-                // On real hardware all motion params are non-zero.
-                if value != 0.0 then
-                  stateUpdates(isFieldName) = value
-                else
-                  log.debug(s"Skipping $embeddedName[$idx]=0.0 (uninitialized — simulator?)")
-              } catch {
-                case _: NumberFormatException =>
-                  log.warn(s"Non-numeric response for $embeddedName[$idx]: '$valueStr'")
-              }
-          }
-        } catch {
-          case ex: Exception =>
-            log.warn(s"Exception reading $embeddedName[$idx]: ${ex.getMessage}")
-        }
-      }
 
-      if (stateUpdates.nonEmpty) {
-        internalStateActor ! InternalStateActor.UpdateAxisState(
-          axis, stateUpdates.toMap, ctx.system.ignoreRef)
-        log.info(s"Axis $axisName motion config: ${stateUpdates.map { case (k, v) => s"$k=$v" }.mkString(", ")}")
+          // cpr is rotating-axis-only; warn if missing for a rotating axis
+          if (axisConfig.mechanismType == "rotating") {
+            if (axisConfig.countsPerRevolution > 0.0) {
+              commands += s"cpr[$idx]=${axisConfig.countsPerRevolution}"
+            } else {
+              log.warn(s"Axis $axisName is rotating but countsPerRevolution=0.0 in config — cpr[] not written")
+            }
+          }
+
+          val cmdString = commands.mkString(";")
+          log.debug(s"Axis $axisName motion config write: $cmdString")
+
+          try {
+            val future = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+              ref => GalilCommandMessage.SendCommand(cmdString, ref)
+            )
+            val result = Await.result(future, 2.seconds)
+            result.error match {
+              case Some(err) =>
+                log.error(s"Axis $axisName motion config write failed: $err")
+              case None =>
+                log.info(s"Axis $axisName motion config written: " +
+                  s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}, " +
+                  s"decel=${axisConfig.deceleration}, cpr=${axisConfig.countsPerRevolution}")
+            }
+          } catch {
+            case ex: Exception =>
+              log.error(s"Axis $axisName motion config write exception: ${ex.getMessage}")
+          }
       }
     }
 
