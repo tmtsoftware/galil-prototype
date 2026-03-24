@@ -537,6 +537,18 @@ object GalilMotionKeys {
 
     }
 
+    /** Positions a rotating mechanism (e.g., filter wheel) to an angular position. */
+    object PositionWheelCommand {
+      val commandName: CommandName = CommandName("positionWheel")
+
+      /** The axis associated with the rotating mechanism. */
+      val axisKey: GChoiceKey = ChoiceKey.make("axis", "A", "B", "C", "D", "E", "F", "G", "H")
+
+      /** The desired wheel angular position. */
+      val positionKey: Key[Float] = FloatKey.make("position")
+
+    }
+
     /** Sets the specified axis into tracking mode with continuous target updates. */
     object TrackAxisCommand {
       val commandName: CommandName = CommandName("trackAxis")

@@ -1149,6 +1149,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           setup(SelectWheelCommand.positionKey)
           setup(SelectWheelCommand.axisKey).head
           
+        case "positionWheel" =>
+          setup(PositionWheelCommand.axisKey).head
+          setup(PositionWheelCommand.positionKey)
+          setup(PositionWheelCommand.axisKey).head
+          
         case "trackAxis" =>
           setup(TrackAxisCommand.axisKey).head
           setup(TrackAxisCommand.target1Key)

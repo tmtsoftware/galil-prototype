@@ -64,13 +64,15 @@ enum AxisStateEnum:
       case (Idle,  "homeAxis") => None
       case (Error, "homeAxis") => None
 
-      // positionAxis, offsetAxis, selectWheel: from Idle, or Moving via interruption
-      case (Idle,   "positionAxis") => None
-      case (Moving, "positionAxis") => None  // CommandHandler will interrupt
-      case (Idle,   "offsetAxis")   => None
-      case (Moving, "offsetAxis")   => None  // CommandHandler will interrupt
-      case (Idle,   "selectWheel")  => None
-      case (Moving, "selectWheel")  => None  // CommandHandler will interrupt
+      // positionAxis, offsetAxis, selectWheel, positionWheel: from Idle, or Moving via interruption
+      case (Idle,   "positionAxis")   => None
+      case (Moving, "positionAxis")   => None  // CommandHandler will interrupt
+      case (Idle,   "offsetAxis")     => None
+      case (Moving, "offsetAxis")     => None  // CommandHandler will interrupt
+      case (Idle,   "selectWheel")    => None
+      case (Moving, "selectWheel")    => None  // CommandHandler will interrupt
+      case (Idle,   "positionWheel")  => None
+      case (Moving, "positionWheel")  => None  // CommandHandler will interrupt
 
       // trackAxis: from Idle or Tracking (re-issue updates velocity/target)
       case (Idle,     "trackAxis") => None

@@ -169,10 +169,12 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   const [posTarget,setPosTarget] = useState('');
   const [offTarget,setOffTarget] = useState('');
   const [wheelPos,setWheelPos] = useState('');
+  const [angPos,setAngPos] = useState('');
   const [trackPos,setTrackPos] = useState('');
   const [trackVel,setTrackVel] = useState('20');
   const [override,setOverride] = useState(false);
   const [showConfig,setShowConfig] = useState(false);
+  const [showMechConfig,setShowMechConfig] = useState(false);
   // Config fields — initialized from state on first open
   const [cfgVel,setCfgVel] = useState('');
   const [cfgAcc,setCfgAcc] = useState('');
@@ -182,6 +184,10 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   const [cfgThresh,setCfgThresh] = useState('');
   const [cfgLoaded,setCfgLoaded] = useState(false);
   const [showDemand,setShowDemand] = useState(false);
+  // Mechanism config fields
+  const [cfgAlgorithm,setCfgAlgorithm] = useState('shortest');
+  const [cfgUpperLimit,setCfgUpperLimit] = useState('');
+  const [cfgLowerLimit,setCfgLowerLimit] = useState('');
 
   // Populate config fields from current state when panel first opens
   useEffect(() => {
@@ -192,6 +198,9 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
       setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
       setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
       setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+      if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+      setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+      setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
       setCfgLoaded(true);
     }
     if (!showConfig) setCfgLoaded(false);
@@ -207,7 +216,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   // positionAxis and offsetAxis show demand; all other commands hide it.
   const cmd = (name, extra={}) => {
     if (!enabled) return;
-    if (name === 'positionAxis' || name === 'offsetAxis') setShowDemand(true);
+    if (name === 'positionAxis' || name === 'offsetAxis' || name === 'positionWheel') setShowDemand(true);
     else setShowDemand(false);
     onCommand(name, {axis, ...extra});
   };
@@ -223,6 +232,17 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
     if (Object.keys(params).length > 0) cmd('configAxis', params);
   };
 
+  const sendRotatingConfig = () => {
+    cmd('configRotatingAxis', {algorithm: cfgAlgorithm});
+  };
+
+  const sendLinearConfig = () => {
+    const params = {};
+    if (cfgUpperLimit) params.upperLimit = cfgUpperLimit;
+    if (cfgLowerLimit) params.lowerLimit = cfgLowerLimit;
+    if (Object.keys(params).length > 0) cmd('configLinearAxis', params);
+  };
+
   // Reload fields from live state
   const reloadConfig = () => {
     if (!axState) return;
@@ -232,6 +252,9 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
     setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
     setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
     setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
   };
 
   // Collapsed view for inactive axes — just a slim header strip, click INACTIVE to expand
@@ -347,6 +370,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
         onGo:()=>cmd('offsetAxis',{target:offTarget})}),
       e(CmdRow,{label:'Whl',value:wheelPos,onChange:setWheelPos,ph:'pos #',
         onGo:()=>cmd('selectWheel',{target:wheelPos}),goColor:'#8B5CF6'}),
+      e(CmdRow,{label:'Ang',value:angPos,onChange:setAngPos,ph:'degrees',
+        onGo:()=>cmd('positionWheel',{target:angPos}),goColor:'#8B5CF6'}),
       e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:4}},
         e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},'Trk'),
         e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
@@ -357,6 +382,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
       // Config panel (collapsible)
       showConfig ? e('div',{style:{marginTop:8,padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
         border:'1px solid #1F2937'}},
+
+        // ── MOTION CONFIG ──
         e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
           fontFamily:'var(--mono)'}},'MOTION CONFIG'),
         e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
@@ -375,7 +402,39 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
           e(In,{value:cfgThresh,onChange:setCfgThresh,ph:'counts'})),
         e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
           e(Btn,{label:'Reload',color:'#4B5563',small:true,onClick:reloadConfig}),
-          e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig}))
+          e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig})),
+
+        // ── ROTATING MECHANISM ──
+        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+          fontFamily:'var(--mono)'}},'ROTATING MECHANISM'),
+        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+          fontFamily:'var(--mono)',fontSize:10.5}},
+          e('span',{style:{color:'#9CA3AF'}},'Approach'),
+          e('select',{
+            value:cfgAlgorithm,
+            onChange:e=>setCfgAlgorithm(e.target.value),
+            style:{backgroundColor:'#1F2937',color:'#E5E7EB',border:'1px solid #374151',
+              borderRadius:3,padding:'2px 4px',fontSize:10.5,fontFamily:'var(--mono)',width:'100%'}},
+            e('option',{value:'shortest'},'shortest'),
+            e('option',{value:'forward'},'forward'),
+            e('option',{value:'reverse'},'reverse'))),
+        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+          e(Btn,{label:'Apply Rotating',color:'#8B5CF6',small:true,onClick:sendRotatingConfig})),
+
+        // ── LINEAR MECHANISM ──
+        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+          fontFamily:'var(--mono)'}},'LINEAR MECHANISM'),
+        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+          fontFamily:'var(--mono)',fontSize:10.5}},
+          e('span',{style:{color:'#9CA3AF'}},'Upper Lim'),
+          e(In,{value:cfgUpperLimit,onChange:setCfgUpperLimit,ph:'counts'}),
+          e('span',{style:{color:'#9CA3AF'}},'Lower Lim'),
+          e(In,{value:cfgLowerLimit,onChange:setCfgLowerLimit,ph:'counts'})),
+        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+          e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig}))
+
       ) : null) : null);
 }
 
@@ -509,6 +568,152 @@ function msgColor(msg, severity) {
   if (msg.includes('[GALIL:'))                            return '#C4B5FD'; // controller console lines
   return LEVEL_COLOR[severity] || '#D1D5DB';
 }
+
+// ── IO Panel ──────────────────────────────────────────────────────────────────
+// Full-width collapsed panel showing DI (read-only), DO (clickable), AI (read-only).
+// Bit numbering: 1-based (matching Galil @IN/@OUT/@AN convention).
+// Bits are greyed when the corresponding axis slot is not active on this controller.
+// DO bits are clickable toggles — send setBit address=n, value=1 or 0.
+function IOPanel({state, onCommand}) {
+  const [open, setOpen] = React.useState(false);
+  const activeAxes = state?.activeAxes || [];
+
+  // I/O availability is determined by controller size (number of configured axes).
+  // DMC-500x0 main board: 8 DI, 8 DO, 8 AI — always present.
+  // With a slave I/O expansion module (requires 8-axis controller): adds bits 9-16.
+  // activeAxes.length == 8 indicates a full 8-axis controller with slave module support.
+  const numAxes = activeAxes.length;
+  const isSupported = (bit1) => bit1 <= 8 || numAxes >= 8;
+
+  const dout = state?.digitalOutputs || Array(16).fill(false);
+  const di   = state?.digitalInputs  || Array(16).fill(false);
+  const ai   = state?.analogInputs   || Array(8).fill(0);
+
+  const toggleDO = (bit1, currentVal) => {
+    if (!isSupported(bit1)) return;
+    onCommand('setBit', {address: bit1, value: currentVal ? 0 : 1});
+  };
+
+  const MONO = 'var(--mono)';
+  const sectionLabel = (txt) => e('div', {style:{
+    fontSize:9.5, fontWeight:700, color:'#6B7280', letterSpacing:1,
+    fontFamily:MONO, marginBottom:4
+  }}, txt);
+
+  // Render a single DI or DO bit cell
+  const BitCell = ({bit1, value, clickable}) => {
+    const supported = isSupported(bit1);
+    const active = supported && value;
+    const bgColor = !supported ? '#0D1117'
+                  : active    ? (clickable ? '#10B981' : '#3B82F6')
+                  :              '#1F2937';
+    const textColor = !supported ? '#2D3748' : active ? '#F9FAFB' : '#6B7280';
+    return e('div', {
+      title: supported ? `${clickable?'DO':'DI'} ${bit1}` : `Not supported (axis ${String.fromCharCode(64+bit1)} inactive)`,
+      onClick: clickable ? () => toggleDO(bit1, value) : undefined,
+      style:{
+        width:28, height:28, borderRadius:4, display:'flex', alignItems:'center',
+        justifyContent:'center', flexDirection:'column', gap:1,
+        backgroundColor:bgColor, border:`1px solid ${supported?'#374151':'#1A202C'}`,
+        cursor: clickable && supported ? 'pointer' : 'default',
+        userSelect:'none', transition:'background-color 0.15s'
+      }},
+      e('span',{style:{fontSize:8, color:textColor, fontFamily:MONO}}, bit1),
+      e('span',{style:{fontSize:9, fontWeight:700, color:textColor, fontFamily:MONO}},
+        supported ? (value ? '1' : '0') : '–')
+    );
+  };
+
+  const headerStyle = {
+    display:'flex', justifyContent:'space-between', alignItems:'center',
+    padding:'5px 10px', cursor:'pointer', userSelect:'none',
+    backgroundColor:'#0D1117', borderBottom: open ? '1px solid #1F2937' : 'none'
+  };
+
+  return e('div', {style:{
+    border:'1px solid #1F2937', borderRadius:6, marginBottom:10,
+    flexShrink:0, overflow:'hidden'
+  }},
+    // Header — always visible, click to toggle
+    e('div', {style:headerStyle, onClick:()=>setOpen(!open)},
+      e('span', {style:{fontFamily:MONO, fontWeight:700, fontSize:11, color:'#6B7280', letterSpacing:1}},
+        'I/O'),
+      e('span', {style:{display:'flex', gap:16, alignItems:'center'}},
+        // Mini DI/DO summary indicators when collapsed
+        !open ? e('span', {style:{display:'flex', gap:3}},
+          ...[1,2,3,4,5,6,7,8].map(b =>
+            e('div', {key:b, style:{
+              width:8, height:8, borderRadius:2,
+              backgroundColor: !isSupported(b) ? '#1A202C'
+                              : di[b-1]        ? '#3B82F6'
+                              :                  '#1F2937',
+              border:'1px solid #374151'
+            }})
+          )
+        ) : null,
+        !open ? e('span', {style:{display:'flex', gap:3}},
+          ...[1,2,3,4,5,6,7,8].map(b =>
+            e('div', {key:b, style:{
+              width:8, height:8, borderRadius:2,
+              backgroundColor: !isSupported(b) ? '#1A202C'
+                              : dout[b-1]      ? '#10B981'
+                              :                  '#1F2937',
+              border:'1px solid #374151'
+            }})
+          )
+        ) : null,
+        e('span', {style:{fontSize:9.5, color:open?'#9CA3AF':'#4B5563', fontFamily:MONO}},
+          open ? '▲ hide' : '▼ show')
+      )
+    ),
+
+    // Expanded body
+    open ? e('div', {style:{padding:'10px 12px', backgroundColor:'#111827'}},
+      e('div', {style:{display:'flex', gap:24, flexWrap:'wrap'}},
+
+        // Digital Inputs
+        e('div', null,
+          sectionLabel('DIGITAL INPUTS (read-only)'),
+          e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
+            ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
+              e(BitCell, {key:b, bit1:b, value:di[b-1], clickable:false})
+            )
+          )
+        ),
+
+        // Digital Outputs
+        e('div', null,
+          sectionLabel('DIGITAL OUTPUTS (click to toggle)'),
+          e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
+            ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
+              e(BitCell, {key:b, bit1:b, value:dout[b-1], clickable:true})
+            )
+          )
+        ),
+
+        // Analog Inputs — all 8 always present on main board
+        e('div', null,
+          sectionLabel('ANALOG INPUTS (V)'),
+          e('div', {style:{
+            display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:4
+          }},
+            ...[1,2,3,4,5,6,7,8].map(b =>
+              e('div', {key:b, style:{
+                backgroundColor:'#1F2937', border:'1px solid #374151',
+                borderRadius:4, padding:'3px 6px', textAlign:'center'
+              }},
+                e('div',{style:{fontSize:8,color:'#6B7280',fontFamily:MONO}}, `AN${b}`),
+                e('div',{style:{fontSize:11,fontWeight:600,color:'#93C5FD',fontFamily:MONO}},
+                  ai[b-1] != null ? ai[b-1].toFixed(3) : '–')
+              )
+            )
+          )
+        )
+      )
+    ) : null
+  );
+}
+
 
 function HcdLogPanel({lines}) {
   const endRef = useRef(null);
@@ -705,6 +910,9 @@ function GalilHMI() {
 
     // Position chart (fixed height)
     e('div',{style:{marginBottom:10,flexShrink:0}}, e(PositionChart,{history,activeAxes})),
+
+    // I/O panel — collapsed by default, full width
+    e(IOPanel,{state, onCommand:handleCommand}),
 
     // Unified HCD log: fills all remaining vertical space
     e(HcdLogPanel,{lines:logLines}),

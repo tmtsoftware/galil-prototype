@@ -247,6 +247,11 @@ class HmiServer(
         // ICD uses IntKey "position" (wheel slot number)
         intParam("target").foreach(p => setup = setup.add(SelectWheelCommand.positionKey.set(p)))
 
+      case "positionWheel" =>
+        stringParam("axis").foreach(a => setup = setup.add(PositionWheelCommand.axisKey.set(a)))
+        // ICD uses FloatKey "position" (angular position in degrees)
+        numericParam("target").foreach(p => setup = setup.add(PositionWheelCommand.positionKey.set(p.toFloat)))
+
       case "trackAxis" =>
         stringParam("axis").foreach(a => setup = setup.add(TrackAxisCommand.axisKey.set(a)))
         numericParam("target").foreach(t => setup = setup.add(TrackAxisCommand.target1Key.set(t.toFloat)))
@@ -260,6 +265,19 @@ class HmiServer(
         numericParam("indexOffset").foreach(v => setup = setup.add(ConfigAxisCommand.indexOffsetKey.set(v.toFloat)))
         numericParam("indexSpeed").foreach(v => setup = setup.add(ConfigAxisCommand.indexSpeedKey.set(v.toFloat)))
         numericParam("inPositionThreshold").foreach(v => setup = setup.add(ConfigAxisCommand.inPositionThresholdKey.set(v.toFloat)))
+
+      case "configRotatingAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(ConfigRotatingAxisCommand.axisKey.set(a)))
+        stringParam("algorithm").foreach(a => setup = setup.add(ConfigRotatingAxisCommand.algorithmKey.set(a)))
+
+      case "configLinearAxis" =>
+        stringParam("axis").foreach(a => setup = setup.add(ConfigLinearAxisCommand.axisKey.set(a)))
+        numericParam("upperLimit").foreach(v => setup = setup.add(ConfigLinearAxisCommand.upperLimitKey.set(v.toFloat)))
+        numericParam("lowerLimit").foreach(v => setup = setup.add(ConfigLinearAxisCommand.lowerLimitKey.set(v.toFloat)))
+
+      case "setBit" =>
+        intParam("address").foreach(a => setup = setup.add(SetBitCommand.addressKey.set(a)))
+        intParam("value").foreach(v => setup = setup.add(SetBitCommand.valueKey.set(v)))
 
       case other =>
         throw new IllegalArgumentException(s"Unknown command: $other")

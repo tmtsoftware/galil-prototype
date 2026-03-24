@@ -58,7 +58,7 @@ object CommandHandlerActor {
 
   private val longRunningCommands = Set(
     "positionAxis", "homeAxis", "stopAxis", "offsetAxis",
-    "selectWheel", "trackAxis"
+    "selectWheel", "positionWheel", "trackAxis"
   )
 
   def isImmediate(commandName: String): Boolean = immediateCommands.contains(commandName)
@@ -136,6 +136,9 @@ object CommandHandlerActor {
                     commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "selectWheel" =>
                   handleSelectWheel(setup, runId, controllerInterfaceActor, internalStateActor,
+                    commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
+                case "positionWheel" =>
+                  handlePositionWheel(setup, runId, controllerInterfaceActor, internalStateActor,
                     commandResponseManager, log, askTimeout, askScheduler, ctx, statusMonitor, loggerFactory)
                 case "trackAxis" =>
                   handleTrackAxis(setup, runId, controllerInterfaceActor, internalStateActor,
@@ -1366,6 +1369,158 @@ object CommandHandlerActor {
       askScheduler = askScheduler,
       ctx = ctx,
       loggerFactory = loggerFactory
+    )
+  }
+
+  // ========================================
+  // positionWheel — ICD 2.2.1.10
+  // ========================================
+
+  /**
+   * Positions a rotating mechanism to an absolute angular position (in degrees).
+   *
+   * Requires the axis to be configured as Rotating with countsPerRevolution set.
+   * If countsPerRevolution is not set, the command is rejected with an Error.
+   *
+   * Sequence:
+   *   1. Resolve countsPerRevolution from current axis state (reject if not set)
+   *   2. Convert angular demand (degrees) to raw count target:
+   *        rawTarget = (angleDeg / 360.0) * countsPerRevolution
+   *   3. Apply approach algorithm (same as positionAxis)
+   *   4. Check already-at-position (same shortcut as positionAxis)
+   *   5. Set demand: dmd[idx]=target
+   *   6. Update AxisState.demand and transition to Moving
+   *   7. Update AxisCmdState: set activeCommand=Move, clear axisErrorMsg
+   *   8. Execute embedded program: XQ #MoveX,thread (same as positionAxis)
+   *   9. Spawn CommandWatcher with positionAxis mask (inPosition checked)
+   */
+  private def handlePositionWheel(
+    setup: Setup,
+    runId: Id,
+    ciActor: ActorRef[GalilCommandMessage],
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    crm: CommandResponseManager,
+    log: csw.logging.api.scaladsl.Logger,
+    askTimeout: Timeout,
+    askScheduler: org.apache.pekko.actor.typed.Scheduler,
+    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
+    statusMonitor: ActorRef[StatusMonitor.Command],
+    loggerFactory: LoggerFactory
+  ): Unit = {
+    val axisChoice = setup(PositionWheelCommand.axisKey).head
+    val axis = Axis.fromChar(axisChoice.name.head)
+    val angleDeg = setup(PositionWheelCommand.positionKey).head.toDouble
+    val idx = axis.index
+
+    log.info(s"positionWheel $axis: angleDeg=$angleDeg°")
+
+    // Execution-time state machine guard (SDD Figure 4-2).
+    if guardAxisState("positionWheel", axis, runId, internalStateActor, crm, log, askTimeout, askScheduler).isDefined
+    then return
+
+    // Query current axis state
+    val maybeAxisState = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+        ref => InternalStateActor.GetAxisState(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }.getOrElse(None)
+
+    // Require rotating axis with countsPerRevolution configured
+    val countsPerRev = maybeAxisState.flatMap { s =>
+      if s.mechanismType == MechanismType.Rotating then s.countsPerRevolution.filter(_ > 0.0)
+      else None
+    }
+
+    countsPerRev match {
+      case None =>
+        val reason = maybeAxisState match {
+          case Some(s) if s.mechanismType != MechanismType.Rotating =>
+            s"axis $axis is not configured as a rotating mechanism"
+          case _ =>
+            s"axis $axis countsPerRevolution is not set; configure the axis first"
+        }
+        log.error(s"positionWheel $axis: $reason")
+        crm.updateCommand(Error(runId, s"positionWheel $axis: $reason"))
+        return
+      case _ =>
+    }
+
+    val cpr = countsPerRev.get
+
+    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol
+    if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
+      checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+
+    // Convert angular demand to raw count target
+    val rawTarget = (angleDeg / 360.0) * cpr
+
+    // Apply approach algorithm
+    val alg = maybeAxisState.flatMap(_.algorithm).getOrElse(RotatingAlgorithm.Shortest)
+    val currentPos = maybeAxisState.map(_.position).getOrElse(0.0)
+    val target = applyApproachAlgorithm(rawTarget, currentPos, cpr, alg)
+    if target != rawTarget then
+      log.info(s"positionWheel $axis: approach algorithm $alg adjusted rawTarget $rawTarget → $target")
+
+    // Check if axis is already at the requested position
+    maybeAxisState match {
+      case Some(axisState) =>
+        val distance = Math.abs(axisState.position - target)
+        if distance <= axisState.inPositionThreshold then
+          log.info(s"positionWheel $axis: already at target $target (pos=${axisState.position}, " +
+            s"distance=$distance <= threshold=${axisState.inPositionThreshold})")
+          internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+            Map("demand" -> target),
+            ctx.system.ignoreRef)
+          crm.updateCommand(Completed(runId))
+          return
+      case None =>
+    }
+
+    // Compute timeout from motor config and move distance
+    val moveTimeout = maybeAxisState match {
+      case Some(axisState) =>
+        val distance = Math.abs(axisState.position - target)
+        computeMoveTimeout(distance, axisState, log)
+      case None => defaultMotionTimeout
+    }
+
+    // 1. Set demand in embedded variable
+    sendToController(ciActor, s"dmd[$idx]=$target", log, askTimeout, askScheduler) match {
+      case Failure(ex) =>
+        crm.updateCommand(Error(runId, s"positionWheel $axis: failed to set demand: ${ex.getMessage}"))
+        return
+      case _ =>
+    }
+
+    // 2. Update AxisState: demand (for inPosition calc) + transition to Moving
+    internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
+      ctx.system.ignoreRef)
+
+    // 3. Update AxisCmdState: set active command, clear error
+    internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("activeCommand" -> ActiveCommand.Move, "axisErrorMsg" -> ""),
+      ctx.system.ignoreRef)
+
+    // 4. Execute embedded program with computed timeout (same #MoveX as positionAxis)
+    executeProgramAndWatch(
+      label = s"Move${axis.char}",
+      axis = axis,
+      commandName = "positionWheel",
+      runId = runId,
+      mask = CommandWatcherActor.CompletionMask.positionAxis,
+      completionAxisState = AxisStateEnum.Idle,
+      ciActor = ciActor,
+      internalStateActor = internalStateActor,
+      statusMonitor = statusMonitor,
+      crm = crm,
+      log = log,
+      askTimeout = askTimeout,
+      askScheduler = askScheduler,
+      ctx = ctx,
+      loggerFactory = loggerFactory,
+      timeout = moveTimeout
     )
   }
 

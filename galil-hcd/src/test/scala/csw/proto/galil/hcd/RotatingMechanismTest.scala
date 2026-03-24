@@ -380,3 +380,102 @@ class RotatingMechanismTest extends AnyFunSuite with Matchers with BeforeAndAfte
     // Without countsPerRevolution, algorithm cannot be applied — raw target passes through
     dmdSent(1) shouldBe Some(3300.0)
   }
+
+  // ========================================
+  // Section 7: positionWheel — angular demand
+  // ========================================
+  // positionWheel takes degrees (Float), converts to counts via countsPerRevolution,
+  // then applies the approach algorithm identically to positionAxis.
+  // countsPerRev = 3600, so: rawTarget = (degrees / 360.0) * 3600.0 = degrees * 10.0
+  //
+  // Tests verify:
+  //   a) Degree-to-count conversion is correct
+  //   b) Approach algorithm is applied to the converted target
+  //   c) Command is rejected when axis is linear
+  //   d) Command is rejected when countsPerRevolution is not set
+
+  private def sendPositionWheel(
+    handler: ActorRef[CommandHandlerActor.Command],
+    axis: String,
+    angleDeg: Double
+  ): Unit =
+    var setup = Setup(hcdPrefix, CommandName("positionWheel"), None)
+    val axisKey = ChoiceKey.make("axis", "A", "B", "C", "D", "E", "F", "G", "H")
+    setup = setup.add(axisKey.set(axis))
+    setup = setup.add(csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`.PositionWheelCommand.positionKey.set(angleDeg.toFloat))
+    handler ! CommandHandlerActor.HandleCommand(setup, Id(), None)
+    Thread.sleep(150)
+
+  test("positionWheel: 90° → 900 counts (forward, Shortest from 0)") {
+    // angleDeg=90°, rawTarget=900, currentPos=0. Shortest arc: forward=900 < 2700. No adjustment.
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Shortest, currentPos = 0.0)
+    sendPositionWheel(handler, "B", 90.0)
+    dmdSent(1) shouldBe Some(900.0)
+  }
+
+  test("positionWheel: 270° → approach algorithm selects shortest reverse arc from 0") {
+    // angleDeg=270°, rawTarget=2700, currentPos=0. Forward arc=2700, reverse arc=900. Shortest → -900.
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Shortest, currentPos = 0.0)
+    sendPositionWheel(handler, "B", 270.0)
+    dmdSent(1) shouldBe Some(-900.0)
+  }
+
+  test("positionWheel: 180° → 1800 counts, no adjustment (Shortest, equal arcs go forward)") {
+    // angleDeg=180°, rawTarget=1800, currentPos=0. Forward=1800, reverse=1800. Tie → forward.
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Shortest, currentPos = 0.0)
+    sendPositionWheel(handler, "B", 180.0)
+    dmdSent(1) shouldBe Some(1800.0)
+  }
+
+  test("positionWheel: 90° forward algorithm adds one revolution when behind target") {
+    // angleDeg=90°, rawTarget=900, currentPos=1800.
+    // curMod=1800, tgtMod=900, base=0, candidate=900.
+    // Forward: candidate(900) < currentPos(1800) → add one rev → 900+3600=4500.
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Forward, currentPos = 1800.0)
+    sendPositionWheel(handler, "B", 90.0)
+    dmdSent(1) shouldBe Some(4500.0)
+  }
+
+  test("positionWheel: 0° (full wrap) with Forward algorithm from 900") {
+    // angleDeg=0°, rawTarget=0.0, currentPos=900. Forward: tgtMod=0, base=0 (900%3600=900, base=0),
+    // candidate=0. candidate(0) <= currentPos(900) → add one rev → 3600.
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Forward, currentPos = 900.0)
+    sendPositionWheel(handler, "B", 0.0)
+    dmdSent(1) shouldBe Some(3600.0)
+  }
+
+  test("positionWheel: rejected when axis is linear") {
+    // Axis A is linear — positionWheel must reject with Error, not send a dmd command
+    MockCIActor.clear()
+    val (handler, _) = createRotatingActors(RotatingAlgorithm.Shortest, currentPos = 0.0)
+    sendPositionWheel(handler, "A", 90.0)
+    // No dmd command should have been sent to axis A (idx=0)
+    dmdSent(0) shouldBe None
+  }
+
+  test("positionWheel: rejected when countsPerRevolution is not set") {
+    MockCIActor.clear()
+    var state = HcdState()
+    state = state.initializeAxis(Axis.B, MechanismType.Rotating)
+    val isActor = testKit.spawn(InternalStateActor(state))
+    val ciActor = testKit.spawn(MockCIActor.behavior())
+    val smStub  = testKit.spawn(Behaviors.receiveMessage[StatusMonitor.Command] { _ => Behaviors.same })
+    val handler = testKit.spawn(
+      CommandHandlerActor.behavior(ciActor, isActor, null, new LoggerFactory(hcdPrefix), smStub)
+    )
+
+    // Rotating but NO countsPerRevolution set — positionWheel cannot convert degrees to counts
+    isActor ! InternalStateActor.UpdateAxisState(Axis.B,
+      Map(
+        "mechanismType" -> MechanismType.Rotating,
+        "algorithm"     -> RotatingAlgorithm.Shortest,
+        "axisState"     -> AxisStateEnum.Idle,
+        "position"      -> 0.0
+      ),
+      testKit.system.ignoreRef)
+    Thread.sleep(50)
+
+    sendPositionWheel(handler, "B", 90.0)
+    // No dmd should have been sent — command should have errored out
+    dmdSent(1) shouldBe None
+  }

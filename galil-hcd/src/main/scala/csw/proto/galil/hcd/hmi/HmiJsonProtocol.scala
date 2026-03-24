@@ -33,6 +33,9 @@ object HmiJsonProtocol {
     // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
     "angularPosition"  -> s.angularPosition.getOrElse(0.0),
     "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
+    // Soft limits (linear axes only)
+    "upperLimit" -> s.upperLimit.getOrElse[Double](0.0),
+    "lowerLimit" -> s.lowerLimit.getOrElse[Double](0.0),
     // Motion configuration (from readMotionConfig + configAxis updates)
     "maxSpeed"            -> s.maxSpeed.getOrElse[Double](0.0),
     "acceleration"        -> s.acceleration.getOrElse[Double](0.0),
@@ -89,7 +92,10 @@ object HmiJsonProtocol {
       "threadStatus"       -> threadBits,
       "activeAxes"         -> activeAxesList,
       "axes"               -> axesJson,
-      "cmdState"           -> cmdStateJson
+      "cmdState"           -> cmdStateJson,
+      "digitalInputs"      -> JsArray(hcdState.digitalInputs.map(b => JsBoolean(b)).toIndexedSeq),
+      "digitalOutputs"     -> JsArray(hcdState.digitalOutputs.map(b => JsBoolean(b)).toIndexedSeq),
+      "analogInputs"       -> JsArray(hcdState.analogInputs.map(v => JsNumber(BigDecimal(v.toDouble))).toIndexedSeq)
     ).toString()
   }
 

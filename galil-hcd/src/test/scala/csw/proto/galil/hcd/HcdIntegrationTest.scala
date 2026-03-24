@@ -155,6 +155,24 @@ class HcdIntegrationTest
     }
   }
 
+  /**
+   * Set axis speed via configAxis and wait for completion.
+   * Used by interruption tests to slow the axis so a short move takes long enough to interrupt.
+   */
+  private def setAxisSpeed(commandService: csw.command.api.scaladsl.CommandService, axisName: String, speed: Float): Unit = {
+    var setup = Setup(hcdPrefix, CommandName("configAxis"), None)
+    setup = setup.add(ConfigAxisCommand.axisKey.set(Choice(axisName)))
+    setup = setup.add(ConfigAxisCommand.velocityKey.set(speed))
+    val submit = Await.result(commandService.submit(setup), 5.seconds)
+    submit match {
+      case s: Started =>
+        Await.result(commandService.queryFinal(s.runId)(Timeout(5.seconds)), 5.seconds)
+      case _: Completed =>
+      case other =>
+        println(s"  WARNING: configAxis $axisName speed=$speed returned: $other")
+    }
+  }
+
   /** Build a Setup command with the HCD prefix */
   private def makeSetup(commandName: String, params: (String, Any)*): Setup = {
     var setup = Setup(hcdPrefix, CommandName(commandName), None)
@@ -494,16 +512,25 @@ class HcdIntegrationTest
   
   test("stopAxis should halt an active positionAxis command") {
     val commandService = getCommandService
-    val farTarget = 10000.0f  // far enough that we can stop before arrival
-    
-    // Start a long move
+    // Rotating axes (400 counts/rev). Slow to 100 counts/sec so a 200-count
+    // move takes ~2 seconds — enough time to interrupt while keeping recovery fast.
+    setAxisSpeed(commandService, "A", 100.0f)
+
+    val farTarget = 200.0f
+
+    // Start a long (slow) move
     val moveSetup = makeSetup("positionAxis", "axis" -> "A", "target" -> farTarget)
     val moveResponse = Await.result(commandService.submit(moveSetup), 5.seconds)
     assert(moveResponse.isInstanceOf[Started], s"positionAxis should return Started, got: $moveResponse")
     println(s"  Started positionAxis to $farTarget")
-    
-    // Wait briefly for motion to begin
-    Thread.sleep(500)
+
+    // Wait for Moving state to be confirmed via CurrentState before sending stop
+    collectStatesUntil(
+      commandService,
+      StateName(CurrentStateAxisACurrentState.eventKey.eventName.name),
+      s => s(CurrentStateAxisACurrentState.axisStateKey).head.name == "moving"
+    )
+    println(s"  Moving state confirmed")
     
     // Submit stop
     val stopSetup = makeSetup("stopAxis", "axis" -> "A")
@@ -542,10 +569,8 @@ class HcdIntegrationTest
     println(s"  Axis A moving after stop: $moving")
     assert(!moving, "Axis should not be moving after stopAxis")
     sub.cancel()
+    setAxisSpeed(commandService, "A", 100.0f)  // restore normal speed
   }
-
-  // ==========================================================================
-  // Test: stopAxis interrupts an active positionAxis (Moving state)
   // Verifies the full interruption sequence:
   //   HX kills the move thread → positionAxis reports Error(interrupted)
   //   #StopX executes cleanly → stopAxis reports Completed
@@ -554,9 +579,10 @@ class HcdIntegrationTest
 
   test("stopAxis should interrupt an active positionAxis and leave axis ready for new commands") {
     val commandService = getCommandService
-    val farTarget = 10000.0f  // far enough that motion is still in progress when stop arrives
+    setAxisSpeed(commandService, "A", 100.0f)
+    val farTarget = 200.0f
 
-    // Start a long move
+    // Start a long (slow) move
     val moveSetup = makeSetup("positionAxis", "axis" -> "A", "target" -> farTarget)
     val moveResponse = Await.result(commandService.submit(moveSetup), 5.seconds)
     assert(moveResponse.isInstanceOf[Started], s"positionAxis should return Started, got: $moveResponse")
@@ -617,6 +643,7 @@ class HcdIntegrationTest
     println(s"  Recovery positionAxis result: $recoveryResult")
     assert(recoveryResult.isInstanceOf[Completed],
       s"Recovery move should complete after interruption, got: $recoveryResult")
+    setAxisSpeed(commandService, "A", 100.0f)  // restore normal speed
   }
 
   // ==========================================================================
@@ -628,10 +655,11 @@ class HcdIntegrationTest
 
   test("positionAxis should interrupt an active positionAxis and complete to the new target") {
     val commandService = getCommandService
-    val farTarget    = 10000.0f  // long move that will still be running when interrupted
-    val newTarget    = 500.0f    // new target for interrupting command
+    setAxisSpeed(commandService, "B", 100.0f)
+    val farTarget    = 200.0f  // within one revolution; slow speed makes it take ~2s
+    val newTarget    = 100.0f  // new target for interrupting command
 
-    // Start a long move
+    // Start a long (slow) move
     val move1Setup = makeSetup("positionAxis", "axis" -> "B", "target" -> farTarget)
     val move1Response = Await.result(commandService.submit(move1Setup), 5.seconds)
     assert(move1Response.isInstanceOf[Started], s"First positionAxis should start, got: $move1Response")
@@ -684,6 +712,7 @@ class HcdIntegrationTest
     assert(axisState.name == "idle", s"Axis B should be idle, was: ${axisState.name}")
     assert(inPos, "Axis B should be inPosition at new target")
     assert(pos == newTarget.toDouble, s"Axis B should be at $newTarget, was: $pos")
+    setAxisSpeed(commandService, "B", 100.0f)  // restore normal speed
   }
 
   // ==========================================================================
@@ -792,8 +821,10 @@ class HcdIntegrationTest
 
   test("positionAxis should move A and B concurrently") {
     val commandService = getCommandService
-    val targetA = 400.0f
-    val targetB = 300.0f  // B is at 500 from test 7 — ensure actual motion
+    // Rotating axes: 400 counts/rev. Choose targets well within [1, 399] so the
+    // approach algorithm does not wrap them back to 0 or produce a zero-distance move.
+    val targetA = 100.0f
+    val targetB = 150.0f
 
     // Submit both moves concurrently
     val setupA = makeSetup("positionAxis", "axis" -> "A", "target" -> targetA)
@@ -1048,4 +1079,108 @@ class HcdIntegrationTest
     cmdSub.cancel()
     println(s"  After stop: moving = $moving")
     assert(!moving, "Axis A should not be moving after stopAxis")
+  }
+  // ── I/O Tests ────────────────────────────────────────────────────────────
+
+  val ioStateName = StateName(InputOutputStateCurrentState.eventKey.eventName.name)
+
+  /**
+   * Wait for one InputOutputState publication and return it.
+   */
+  private def receiveIOState(commandService: csw.command.api.scaladsl.CommandService): CurrentState =
+    val probe = TestProbe[CurrentState]()
+    val sub = commandService.subscribeCurrentState(Set(ioStateName), cs => probe.ref ! cs)
+    val state = probe.receiveMessage(stateTimeout)
+    sub.cancel()
+    state
+
+  test("InputOutputState should be published with correct array sizes") {
+    val commandService = getCommandService
+    val ioState = receiveIOState(commandService)
+    val di   = ioState(InputOutputStateCurrentState.digitalInputsKey).values
+    val dout = ioState(InputOutputStateCurrentState.digitalOutputsKey).values
+    val ai   = ioState(InputOutputStateCurrentState.analogInputsKey).head.data
+    println(s"  digitalInputs  length = ${di.length}")
+    println(s"  digitalOutputs length = ${dout.length}")
+    println(s"  analogInputs   length = ${ai.length}")
+    assert(di.length == 16,  s"digitalInputs should have 16 elements, got ${di.length}")
+    assert(dout.length == 16, s"digitalOutputs should have 16 elements, got ${dout.length}")
+    assert(ai.length == 8,   s"analogInputs should have 8 elements, got ${ai.length}")
+  }
+
+  test("setBit should set and clear a digital output") {
+    val commandService = getCommandService
+    val address = 1  // @OUT[1] — verified safe on the lab controller
+
+    // ── Set bit 1 ──
+    // Subscribe before sending so we don't miss the publication triggered by the QR poll
+    val setProbe = TestProbe[CurrentState]()
+    val setSub = commandService.subscribeCurrentState(Set(ioStateName), cs => setProbe.ref ! cs)
+
+    var setup = Setup(hcdPrefix, CommandName("setBit"), None)
+    setup = setup.add(SetBitCommand.addressKey.set(address))
+    setup = setup.add(SetBitCommand.valueKey.set(1))
+    val setSubmit = Await.result(commandService.submit(setup), 5.seconds)
+    println(s"  setBit address=$address value=1: $setSubmit")
+    assert(setSubmit.isInstanceOf[Started],
+      s"setBit should be accepted, got: $setSubmit")
+    val setResponse = Await.result(
+      commandService.queryFinal(setSubmit.runId)(Timeout(5.seconds)), 5.seconds)
+    println(s"  setBit value=1 final: $setResponse")
+    assert(setResponse.isInstanceOf[Completed],
+      s"setBit value=1 should complete, got: $setResponse")
+
+    // Wait for the next InputOutputState publication (may be up to 1s at standby poll rate)
+    val setIOState = setProbe.receiveMessage(stateTimeout)
+    setSub.cancel()
+    val outputsAfterSet = setIOState(InputOutputStateCurrentState.digitalOutputsKey).values
+    println(s"  digitalOutputs after set: ${outputsAfterSet.take(8).mkString("[", ",", "]")}")
+    assert(outputsAfterSet(address - 1),
+      s"digitalOutputs(${address-1}) should be true after setBit value=1")
+
+    // ── Clear bit 1 ──
+    val clrProbe = TestProbe[CurrentState]()
+    val clrSub = commandService.subscribeCurrentState(Set(ioStateName), cs => clrProbe.ref ! cs)
+
+    var clearSetup = Setup(hcdPrefix, CommandName("setBit"), None)
+    clearSetup = clearSetup.add(SetBitCommand.addressKey.set(address))
+    clearSetup = clearSetup.add(SetBitCommand.valueKey.set(0))
+    val clearSubmit = Await.result(commandService.submit(clearSetup), 5.seconds)
+    println(s"  setBit address=$address value=0: $clearSubmit")
+    assert(clearSubmit.isInstanceOf[Started],
+      s"setBit should be accepted, got: $clearSubmit")
+    val clearResponse = Await.result(
+      commandService.queryFinal(clearSubmit.runId)(Timeout(5.seconds)), 5.seconds)
+    println(s"  setBit value=0 final: $clearResponse")
+    assert(clearResponse.isInstanceOf[Completed],
+      s"setBit value=0 should complete, got: $clearResponse")
+
+    val clrIOState = clrProbe.receiveMessage(stateTimeout)
+    clrSub.cancel()
+    val outputsAfterClear = clrIOState(InputOutputStateCurrentState.digitalOutputsKey).values
+    println(s"  digitalOutputs after clear: ${outputsAfterClear.take(8).mkString("[", ",", "]")}")
+    assert(!outputsAfterClear(address - 1),
+      s"digitalOutputs(${address-1}) should be false after setBit value=0")
+  }
+
+  test("analogInputs should be populated from MG @AN[n] polling") {
+    val commandService = getCommandService
+
+    // Allow at least two AI poll cycles (1Hz timer) for values to propagate
+    Thread.sleep(2200)
+
+    val ioState = receiveIOState(commandService)
+    val ai = ioState(InputOutputStateCurrentState.analogInputsKey).head.data
+    println(s"  analogInputs: ${ai.zipWithIndex.map { case (v, i) => s"AN${i+1}=${v}V" }.mkString(", ")}")
+
+    // AN1 and AN2 are wired on the lab controller and read ~2.58V
+    assert(Math.abs(ai(0)) > 0.1f,
+      s"AN1 should be non-zero (wired on lab controller), got ${ai(0)}V")
+    assert(Math.abs(ai(1)) > 0.1f,
+      s"AN2 should be non-zero (wired on lab controller), got ${ai(1)}V")
+    // All channels within ±10V ADC range
+    ai.foreach { v =>
+      assert(v >= -10.0f && v <= 10.0f,
+        s"All AI values should be within ±10V range, got $v")
+    }
   }

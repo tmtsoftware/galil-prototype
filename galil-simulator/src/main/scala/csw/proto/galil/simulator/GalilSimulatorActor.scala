@@ -326,8 +326,23 @@ object GalilSimulatorActor {
         handleLA(state)
 
       // ---- Digital I/O ----
-      case `SetBit` => (formatReply(None), state)
-      case `ClearBit` => (formatReply(None), state)
+      case `SetBit` =>
+        // SB n  — set digital output bit n (1-based per Galil convention)
+        val bit1 = cmdString.drop(2).trim.toInt
+        val idx  = (bit1 - 1) / 8          // which byte (0 = bits 1-8, 1 = bits 9-16)
+        val mask = (1 << ((bit1 - 1) % 8)).toByte
+        val newOutputs = state.digitalOutputs.clone()
+        if idx < newOutputs.length then newOutputs(idx) = (newOutputs(idx) | mask).toByte
+        (formatReply(None), state.copy(digitalOutputs = newOutputs))
+
+      case `ClearBit` =>
+        // CB n  — clear digital output bit n (1-based per Galil convention)
+        val bit1 = cmdString.drop(2).trim.toInt
+        val idx  = (bit1 - 1) / 8
+        val mask = (1 << ((bit1 - 1) % 8)).toByte
+        val newOutputs = state.digitalOutputs.clone()
+        if idx < newOutputs.length then newOutputs(idx) = (newOutputs(idx) & ~mask).toByte
+        (formatReply(None), state.copy(digitalOutputs = newOutputs))
       case `AnalogOutput` => (formatReply(None), state)
 
       // ---- Upload program (download FROM controller, confusingly) ----
@@ -429,6 +444,8 @@ object GalilSimulatorActor {
         val speed = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
         val accel = newState.embeddedVars.getOrElse(s"accel[$idx]", 256000.0)
         val decel = newState.embeddedVars.getOrElse(s"decel[$idx]", 256000.0)
+        val currentPos = getAxis(newState, axis).position
+        println(s"[SIM] #Move$axis: pos=$currentPos → demand=$demand, speed=$speed, thread=$thread")
 
         val ax = getAxis(newState, axis).copy(
           demand = demand,

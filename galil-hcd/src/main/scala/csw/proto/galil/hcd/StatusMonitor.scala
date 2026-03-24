@@ -5,9 +5,13 @@ import csw.logging.client.scaladsl.LoggerFactory
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import csw.proto.galil.io.DataRecord
 import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
+import org.apache.pekko.actor.typed.scaladsl.AskPattern
+import org.apache.pekko.util.Timeout
 
 import java.time.Instant
+import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.util.{Failure, Success, Try}
 
 /**
  * StatusMonitor Actor (SDD Section 4.6.3)
@@ -32,6 +36,12 @@ object StatusMonitor:
    * Periodic polling trigger (internal timer message)
    */
   private case object PollController extends Command
+
+  /**
+   * Periodic analog input polling trigger (1Hz, independent of QR rate)
+   * Package-private for test access.
+   */
+  private[hcd] case object PollAnalogInputs extends Command
   
   /**
    * Response from ControllerInterface with QR data
@@ -148,6 +158,8 @@ class StatusMonitor(
   
   // Start periodic polling at standby rate
   startPolling()
+  // Start 1Hz analog input polling (independent of QR rate)
+  timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
   
   log.info(s"Started — standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
@@ -155,6 +167,9 @@ class StatusMonitor(
     msg match
       case PollController =>
         handlePollController()
+
+      case PollAnalogInputs =>
+        handlePollAnalogInputs()
         
       case QRResponse(dataRecord) =>
         handleQRResponse(dataRecord)
@@ -337,15 +352,81 @@ class StatusMonitor(
     Behaviors.same
   
   /**
+   * Poll all 8 general-purpose analog inputs via `MG @AN[n]` (1-indexed per Galil convention).
+   *
+   * These are the 8 uncommitted analog inputs on the DMC-500x0 main board — distinct from
+   * the per-axis analogInput field in the QR DataRecord (which is the axis-specific latch input).
+   *
+   * Runs at 1Hz independently of the QR polling rate. Each channel is queried individually;
+   * failures are logged and that channel retains its previous value (zero at startup).
+   * Results are pushed into HcdState.analogInputs[0..7] via UpdateHcdState.
+   *
+   * The simulator returns 2.5000 for all @AN[n] queries.
+   */
+  private def handlePollAnalogInputs(): Behavior[Command] =
+    if pollingPaused then return Behaviors.same
+
+    implicit val timeout: Timeout = Timeout(500.millis)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = context.system.scheduler
+
+    val analogInputs = Array.fill(8)(0.0f)
+    var anyFailure = false
+
+    for channel <- 1 to 8 do
+      val cmdString = s"MG @AN[$channel]"
+      Try {
+        val future = AskPattern.Askable(controllerInterface).ask[GalilCommandMessage.SendCommandResult](
+          ref => GalilCommandMessage.SendCommand(cmdString, ref)
+        )
+        Await.result(future, timeout.duration)
+      } match {
+        case Success(result) if result.error.isEmpty =>
+          Try(result.response.trim.toFloat) match {
+            case Success(v)  => analogInputs(channel - 1) = v
+            case Failure(ex) =>
+              log.warn(s"AI poll: could not parse @AN[$channel] response '${result.response}': ${ex.getMessage}")
+              anyFailure = true
+          }
+        case Success(result) =>
+          log.warn(s"AI poll: @AN[$channel] error: ${result.error.getOrElse("unknown")}")
+          anyFailure = true
+        case Failure(ex) =>
+          log.warn(s"AI poll: @AN[$channel] ask timed out: ${ex.getMessage}")
+          anyFailure = true
+      }
+
+    if !anyFailure then
+      log.debug(s"AI poll: ${analogInputs.zipWithIndex.map{case(v,i) => s"AN[${i+1}]=${v}V"}.mkString(", ")}")
+
+    internalState ! InternalStateActor.UpdateHcdState(
+      Map("analogInputs" -> analogInputs),
+      context.system.ignoreRef
+    )
+
+    Behaviors.same
+
+  /**
    * Update HCD-level state from GeneralState and report thread status to IS.
    * IS owns the thread→axis registry and resolves completions from the bitmask.
    */
   private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
 
+    // inputs/outputs: 10 bytes in QR; only the first byte (bits 0-7) is meaningful
+    // on the DMC-500x0 main board (8 optoisolated DI, 8 optoisolated DO).
+    // We expand to a 16-element Boolean array for future slave-module support:
+    // bytes 0-1 → bits 0-15. Byte 1 will be zero on a 4-axis controller.
+    def bytesToBits(bytes: Array[Byte], count: Int): Array[Boolean] =
+      (0 until count).map { i =>
+        val byteIdx = i / 8
+        val bitIdx  = i % 8
+        if byteIdx < bytes.length then ((bytes(byteIdx) >> bitIdx) & 1) != 0
+        else false
+      }.toArray
+
     val updates = Map(
-      "digitalInputs"        -> generalState.inputs.map(_ != 0),
-      "digitalOutputs"       -> generalState.outputs.map(_ != 0),
+      "digitalInputs"        -> bytesToBits(generalState.inputs,  16),
+      "digitalOutputs"       -> bytesToBits(generalState.outputs, 16),
       "threadStatus"         -> threadStatusByte,
       "lastPollingTime"      -> Instant.ofEpochMilli(System.currentTimeMillis()),
       "currentPollingRateHz" -> pollingRateHz
@@ -527,7 +608,14 @@ class StatusMonitor(
     timers.startTimerWithFixedDelay(PollController, pollingPeriod)
   
   /**
-   * Stop polling timer
+   * Stop periodic polling timer
    */
   private def stopPolling(): Unit =
     timers.cancel(PollController)
+    timers.cancel(PollAnalogInputs)
+
+  override def onSignal: PartialFunction[org.apache.pekko.actor.typed.Signal, Behavior[Command]] =
+    case org.apache.pekko.actor.typed.PostStop =>
+      timers.cancel(PollController)
+      timers.cancel(PollAnalogInputs)
+      this

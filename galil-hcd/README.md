@@ -88,10 +88,10 @@ axes {
 
 For rotating axes, `countsPerRevolution` is the integer number of stepper counts for
 one full 360 degree revolution. This must always be a whole number for stepper motors.
-Examples:
+Example: a 400-step/rev stepper uses `countsPerRevolution = 400`.
 
-- 400-step/rev stepper: `countsPerRevolution = 400`
-- Simulator (10 counts/degree): `countsPerRevolution = 3600`
+**Both hardware and simulator configs use `cpr=400`** — the simulator is configured to
+match the hardware axis types so that integration tests behave identically on both.
 
 The HCD writes this value to the `cpr[]` embedded variable array at initialization
 via `writeMotionConfig()`. The embedded `#SelectX` programs use cpr[idx] for
@@ -107,6 +107,8 @@ exact integer slot arithmetic.
   index offset, index speed, inPosition threshold).
 - **configLinearAxis** — Configure axis as linear with soft limits.
 - **configRotatingAxis** — Configure axis as rotating with approach algorithm.
+- **setBit** — Set or clear a digital output bit. Parameters: `address` (int, 1-based per
+  Galil convention), `value` (int: 1=set, 0=clear). Sends `SB n` or `CB n` to controller.
 
 ### Long-Running Commands
 
@@ -118,18 +120,24 @@ exact integer slot arithmetic.
 | **stopAxis** | Halt active motion | Idle, not moving, thread released |
 | **trackAxis** | Jog-mode tracking | Tracking, thread released (motor continues) |
 | **selectWheel** | Position to discrete slot (0-7) | Idle, not moving, thread released |
+| **positionWheel** | Position to angular demand (degrees) | Idle, inPosition, thread released |
 
 Move commands compute physics-based timeouts from the axis motor configuration
 (trapezoidal velocity profile with 2x safety factor, 3-second minimum).
 
 ### Rotating Axis Approach Algorithm
 
-For rotating axes with `countsPerRevolution` configured, `positionAxis` and `offsetAxis`
-apply an approach algorithm that resolves the correct absolute count target:
+For rotating axes with `countsPerRevolution` configured, `positionAxis`, `offsetAxis`,
+and `positionWheel` apply an approach algorithm that resolves the correct absolute count target:
 
 - **forward** — always approach from below (add one revolution if needed)
 - **reverse** — always approach from above (subtract one revolution if needed)
 - **shortest** — take whichever arc is shorter
+
+`positionWheel` converts the angular demand in degrees to counts via
+`rawTarget = (angleDeg / 360.0) * countsPerRevolution`, then applies the approach algorithm
+identically to `positionAxis`. The command is rejected if the axis is not configured as
+Rotating or if `countsPerRevolution` is not set.
 
 `selectWheel` does not use the approach algorithm — it delegates to the embedded
 `#SelectX` program
@@ -219,11 +227,19 @@ axis count, not `activeAxes` config).
 - **Linear:** vertical track with position arrow from left, limit labels at ends. Arrow turns
   green when `inPosition`.
 
-**Command controls per axis:** Home, Stop, Position (counts), Offset (counts), Wheel (slot
-0-7), Track (position + velocity). Collapsible Config panel for motion parameters.
+**Command controls per axis:** Home, Stop, Position (counts), Offset (counts), Angular
+(degrees — `positionWheel`, rotating axes), Wheel (slot 0-7 — `selectWheel`, rotating axes),
+Track (position + velocity). Collapsible Config panel for motion parameters, mechanism type
+(Rotating: approach algorithm; Linear: soft limits).
 
-**Other panels:** real-time position chart, unified log panel with runtime level control
-(INFO/DEBUG/TRACE), thread status bar, SIMULATING badge in simulator mode.
+**Other panels:** real-time position chart, collapsible I/O panel (full-width, between chart
+and log), unified log panel with runtime level control (INFO/DEBUG/TRACE), thread status bar,
+SIMULATING badge in simulator mode.
+
+**I/O panel:** Shows 16 digital inputs (read-only, bits 1-8 live on main board, 9-16 greyed
+on 4-axis controller), 16 digital outputs (clickable toggle → `setBit`, same availability),
+and 8 analog input channels (polled at 1Hz via `MG @AN[n]`, displayed in volts). Collapsed
+by default; header shows mini 8-dot DI and DO summary indicators.
 
 ### Architecture
 
@@ -241,19 +257,20 @@ axis count, not `activeAxes` config).
 ```bash
 sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest \
   *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest \
-  *RotatingMechanismTest *AxisStateValidationTest"
+  *RotatingMechanismTest *AxisStateValidationTest *IOTest"
 ```
 
 | Suite | Tests | Coverage |
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
 | InternalStateActorTest | 41 | State management, pub/sub |
-| StatusMonitorTest | 19 | QR polling, adaptive rate |
+| StatusMonitorTest | 19 | QR polling, adaptive rate, analog input polling |
 | CommandHandlerActorTest | 17 | Immediate commands, validation |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
 | LongRunningCommandTest | 29 | Motion command handlers |
-| RotatingMechanismTest | 19 | Approach algorithm, offsetAxis, no-cpr fallback |
+| RotatingMechanismTest | 26 | Approach algorithm, positionWheel, offsetAxis, no-cpr fallback |
 | AxisStateValidationTest | 14 | State machine rules, interruption mechanics |
+| IOTest | 17 | DIO bit extraction, setBit/clearBit dispatch, analog input polling |
 
 ### Controller/Simulator-Dependent Tests (no CSW services)
 
@@ -269,18 +286,18 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator
 
 ```bash
 # Against hardware:
-sbt "galil-hcd/testOnly *HcdIntegrationTest"               # 15 tests, ~35s
+sbt "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~50s
 
 # Against simulator:
 sbt "galil-simulator/run"
 sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf \
-    "galil-hcd/testOnly *HcdIntegrationTest"               # 15 tests, ~30s
+    "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~45s
 ```
 
 ### Simulator Tests
 
 ```bash
-sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 64 tests
+sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 72 tests
 ```
 
 ### Full Test Summary
@@ -293,10 +310,11 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 64 tests
 | CommandHandlerActorTest | 17 | None |
 | CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
-| RotatingMechanismTest | 19 | None |
+| RotatingMechanismTest | 26 | None |
 | AxisStateValidationTest | 14 | None |
+| IOTest | 17 | None |
 | ControllerInterfaceActorTest | 16 | Hardware or Simulator (no CSW services) |
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
-| HcdIntegrationTest | 15 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
-| GalilSimulatorActorTest | 64 | None |
-| **Total** | **262** | |
+| HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
+| GalilSimulatorActorTest | 72 | None |
+| **Total** | **297** | |

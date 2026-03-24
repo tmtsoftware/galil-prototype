@@ -134,10 +134,10 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(response.toDouble >= 0, s"TIME should be a non-negative number, got: '$response'")
   }
 
-  test("MG @AN[0] should return simulated analog value") {
+  test("MG @AN[1] should return simulated analog value (2.5V baseline)") {
     val sim = spawnSimulator()
-    val response = sendText(sim, "MG @AN[0]")
-    assert(response == "2.5000", s"@AN[0] should return 2.5000, got: '$response'")
+    val response = sendText(sim, "MG @AN[1]")
+    assert(response == "2.5000", s"@AN[1] should return 2.5000, got: '$response'")
   }
 
   // ==========================================================================
@@ -858,5 +858,104 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     val sim = spawnSimulator()
     val response = send(sim, "LA").utf8String
     assert(response == ":", s"LA with no variables should return prompt only, got: '$response'")
+  }
+
+  // ==========================================================================
+  // 12. Digital and Analog I/O
+  // ==========================================================================
+
+  test("SB should set a digital output bit and QR should reflect it") {
+    val sim = spawnSimulator()
+    val before = sendQR(sim)
+    assert((before.generalState.outputs(0) & 0x01) == 0, "bit 1 should start clear")
+
+    sendText(sim, "SB 1")
+
+    val after = sendQR(sim)
+    assert((after.generalState.outputs(0) & 0x01) != 0, "bit 1 should be set after SB 1")
+  }
+
+  test("CB should clear a previously set digital output bit") {
+    val sim = spawnSimulator()
+    sendText(sim, "SB 1")
+    val set = sendQR(sim)
+    assert((set.generalState.outputs(0) & 0x01) != 0, "bit 1 should be set")
+
+    sendText(sim, "CB 1")
+    val cleared = sendQR(sim)
+    assert((cleared.generalState.outputs(0) & 0x01) == 0, "bit 1 should be cleared after CB 1")
+  }
+
+  test("SB should set the correct byte and bit for outputs 1-8") {
+    for bit1 <- 1 to 8 do
+      val sim = spawnSimulator()
+      sendText(sim, s"SB $bit1")
+      val dr = sendQR(sim)
+      val mask = 1 << (bit1 - 1)
+      assert((dr.generalState.outputs(0) & mask) != 0,
+        s"SB $bit1: bit ${bit1-1} of outputs(0) should be set")
+  }
+
+  test("multiple SB commands should accumulate independently") {
+    val sim = spawnSimulator()
+    sendText(sim, "SB 1")
+    sendText(sim, "SB 3")
+    sendText(sim, "SB 5")
+    val dr = sendQR(sim)
+    val byte0 = dr.generalState.outputs(0) & 0xFF
+    assert((byte0 & 0x01) != 0, "bit 1 should be set")
+    assert((byte0 & 0x04) != 0, "bit 3 should be set")
+    assert((byte0 & 0x10) != 0, "bit 5 should be set")
+    assert((byte0 & 0x02) == 0, "bit 2 should remain clear")
+  }
+
+  test("CB should not affect other bits") {
+    val sim = spawnSimulator()
+    sendText(sim, "SB 1")
+    sendText(sim, "SB 2")
+    sendText(sim, "CB 1")
+    val dr = sendQR(sim)
+    val byte0 = dr.generalState.outputs(0) & 0xFF
+    assert((byte0 & 0x01) == 0, "bit 1 should be cleared")
+    assert((byte0 & 0x02) != 0, "bit 2 should remain set")
+  }
+
+  test("MG @AN[n] should return a numeric value for all 8 channels") {
+    val sim = spawnSimulator()
+    for channel <- 1 to 8 do
+      val response = sendText(sim, s"MG @AN[$channel]")
+      val value = response.toDouble
+      assert(value >= 0.0 && value <= 10.0,
+        s"@AN[$channel] should return a value in [0,10], got: '$response'")
+  }
+
+  test("SB/CB should work for bits 9-16 (second byte, slave module range)") {
+    val sim = spawnSimulator()
+    // Bit 9 = bit 0 of byte 1
+    sendText(sim, "SB 9")
+    val afterSet = sendQR(sim)
+    assert((afterSet.generalState.outputs(1) & 0x01) != 0,
+      "SB 9: bit 0 of outputs(1) should be set")
+    assert(afterSet.generalState.outputs(0) == 0.toByte,
+      "SB 9: outputs(0) should be unaffected")
+
+    sendText(sim, "CB 9")
+    val afterClear = sendQR(sim)
+    assert((afterClear.generalState.outputs(1) & 0x01) == 0,
+      "CB 9: bit 0 of outputs(1) should be cleared")
+
+    // Bit 16 = bit 7 of byte 1
+    sendText(sim, "SB 16")
+    val afterSB16 = sendQR(sim)
+    assert((afterSB16.generalState.outputs(1) & 0x80.toByte) != 0,
+      "SB 16: bit 7 of outputs(1) should be set")
+  }
+
+  test("MG @AN[n] should return 2.5V baseline for all 8 channels (1-based, matching HCD poll)") {
+    val sim = spawnSimulator()
+    for channel <- 1 to 8 do
+      val response = sendText(sim, s"MG @AN[$channel]")
+      assert(response == "2.5000",
+        s"@AN[$channel] should return simulator baseline 2.5000, got: '$response'")
   }
 }
