@@ -598,7 +598,11 @@ object GalilSimulatorActor {
         "1000.0000"
 
       case s if s.startsWith("@AN") =>
-        "2.5000"
+        // Single or compound: "@AN[1]" or "@AN[1],@AN[2],...,@AN[8]"
+        // Hardware returns space-separated values on one line: "2.5000 2.5000 ..."
+        val count = s.split(',').count(_.trim.startsWith("@AN"))
+        if (count <= 1) "2.5000"
+        else Seq.fill(count)("2.5000").mkString(" ")
 
       case s if s.contains('[') =>
         val value = state.embeddedVars.getOrElse(s, 0.0)

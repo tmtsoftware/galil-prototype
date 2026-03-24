@@ -259,11 +259,15 @@ class IOTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   private def aiMockBehavior(voltages: Map[Int, String]): Behavior[GalilCommandMessage] =
     Behaviors.receiveMessage {
       case GalilCommandMessage.SendCommand(cmd, replyTo) =>
-        // Match "MG @AN[n]" — extract channel number
+        // Handles compound "MG @AN[1],@AN[2],...,@AN[8]"
+        // Returns space-separated values on one line, matching hardware format
         val response = cmd.trim match
-          case s if s.startsWith("MG @AN[") =>
-            val ch = s.stripPrefix("MG @AN[").stripSuffix("]").toIntOption.getOrElse(-1)
-            voltages.getOrElse(ch, "0.0000")
+          case s if s.startsWith("MG ") && s.contains("@AN[") =>
+            val tokens = s.stripPrefix("MG ").split(',').map(_.trim)
+            tokens.map { token =>
+              val ch = token.stripPrefix("@AN[").stripSuffix("]").toIntOption.getOrElse(-1)
+              voltages.getOrElse(ch, "0.0000")
+            }.mkString(" ")
           case _ => ":"
         replyTo ! GalilCommandMessage.SendCommandResult(response)
         Behaviors.same
@@ -291,12 +295,13 @@ class IOTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
     state.analogInputs(7) shouldBe (-0.0001f +- 0.001f)
   }
 
-  test("AI poll: sends exactly MG @AN[1] through MG @AN[8]") {
+  test("AI poll: sends a single compound MG @AN[1..8] command") {
     val cmdLog = new ConcurrentLinkedQueue[String]()
     val loggingMock: Behavior[GalilCommandMessage] = Behaviors.receiveMessage {
       case GalilCommandMessage.SendCommand(cmd, replyTo) =>
         cmdLog.add(cmd)
-        replyTo ! GalilCommandMessage.SendCommandResult("2.5000")
+        replyTo ! GalilCommandMessage.SendCommandResult(
+          (1 to 8).map(_ => "2.5000").mkString(" "))
         Behaviors.same
       case _ => Behaviors.same
     }
@@ -304,9 +309,10 @@ class IOTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
     sm ! StatusMonitor.PollAnalogInputs
     Thread.sleep(200)
     import scala.jdk.CollectionConverters._
-    val cmds = cmdLog.asScala.toList.filter(_.startsWith("MG @AN"))
-    cmds should contain theSameElementsInOrderAs
-      (1 to 8).map(n => s"MG @AN[$n]")
+    val cmds = cmdLog.asScala.toList.filter(_.startsWith("MG "))
+    // Expect exactly one compound command covering all 8 channels
+    cmds should have length 1
+    cmds.head shouldBe s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
   }
 
   test("AI poll: unparseable response leaves channel at 0, others still populated") {

@@ -958,4 +958,15 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
       assert(response == "2.5000",
         s"@AN[$channel] should return simulator baseline 2.5000, got: '$response'")
   }
+
+  test("MG @AN[1],@AN[2],...,@AN[8] compound query should return 8 space-separated 2.5V values") {
+    val sim = spawnSimulator()
+    val compound = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
+    val response = sendText(sim, compound)
+    val tokens = response.trim.split("\\s+").filter(_.nonEmpty)
+    assert(tokens.length == 8, s"Compound MG @AN should return 8 values, got ${tokens.length}: '$response'")
+    tokens.foreach { token =>
+      assert(token == "2.5000", s"Each compound @AN value should be 2.5000, got: '$token'")
+    }
+  }
 }

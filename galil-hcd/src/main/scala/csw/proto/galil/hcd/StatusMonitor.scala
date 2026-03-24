@@ -9,7 +9,7 @@ import org.apache.pekko.actor.typed.scaladsl.AskPattern
 import org.apache.pekko.util.Timeout
 
 import java.time.Instant
-import scala.concurrent.Await
+import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
@@ -42,6 +42,11 @@ object StatusMonitor:
    * Package-private for test access.
    */
   private[hcd] case object PollAnalogInputs extends Command
+
+  /**
+   * Internal: result of async analog input poll, delivered via pipeToSelf.
+   */
+  private case class AnalogInputsResult(values: Array[Float]) extends Command
   
   /**
    * Response from ControllerInterface with QR data
@@ -170,7 +175,14 @@ class StatusMonitor(
 
       case PollAnalogInputs =>
         handlePollAnalogInputs()
-        
+
+      case AnalogInputsResult(values) =>
+        internalState ! InternalStateActor.UpdateHcdState(
+          Map("analogInputs" -> values),
+          context.system.ignoreRef
+        )
+        Behaviors.same
+
       case QRResponse(dataRecord) =>
         handleQRResponse(dataRecord)
         
@@ -283,6 +295,8 @@ class StatusMonitor(
       pollingPaused = false
       if pollingEnabled then
         startPolling()
+        // Restart analog input timer — it was cancelled by handlePauseQRPolling via stopPolling()
+        timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
     else
       log.debug("QR polling was not paused")
     Behaviors.same
@@ -366,42 +380,36 @@ class StatusMonitor(
   private def handlePollAnalogInputs(): Behavior[Command] =
     if pollingPaused then return Behaviors.same
 
-    implicit val timeout: Timeout = Timeout(500.millis)
+    implicit val timeout: Timeout = Timeout(2.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = context.system.scheduler
 
-    val analogInputs = Array.fill(8)(0.0f)
-    var anyFailure = false
+    log.debug("AI poll: sending compound MG @AN query")
 
-    for channel <- 1 to 8 do
-      val cmdString = s"MG @AN[$channel]"
-      Try {
-        val future = AskPattern.Askable(controllerInterface).ask[GalilCommandMessage.SendCommandResult](
-          ref => GalilCommandMessage.SendCommand(cmdString, ref)
-        )
-        Await.result(future, timeout.duration)
-      } match {
-        case Success(result) if result.error.isEmpty =>
-          Try(result.response.trim.toFloat) match {
-            case Success(v)  => analogInputs(channel - 1) = v
-            case Failure(ex) =>
-              log.warn(s"AI poll: could not parse @AN[$channel] response '${result.response}': ${ex.getMessage}")
-              anyFailure = true
-          }
-        case Success(result) =>
-          log.warn(s"AI poll: @AN[$channel] error: ${result.error.getOrElse("unknown")}")
-          anyFailure = true
-        case Failure(ex) =>
-          log.warn(s"AI poll: @AN[$channel] ask timed out: ${ex.getMessage}")
-          anyFailure = true
-      }
+    // Single compound MG command — one round-trip instead of 8 sequential asks.
+    // Hardware returns space-separated values on one line: "2.5839 2.5839 0.0000 ..."
+    val mgCmd = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
 
-    if !anyFailure then
-      log.debug(s"AI poll: ${analogInputs.zipWithIndex.map{case(v,i) => s"AN[${i+1}]=${v}V"}.mkString(", ")}")
-
-    internalState ! InternalStateActor.UpdateHcdState(
-      Map("analogInputs" -> analogInputs),
-      context.system.ignoreRef
+    val future = AskPattern.Askable(controllerInterface).ask[GalilCommandMessage.SendCommandResult](
+      ref => GalilCommandMessage.SendCommand(mgCmd, ref)
     )
+
+    context.pipeToSelf(future) {
+      case Success(result: GalilCommandMessage.SendCommandResult) if result.error.isEmpty =>
+        log.debug(s"AI poll response: '${result.response}'")
+        // Split on any whitespace (spaces or newlines) and skip empty tokens.
+        val tokens = result.response.trim.split("\\s+").filter(_.nonEmpty)
+        val values = Array.tabulate(8) { i =>
+          if i < tokens.length then Try(tokens(i).toFloat).getOrElse(0.0f)
+          else 0.0f
+        }
+        AnalogInputsResult(values)
+      case Success(result: GalilCommandMessage.SendCommandResult) =>
+        log.warn(s"AI poll error: ${result.error.getOrElse("unknown")}")
+        AnalogInputsResult(Array.fill(8)(0.0f))
+      case Failure(ex) =>
+        log.warn(s"AI poll future failed: ${ex.getMessage}")
+        AnalogInputsResult(Array.fill(8)(0.0f))
+    }
 
     Behaviors.same
 
@@ -613,9 +621,3 @@ class StatusMonitor(
   private def stopPolling(): Unit =
     timers.cancel(PollController)
     timers.cancel(PollAnalogInputs)
-
-  override def onSignal: PartialFunction[org.apache.pekko.actor.typed.Signal, Behavior[Command]] =
-    case org.apache.pekko.actor.typed.PostStop =>
-      timers.cancel(PollController)
-      timers.cancel(PollAnalogInputs)
-      this
