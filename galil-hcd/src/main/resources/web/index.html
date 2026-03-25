@@ -26,7 +26,7 @@
 
 <script>
 'use strict';
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, memo } = React;
 // Recharts may not load (CDN unavailable, air-gapped network, etc.)
 const hasRecharts = typeof Recharts !== 'undefined';
 const RC = hasRecharts ? Recharts : {};
@@ -102,11 +102,19 @@ function useHmiConnection() {
   }, [connect]);
 
   const submitCommand = useCallback((commandName, params) => {
-    return fetch(`${API_BASE}/api/command`, {
+    console.log(`[DBG] submitCommand: ${commandName}`, params);
+    const p = fetch(`${API_BASE}/api/command`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({commandName, params})
-    }).then(r => r.json()).catch(err => ({runId:'',status:'Error',message:err.message}));
+    }).then(r => r.json()).then(result => {
+      console.log(`[DBG] submitCommand response: ${commandName}`, result);
+      return result;
+    }).catch(err => {
+      console.error(`[DBG] submitCommand FAILED: ${commandName}`, err);
+      return {runId:'',status:'Error',message:err.message};
+    });
+    return p;
   }, []);
 
   return { state, connected, submitCommand, logLines };
@@ -574,7 +582,34 @@ function msgColor(msg, severity) {
 // Bit numbering: 1-based (matching Galil @IN/@OUT/@AN convention).
 // Bits are greyed when the corresponding axis slot is not active on this controller.
 // DO bits are clickable toggles — send setBit address=n, value=1 or 0.
-function IOPanel({state, onCommand}) {
+// BitCell must be defined outside IOPanel so it is a stable component type.
+// If defined inside IOPanel, React sees a new function on every render and
+// unmounts/remounts the DOM node — causing clicks to miss their target when
+// a QR poll re-render races with a mousedown/mouseup sequence.
+const BitCell = memo(({bit1, value, clickable, supported, onToggle}) => {
+  const MONO = 'var(--mono)';
+  const active = supported && value;
+  const bgColor = !supported ? '#0D1117'
+                : active    ? (clickable ? '#10B981' : '#3B82F6')
+                :              '#1F2937';
+  const textColor = !supported ? '#2D3748' : active ? '#F9FAFB' : '#6B7280';
+  return e('div', {
+    title: supported ? `${clickable?'DO':'DI'} ${bit1}` : `Not supported (axis ${String.fromCharCode(64+bit1)} inactive)`,
+    onClick: clickable ? () => onToggle(bit1, value) : undefined,
+    style:{
+      width:28, height:28, borderRadius:4, display:'flex', alignItems:'center',
+      justifyContent:'center', flexDirection:'column', gap:1,
+      backgroundColor:bgColor, border:`1px solid ${supported?'#374151':'#1A202C'}`,
+      cursor: clickable && supported ? 'pointer' : 'default',
+      userSelect:'none', transition:'background-color 0.15s'
+    }},
+    e('span',{style:{fontSize:8, color:textColor, fontFamily:MONO}}, bit1),
+    e('span',{style:{fontSize:9, fontWeight:700, color:textColor, fontFamily:MONO}},
+      supported ? (value ? '1' : '0') : '–')
+  );
+});
+
+const IOPanel = memo(function IOPanel({state, onCommand}) {
   const [open, setOpen] = React.useState(false);
   const activeAxes = state?.activeAxes || [];
 
@@ -583,46 +618,25 @@ function IOPanel({state, onCommand}) {
   // With a slave I/O expansion module (requires 8-axis controller): adds bits 9-16.
   // activeAxes.length == 8 indicates a full 8-axis controller with slave module support.
   const numAxes = activeAxes.length;
-  const isSupported = (bit1) => bit1 <= 8 || numAxes >= 8;
+  const isSupported = useCallback((bit1) => bit1 <= 8 || numAxes >= 8, [numAxes]);
 
   const dout = state?.digitalOutputs || Array(16).fill(false);
   const di   = state?.digitalInputs  || Array(16).fill(false);
   const ai   = state?.analogInputs   || Array(8).fill(0);
 
-  const toggleDO = (bit1, currentVal) => {
+  // Stable callback — does not change between renders, so BitCell onClick
+  // closures remain valid even if IOPanel re-renders due to state updates.
+  const toggleDO = useCallback((bit1, currentVal) => {
     if (!isSupported(bit1)) return;
-    onCommand('setBit', {address: bit1, value: currentVal ? 0 : 1});
-  };
+    const sendVal = currentVal ? 0 : 1;
+    onCommand('setBit', {address: bit1, value: sendVal});
+  }, [isSupported, onCommand]);
 
   const MONO = 'var(--mono)';
   const sectionLabel = (txt) => e('div', {style:{
     fontSize:9.5, fontWeight:700, color:'#6B7280', letterSpacing:1,
     fontFamily:MONO, marginBottom:4
   }}, txt);
-
-  // Render a single DI or DO bit cell
-  const BitCell = ({bit1, value, clickable}) => {
-    const supported = isSupported(bit1);
-    const active = supported && value;
-    const bgColor = !supported ? '#0D1117'
-                  : active    ? (clickable ? '#10B981' : '#3B82F6')
-                  :              '#1F2937';
-    const textColor = !supported ? '#2D3748' : active ? '#F9FAFB' : '#6B7280';
-    return e('div', {
-      title: supported ? `${clickable?'DO':'DI'} ${bit1}` : `Not supported (axis ${String.fromCharCode(64+bit1)} inactive)`,
-      onClick: clickable ? () => toggleDO(bit1, value) : undefined,
-      style:{
-        width:28, height:28, borderRadius:4, display:'flex', alignItems:'center',
-        justifyContent:'center', flexDirection:'column', gap:1,
-        backgroundColor:bgColor, border:`1px solid ${supported?'#374151':'#1A202C'}`,
-        cursor: clickable && supported ? 'pointer' : 'default',
-        userSelect:'none', transition:'background-color 0.15s'
-      }},
-      e('span',{style:{fontSize:8, color:textColor, fontFamily:MONO}}, bit1),
-      e('span',{style:{fontSize:9, fontWeight:700, color:textColor, fontFamily:MONO}},
-        supported ? (value ? '1' : '0') : '–')
-    );
-  };
 
   const headerStyle = {
     display:'flex', justifyContent:'space-between', alignItems:'center',
@@ -676,7 +690,7 @@ function IOPanel({state, onCommand}) {
           sectionLabel('DIGITAL INPUTS (read-only)'),
           e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
             ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
-              e(BitCell, {key:b, bit1:b, value:di[b-1], clickable:false})
+              e(BitCell, {key:b, bit1:b, value:di[b-1], clickable:false, supported:isSupported(b), onToggle:toggleDO})
             )
           )
         ),
@@ -686,7 +700,7 @@ function IOPanel({state, onCommand}) {
           sectionLabel('DIGITAL OUTPUTS (click to toggle)'),
           e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
             ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
-              e(BitCell, {key:b, bit1:b, value:dout[b-1], clickable:true})
+              e(BitCell, {key:b, bit1:b, value:dout[b-1], clickable:true, supported:isSupported(b), onToggle:toggleDO})
             )
           )
         ),
@@ -712,7 +726,7 @@ function IOPanel({state, onCommand}) {
       )
     ) : null
   );
-}
+});
 
 
 function HcdLogPanel({lines}) {

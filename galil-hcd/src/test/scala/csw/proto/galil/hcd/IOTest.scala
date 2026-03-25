@@ -258,7 +258,7 @@ class IOTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   /** Build a mock CI that responds to MG @AN[n] with given voltages (1-indexed). */
   private def aiMockBehavior(voltages: Map[Int, String]): Behavior[GalilCommandMessage] =
     Behaviors.receiveMessage {
-      case GalilCommandMessage.SendCommand(cmd, replyTo) =>
+      case GalilCommandMessage.SendStatusCommand(cmd, replyTo) =>
         // Handles compound "MG @AN[1],@AN[2],...,@AN[8]"
         // Returns space-separated values on one line, matching hardware format
         val response = cmd.trim match
@@ -298,7 +298,7 @@ class IOTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   test("AI poll: sends a single compound MG @AN[1..8] command") {
     val cmdLog = new ConcurrentLinkedQueue[String]()
     val loggingMock: Behavior[GalilCommandMessage] = Behaviors.receiveMessage {
-      case GalilCommandMessage.SendCommand(cmd, replyTo) =>
+      case GalilCommandMessage.SendStatusCommand(cmd, replyTo) =>
         cmdLog.add(cmd)
         replyTo ! GalilCommandMessage.SendCommandResult(
           (1 to 8).map(_ => "2.5000").mkString(" "))

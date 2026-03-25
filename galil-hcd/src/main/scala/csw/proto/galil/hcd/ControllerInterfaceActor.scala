@@ -71,6 +71,12 @@ private[hcd] object ControllerInterfaceActor {
         }
         val galilIo = connectToGalil()
 
+        // Open a dedicated second TCP connection for status polling (QR and analog inputs).
+        // The Galil DMC-500x0 supports up to 8 simultaneous TCP handles; using separate
+        // connections for commands and status means QR/AI polls never contend with
+        // command traffic (SendCommand, ExecuteProgram, HaltExecution) at the socket level.
+        val statusIo = connectToGalil()
+
         // Spawn ControllerConsoleActor as child — opens a dedicated second TCP handle
         // to receive unsolicited MG output from embedded programs. Skipped in simulation
         // mode (simulator has no second handle or CF/CW routing infrastructure).
@@ -396,8 +402,9 @@ private[hcd] object ControllerInterfaceActor {
             Behaviors.same
 
           // Execute embedded program with automatic thread allocation and start confirmation.
-          // Allocates a thread from hardware state (MG _NO), sends XQ, then confirms.
-          case GalilCommandMessage.ExecuteProgram(label, replyTo) =>
+          // Allocates a thread from hardware state (MG _NO), optionally sends preCommands,
+          // sends XQ, then confirms via MG _NO. All steps run inside galilIo.synchronized.
+          case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
             try {
               galilIo.synchronized {
                 // Step 1: Allocate a thread (queries MG _NO, updates IS)
@@ -408,32 +415,59 @@ private[hcd] object ControllerInterfaceActor {
                       error = Some(s"No threads available to execute #$label"))
 
                   case Some(thread) =>
-                    // Step 2: Send XQ command
-                    val xqCmd = s"XQ #$label,$thread"
-                    log.info(s"ExecuteProgram: $xqCmd")
-                    val xqResponses = galilIo.send(xqCmd)
-
-                    // Check for XQ rejection (? response)
-                    val xqError = xqResponses.find { case (_, bs) =>
-                      bs.utf8String.trim.startsWith("?")
+                    // Step 2 (optional): Send preCommands before XQ.
+                    // Typically a single embedded variable assignment (e.g. "dmd[0]=1000")
+                    // or a semicolon-joined compound string. Failure aborts before XQ.
+                    val preCommandError: Option[String] = preCommands match {
+                      case None => None
+                      case Some(cmds) =>
+                        log.debug(s"ExecuteProgram: preCommands: $cmds")
+                        val preResponses = galilIo.send(cmds)
+                        preResponses.find { case (_, bs) =>
+                          bs.utf8String.trim.startsWith("?")
+                        } match {
+                          case Some((_, bs)) =>
+                            val msg = s"preCommands '$cmds' rejected: ${bs.utf8String.trim}"
+                            log.warn(s"ExecuteProgram: $msg")
+                            Some(msg)
+                          case None => None
+                        }
                     }
-                    xqError match {
-                      case Some((cmd, bs)) =>
-                        log.warn(s"ExecuteProgram: $xqCmd rejected: ${bs.utf8String.trim}")
+
+                    preCommandError match {
+                      case Some(errMsg) =>
                         replyTo ! GalilCommandMessage.ExecuteProgramResult(
                           thread = thread, threadWasActive = false,
-                          error = Some(s"$xqCmd rejected: ${bs.utf8String.trim}"))
+                          error = Some(errMsg))
 
                       case None =>
-                        // Step 3: Confirm thread started (queries MG _NO, updates IS)
-                        val threadStatus = queryThreadStatus()
-                        val threadBit = 1 << thread
-                        val threadActive = (threadStatus & threadBit) != 0
-                        log.info(s"ExecuteProgram: $xqCmd — _NO=0x${threadStatus.toHexString}, " +
-                          s"thread $thread ${if threadActive then "ACTIVE" else "already finished"}")
+                        // Step 3: Send XQ command
+                        val xqCmd = s"XQ #$label,$thread"
+                        log.info(s"ExecuteProgram: $xqCmd")
+                        val xqResponses = galilIo.send(xqCmd)
 
-                        replyTo ! GalilCommandMessage.ExecuteProgramResult(
-                          thread = thread, threadWasActive = threadActive, error = None)
+                        // Check for XQ rejection (? response)
+                        val xqError = xqResponses.find { case (_, bs) =>
+                          bs.utf8String.trim.startsWith("?")
+                        }
+                        xqError match {
+                          case Some((cmd, bs)) =>
+                            log.warn(s"ExecuteProgram: $xqCmd rejected: ${bs.utf8String.trim}")
+                            replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                              thread = thread, threadWasActive = false,
+                              error = Some(s"$xqCmd rejected: ${bs.utf8String.trim}"))
+
+                          case None =>
+                            // Step 4: Confirm thread started (queries MG _NO, updates IS)
+                            val threadStatus = queryThreadStatus()
+                            val threadBit = 1 << thread
+                            val threadActive = (threadStatus & threadBit) != 0
+                            log.info(s"ExecuteProgram: $xqCmd — _NO=0x${threadStatus.toHexString}, " +
+                              s"thread $thread ${if threadActive then "ACTIVE" else "already finished"}")
+
+                            replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                              thread = thread, threadWasActive = threadActive, error = None)
+                        }
                     }
                 }
               }
@@ -488,12 +522,11 @@ private[hcd] object ControllerInterfaceActor {
             }
             Behaviors.same
 
-          // GetQR handler for StatusMonitor integration
+          // GetQR handler for StatusMonitor integration — uses dedicated status connection.
           case GalilCommandMessage.GetQR(replyTo) =>
             try {
-              // Synchronized access to prevent interference with file operations
-              val response = galilIo.synchronized {
-                galilIo.send("QR")
+              val response = statusIo.synchronized {
+                statusIo.send("QR")
               }
               val bs = response.head._2
               val dr = DataRecord(bs)
@@ -502,6 +535,24 @@ private[hcd] object ControllerInterfaceActor {
               case ex: Exception =>
                 log.error(s"QR command failed: ${ex.getMessage}")
                 // Don't send reply on error - StatusMonitor will timeout and retry
+            }
+            Behaviors.same
+
+          // SendStatusCommand — routes to the dedicated status connection.
+          // Used by StatusMonitor for analog input polling so that AI queries
+          // do not contend with command traffic on the command connection.
+          case GalilCommandMessage.SendStatusCommand(commandString, replyTo) =>
+            try {
+              log.debug(s"SendStatusCommand: $commandString")
+              val responses = statusIo.synchronized {
+                statusIo.send(commandString)
+              }
+              val allResponses = responses.map(_._2.utf8String).mkString
+              replyTo ! GalilCommandMessage.SendCommandResult(allResponses)
+            } catch {
+              case ex: Exception =>
+                log.error(s"SendStatusCommand failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
             }
             Behaviors.same
 
@@ -558,6 +609,12 @@ private[hcd] object ControllerInterfaceActor {
             
           case _ =>
             // Handle other GalilCommandMessage types if needed
+            Behaviors.same
+        }.receiveSignal {
+          case (_, org.apache.pekko.actor.typed.PostStop) =>
+            log.info("ControllerInterfaceActor stopping — closing command and status connections")
+            try galilIo.close()  catch { case _: Exception => () }
+            try statusIo.close() catch { case _: Exception => () }
             Behaviors.same
         }
       }

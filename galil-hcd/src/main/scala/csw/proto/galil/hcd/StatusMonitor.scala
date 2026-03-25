@@ -387,10 +387,12 @@ class StatusMonitor(
 
     // Single compound MG command — one round-trip instead of 8 sequential asks.
     // Hardware returns space-separated values on one line: "2.5839 2.5839 0.0000 ..."
+    // Uses SendStatusCommand so the query goes on the dedicated status connection,
+    // keeping analog input polling off the command connection.
     val mgCmd = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
 
     val future = AskPattern.Askable(controllerInterface).ask[GalilCommandMessage.SendCommandResult](
-      ref => GalilCommandMessage.SendCommand(mgCmd, ref)
+      ref => GalilCommandMessage.SendStatusCommand(mgCmd, ref)
     )
 
     context.pipeToSelf(future) {

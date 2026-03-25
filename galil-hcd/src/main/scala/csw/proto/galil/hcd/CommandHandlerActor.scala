@@ -759,16 +759,18 @@ object CommandHandlerActor {
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
     loggerFactory: LoggerFactory,
-    timeout: FiniteDuration = defaultMotionTimeout
+    timeout: FiniteDuration = defaultMotionTimeout,
+    preCommands: Option[String] = None
   ): Unit = {
     // Step 1: Pre-escalate polling rate so StatusMonitor is at action rate
     // before the program starts. This ensures IS updates flow quickly.
     statusMonitor ! StatusMonitor.SetPollingRate(10.0)
 
-    // Step 2: Execute program via CI actor (thread allocated from pool, XQ + MG _NO atomically)
+    // Step 2: Execute program via CI actor (thread allocated from pool, optional preCommands,
+    // XQ, and MG _NO confirmation all inside galilIo.synchronized in the CI actor)
     val result = Try {
       val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.ExecuteProgramResult](
-        ref => GalilCommandMessage.ExecuteProgram(label, ref)
+        ref => GalilCommandMessage.ExecuteProgram(label, ref, preCommands)
       )(askTimeout, askScheduler)
       Await.result(future, askTimeout.duration)
     }
@@ -949,25 +951,19 @@ object CommandHandlerActor {
       case None => defaultMotionTimeout
     }
 
-    // 1. Set demand in embedded variable
-    sendToController(ciActor, s"dmd[$idx]=$target", log, askTimeout, askScheduler) match {
-      case Failure(ex) =>
-        crm.updateCommand(Error(runId, s"positionAxis $axis: failed to set demand: ${ex.getMessage}"))
-        return
-      case _ =>
-    }
-
-    // 2. Update AxisState: demand (for inPosition calc) + transition to Moving
+    // 1. Update AxisState: demand (for inPosition calc) + transition to Moving
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
       ctx.system.ignoreRef)
 
-    // 3. Update AxisCmdState: set active command, clear error
+    // 2. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("activeCommand" -> ActiveCommand.Move, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // 4. Execute embedded program with computed timeout
+    // 3. Execute embedded program with computed timeout.
+    // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
+    // block, atomically before XQ — eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -984,7 +980,8 @@ object CommandHandlerActor {
       askScheduler = askScheduler,
       ctx = ctx,
       loggerFactory = loggerFactory,
-      timeout = moveTimeout
+      timeout = moveTimeout,
+      preCommands = Some(s"dmd[$idx]=$target")
     )
   }
 
@@ -1237,14 +1234,6 @@ object CommandHandlerActor {
       crm.updateCommand(Completed(runId))
       return
 
-    // Set demand in embedded variable
-    sendToController(ciActor, s"dmd[$idx]=$target", log, askTimeout, askScheduler) match {
-      case Failure(ex) =>
-        crm.updateCommand(Error(runId, s"offsetAxis $axis: failed to set demand: ${ex.getMessage}"))
-        return
-      case _ =>
-    }
-
     // Update state
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
@@ -1256,7 +1245,9 @@ object CommandHandlerActor {
     // Compute timeout from motor config
     val moveTimeout = computeMoveTimeout(Math.abs(distance), currentState.get, log)
 
-    // Execute move with thread confirmation + watcher (same mask as positionAxis)
+    // Execute move with thread confirmation + watcher (same mask as positionAxis).
+    // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
+    // block, atomically before XQ — eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -1273,7 +1264,8 @@ object CommandHandlerActor {
       askScheduler = askScheduler,
       ctx = ctx,
       loggerFactory = loggerFactory,
-      timeout = moveTimeout
+      timeout = moveTimeout,
+      preCommands = Some(s"dmd[$idx]=$target")
     )
   }
 
@@ -1334,25 +1326,19 @@ object CommandHandlerActor {
     if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
       checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
 
-    // 1. Set position demand in embedded variable
-    sendToController(ciActor, s"dmd[$idx]=$position", log, askTimeout, askScheduler) match {
-      case Failure(ex) =>
-        crm.updateCommand(Error(runId, s"selectWheel $axis: failed to set demand: ${ex.getMessage}"))
-        return
-      case _ =>
-    }
-
-    // 2. Update AxisCmdState: set active command, clear error
+    // 1. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("activeCommand" -> ActiveCommand.Select, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // 3. Transition to Moving
+    // 2. Transition to Moving
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("axisState" -> AxisStateEnum.Moving),
       ctx.system.ignoreRef)
 
-    // 4. Execute embedded program with thread confirmation + watcher
+    // 3. Execute embedded program with thread confirmation + watcher.
+    // dmd[idx]=position is sent as preCommands inside ExecuteProgram's galilIo.synchronized
+    // block, atomically before XQ — eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Select${axis.char}",
       axis = axis,
@@ -1368,7 +1354,8 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
-      loggerFactory = loggerFactory
+      loggerFactory = loggerFactory,
+      preCommands = Some(s"dmd[$idx]=$position")
     )
   }
 
@@ -1485,25 +1472,19 @@ object CommandHandlerActor {
       case None => defaultMotionTimeout
     }
 
-    // 1. Set demand in embedded variable
-    sendToController(ciActor, s"dmd[$idx]=$target", log, askTimeout, askScheduler) match {
-      case Failure(ex) =>
-        crm.updateCommand(Error(runId, s"positionWheel $axis: failed to set demand: ${ex.getMessage}"))
-        return
-      case _ =>
-    }
-
-    // 2. Update AxisState: demand (for inPosition calc) + transition to Moving
+    // 1. Update AxisState: demand (for inPosition calc) + transition to Moving
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
       ctx.system.ignoreRef)
 
-    // 3. Update AxisCmdState: set active command, clear error
+    // 2. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("activeCommand" -> ActiveCommand.Move, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // 4. Execute embedded program with computed timeout (same #MoveX as positionAxis)
+    // 3. Execute embedded program with computed timeout (same #MoveX as positionAxis).
+    // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
+    // block, atomically before XQ — eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -1520,7 +1501,8 @@ object CommandHandlerActor {
       askScheduler = askScheduler,
       ctx = ctx,
       loggerFactory = loggerFactory,
-      timeout = moveTimeout
+      timeout = moveTimeout,
+      preCommands = Some(s"dmd[$idx]=$target")
     )
   }
 
@@ -1588,12 +1570,6 @@ object CommandHandlerActor {
       case Some(t2) => s"${axis.char}target[0]=$target1;${axis.char}target[1]=$t2"
       case None     => s"${axis.char}target[0]=$target1"
     }
-    sendToController(ciActor, targetCmd, log, askTimeout, askScheduler) match {
-      case Failure(ex) =>
-        crm.updateCommand(Error(runId, s"trackAxis $axis: failed to set targets: ${ex.getMessage}"))
-        return
-      case _ =>
-    }
 
     // 2. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
@@ -1605,8 +1581,10 @@ object CommandHandlerActor {
       Map("demand" -> target1, "axisState" -> AxisStateEnum.Tracking),
       ctx.system.ignoreRef)
 
-    // 4. Execute embedded tracking program with thread confirmation + watcher
-    //    On completion, axis stays in Tracking (not Idle) — motor continues jogging
+    // 4. Execute embedded tracking program with thread confirmation + watcher.
+    // targetCmd is sent as preCommands inside ExecuteProgram's galilIo.synchronized
+    // block, atomically before XQ — eliminating a separate CI round-trip.
+    // On completion, axis stays in Tracking (not Idle) — motor continues jogging.
     executeProgramAndWatch(
       label = s"Track${axis.char}",
       axis = axis,
@@ -1622,7 +1600,8 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
-      loggerFactory = loggerFactory
+      loggerFactory = loggerFactory,
+      preCommands = Some(targetCmd)
     )
   }
 

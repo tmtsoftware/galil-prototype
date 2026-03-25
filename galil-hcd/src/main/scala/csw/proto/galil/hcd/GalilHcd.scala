@@ -50,29 +50,41 @@ object GalilCommandMessage {
   case class DownloadProgram(replyTo: ActorRef[DownloadProgramResult]) extends GalilCommandMessage
   case class DownloadProgramResult(program: String, error: Option[String] = None) extends GalilCommandMessage
 
-  // Synchronous command execution for CommandHandlerActor
-  // Sends a command string and returns the response (or error)
+  // Synchronous command execution for CommandHandlerActor — uses the dedicated command connection.
   case class SendCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
   case class SendCommandResult(response: String, error: Option[String] = None)
+
+  // Status polling commands (QR, analog inputs) — uses the dedicated status connection.
+  // Routes to statusIo in the CI actor, keeping status traffic off the command connection.
+  case class SendStatusCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
 
   /**
    * Execute an embedded program with automatic thread allocation.
    *
-   * The CI actor queries MG _NO to find a free thread (1-7), sends
-   * "XQ #label,thread", then queries MG _NO again to confirm the thread
-   * started. Both MG _NO results update IS threadStatus in real-time.
-   * The allocated thread number is returned in the result.
+   * The CI actor queries MG _NO to find a free thread (1-7), optionally sends
+   * preCommands as a single compound command, sends "XQ #label,thread", then
+   * queries MG _NO again to confirm the thread started. Both MG _NO results
+   * update IS threadStatus in real-time. The allocated thread number is returned
+   * in the result.
+   *
+   * preCommands (if present) is sent atomically within the same galilIo.synchronized
+   * block as the XQ — eliminating a separate CI round-trip for callers that need to
+   * set embedded variables (e.g. dmd[idx]=target) immediately before launching a program.
+   * If the preCommands send fails, ExecuteProgram returns an error and XQ is not sent.
    *
    * Thread management uses the hardware as the source of truth — no
    * separate pool bookkeeping. The controller's _NO bitmask is always
    * authoritative for thread availability.
    *
-   * @param label   Program label without # prefix (e.g. "MoveA", "HomeB")
-   * @param replyTo Actor to receive the result
+   * @param label       Program label without # prefix (e.g. "MoveA", "HomeB")
+   * @param replyTo     Actor to receive the result
+   * @param preCommands Optional semicolon-joined command string to send before XQ
+   *                    (e.g. "dmd[0]=1000" or "Atarget[0]=500;Atarget[1]=10")
    */
   case class ExecuteProgram(
     label: String,
-    replyTo: ActorRef[ExecuteProgramResult]
+    replyTo: ActorRef[ExecuteProgramResult],
+    preCommands: Option[String] = None
   ) extends GalilCommandMessage
 
   /**

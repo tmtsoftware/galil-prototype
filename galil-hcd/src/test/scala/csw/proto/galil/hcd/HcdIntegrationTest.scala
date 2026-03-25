@@ -1113,7 +1113,7 @@ class HcdIntegrationTest
     val address = 1  // @OUT[1] — verified safe on the lab controller
 
     // ── Set bit 1 ──
-    // Subscribe before sending so we don't miss the publication triggered by the QR poll
+    // Subscribe before sending so we don't miss any publications.
     val setProbe = TestProbe[CurrentState]()
     val setSub = commandService.subscribeCurrentState(Set(ioStateName), cs => setProbe.ref ! cs)
 
@@ -1130,12 +1130,24 @@ class HcdIntegrationTest
     assert(setResponse.isInstanceOf[Completed],
       s"setBit value=1 should complete, got: $setResponse")
 
-    // Wait for the next InputOutputState publication (may be up to 1s at standby poll rate)
-    val setIOState = setProbe.receiveMessage(stateTimeout)
+    // The QR poll reflecting the SB command may not have fired yet — or a stale
+    // publication (polled before SB reached the controller) may arrive first.
+    // Keep consuming publications until one shows the expected bit set, or timeout.
+    val deadline = System.currentTimeMillis() + stateTimeout.toMillis
+    var outputsAfterSet: Array[Boolean] = Array.empty
+    var found = false
+    while (!found && System.currentTimeMillis() < deadline) {
+      val remaining = (deadline - System.currentTimeMillis()).max(100).millis
+      val state = setProbe.receiveMessage(remaining)
+      val outputs = state(InputOutputStateCurrentState.digitalOutputsKey).values
+      if (outputs(address - 1)) {
+        outputsAfterSet = outputs
+        found = true
+      }
+    }
     setSub.cancel()
-    val outputsAfterSet = setIOState(InputOutputStateCurrentState.digitalOutputsKey).values
     println(s"  digitalOutputs after set: ${outputsAfterSet.take(8).mkString("[", ",", "]")}")
-    assert(outputsAfterSet(address - 1),
+    assert(found,
       s"digitalOutputs(${address-1}) should be true after setBit value=1")
 
     // ── Clear bit 1 ──
@@ -1155,11 +1167,22 @@ class HcdIntegrationTest
     assert(clearResponse.isInstanceOf[Completed],
       s"setBit value=0 should complete, got: $clearResponse")
 
-    val clrIOState = clrProbe.receiveMessage(stateTimeout)
+    // Same pattern: drain until we see the bit cleared.
+    val clrDeadline = System.currentTimeMillis() + stateTimeout.toMillis
+    var outputsAfterClear: Array[Boolean] = Array.empty
+    var cleared = false
+    while (!cleared && System.currentTimeMillis() < clrDeadline) {
+      val remaining = (clrDeadline - System.currentTimeMillis()).max(100).millis
+      val state = clrProbe.receiveMessage(remaining)
+      val outputs = state(InputOutputStateCurrentState.digitalOutputsKey).values
+      if (!outputs(address - 1)) {
+        outputsAfterClear = outputs
+        cleared = true
+      }
+    }
     clrSub.cancel()
-    val outputsAfterClear = clrIOState(InputOutputStateCurrentState.digitalOutputsKey).values
     println(s"  digitalOutputs after clear: ${outputsAfterClear.take(8).mkString("[", ",", "]")}")
-    assert(!outputsAfterClear(address - 1),
+    assert(cleared,
       s"digitalOutputs(${address-1}) should be false after setBit value=0")
   }
 

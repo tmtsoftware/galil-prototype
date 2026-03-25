@@ -61,7 +61,8 @@ class RotatingMechanismTest extends AnyFunSuite with Matchers with BeforeAndAfte
           commandLog.add(cmd)
           replyTo ! GalilCommandMessage.SendCommandResult(":")
           Behaviors.same
-        case GalilCommandMessage.ExecuteProgram(label, replyTo) =>
+        case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
+          preCommands.foreach(cmd => commandLog.add(cmd))
           val thread = nextThread.getAndIncrement()
           commandLog.add(s"XQ #$label,$thread")
           replyTo ! GalilCommandMessage.ExecuteProgramResult(

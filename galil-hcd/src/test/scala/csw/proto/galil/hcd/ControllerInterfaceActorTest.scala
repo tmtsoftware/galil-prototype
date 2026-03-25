@@ -150,9 +150,11 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
     responses should have size 1
     val (_, response) = responses.head
     
-    // QR returns 226 or 227 bytes depending on controller model
-    // DMC-4103 returns 226, DMC-4000 returns 227
-    response.length should (be(226) or be(227))
+    // QR record size = 82 (fixed header + general state) + numAxes * 36 (per-axis block)
+    // 4-axis hardware: 226 bytes; 8-axis simulator: 370 bytes
+    val size = response.length
+    (size - 82) % 36 should be(0)
+    size should be >= 118  // at least 1 axis
     
     info(s"Binary QR response correctly received (${response.length} bytes)")
   }
@@ -231,8 +233,10 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
     responses should have size 1
     val (_, dataRecord) = responses.head
     
-    // Should be 226 or 227 bytes (varies by controller model)
-    dataRecord.length should (be(226) or be(227))
+    // QR record size = 82 (fixed) + numAxes * 36; 4-axis: 226, 8-axis: 370
+    val size = dataRecord.length
+    (size - 82) % 36 should be(0)
+    size should be >= 118
     
     // First byte is header
     val header = dataRecord(0)
@@ -258,8 +262,10 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
     val binaryResp = galilIo.send("QR")
     val binaryData = binaryResp.head._2
     
-    // QR should be 226 or 227 bytes (varies by controller model)
-    binaryData.length should (be(226) or be(227))
+    // QR record size = 82 (fixed) + numAxes * 36; 4-axis: 226, 8-axis: 370
+    val binarySize = binaryData.length
+    (binarySize - 82) % 36 should be(0)
+    binarySize should be >= 118
     
     // Text should be variable length and ASCII-ish
     textData.length should be < 100

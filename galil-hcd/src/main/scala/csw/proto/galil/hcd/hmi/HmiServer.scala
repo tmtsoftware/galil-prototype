@@ -1,7 +1,7 @@
 package csw.proto.galil.hcd.hmi
 
 import org.apache.pekko.actor.typed.{ActorRef, ActorSystem}
-import org.apache.pekko.actor.typed.scaladsl.{AskPattern, Behaviors}
+import org.apache.pekko.actor.typed.scaladsl.AskPattern
 import org.apache.pekko.http.scaladsl.Http
 import org.apache.pekko.http.scaladsl.model._
 import org.apache.pekko.http.scaladsl.model.ws.{Message, TextMessage}
@@ -63,21 +63,24 @@ class HmiServer(
     .toMat(BroadcastHub.sink(bufferSize = 64))(Keep.both)
     .run()
 
-  // Subscribe to InternalStateActor for all state change notifications.
-  // Each StateChanged delivers the full HcdState snapshot, which we serialize
-  // to JSON and push into the broadcast hub.
-  private val stateSubscriber: ActorRef[InternalStateActor.StateChanged] = {
-    system.systemActorOf(
-      Behaviors.receive[InternalStateActor.StateChanged] { (_, msg) =>
-        val json = stateToJson(msg.hcdState, hcdPrefix)
-        wsPublisher ! json
-        Behaviors.same
-      },
-      "hmi-state-subscriber"
-    )
-  }
-  // Register subscription with IS actor (no filter — receive all changes)
-  internalStateActor ! InternalStateActor.Subscribe(stateSubscriber, None)
+  // Timer-driven WebSocket state push at a fixed rate (4Hz).
+  //
+  // Decouple WebSocket push rate from IS update rate. A 4Hz scheduler
+  // tick asks IS for the current state snapshot and pushes it. The system dispatcher
+  // sees at most 4 state publishes/second regardless of QR poll rate or motion state.
+  private val wsUpdateInterval: FiniteDuration = 250.millis  // 4Hz
+
+  private val wsCancellable = system.scheduler.scheduleWithFixedDelay(
+    initialDelay = wsUpdateInterval,
+    delay = wsUpdateInterval
+  )(() => {
+    import AskPattern._
+    internalStateActor
+      .ask[HcdState](ref => InternalStateActor.GetHcdState(ref))(timeout, system.scheduler)
+      .foreach { state =>
+        wsPublisher ! stateToJson(state, hcdPrefix)
+      }
+  })(ec)
 
   // Register HmiLogAppender broadcast — the appender is instantiated by the CSW
   // framework before HmiServer exists, so wiring is done here at start time.
@@ -315,8 +318,8 @@ class HmiServer(
     // Disable log appender broadcast before teardown
     HmiLogAppender.clearBroadcast()
 
-    // Unsubscribe from IS
-    internalStateActor ! InternalStateActor.Unsubscribe(stateSubscriber)
+    // Cancel the WebSocket state push timer
+    wsCancellable.cancel()
 
     bindingFuture.foreach { bf =>
       bf.flatMap(_.unbind()).onComplete { _ =>
