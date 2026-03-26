@@ -4,29 +4,26 @@ import java.io.IOException
 
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
-import org.apache.pekko.util.ByteString
-import com.typesafe.config.Config
-import csw.command.client.CommandResponseManager
-import csw.framework.CurrentStatePublisher
 import csw.logging.client.scaladsl.LoggerFactory
-import csw.params.commands.CommandResponse.{Completed, Error}
-import csw.params.commands.Result
-import csw.params.core.models.{Id, ObsId}
-import csw.params.core.states.{CurrentState, StateName}
 import csw.prefix.models.Prefix
-import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
-import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
+import csw.proto.galil.hcd.GalilCommandMessage.GalilCommand
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
 
 /**
- * Worker actor that handles the Galil I/O
- * 
- * Note: GetQR and QRResult are defined in GalilHcd.scala as part of GalilCommandMessage
+ * Owns the command TCP connection to the Galil DMC-500x0 controller.
+ *
+ * Responsibilities:
+ *   - Opens and maintains the command TCP handle (galilIo)
+ *   - Serializes all command traffic: SendCommand, ExecuteProgram, HaltExecution, DownloadProgram
+ *   - Manages thread allocation via MG _NO queries
+ *   - Spawns ControllerConsoleActor (hardware only) to capture unsolicited MG output
+ *
+ * QR polling and analog input queries are handled by ControllerStatusActor on its
+ * own independent TCP handle — no status traffic passes through this actor.
  */
-private[hcd] object ControllerInterfaceActor {
+private[hcd] object ControllerCommandActor {
 
   /**
    * Parsed identity of a Galil controller from the ID command response.
@@ -45,12 +42,8 @@ private[hcd] object ControllerInterfaceActor {
 
   def behavior(
       galilConfig: GalilConfig,
-      config: Config,
-      commandResponseManager: CommandResponseManager,
-      adapter: CSWDeviceAdapter,
       loggerFactory: LoggerFactory,
       galilPrefix: Prefix,
-      currentStatePublisher: CurrentStatePublisher,
       internalStateActor: ActorRef[InternalStateActor.Command],
       simulate: Boolean = false
   ): Behavior[GalilCommandMessage] =
@@ -58,33 +51,19 @@ private[hcd] object ControllerInterfaceActor {
       Behaviors.setup { ctx =>
         val log = loggerFactory.getLogger(ctx)
 
-        // Connect to Galil device and throw error if that doesn't work
-        def connectToGalil(): GalilIo = {
-          try {
-            GalilIoTcp(galilConfig.host, galilConfig.port)
-          }
+        // Open the command TCP connection
+        val galilIo: GalilIo =
+          try GalilIoTcp(galilConfig.host, galilConfig.port)
           catch {
             case ex: Exception =>
-              log.error(s"Failed to connect to Galil device at ${galilConfig.host}:${galilConfig.port}")
+              log.error(s"Failed to connect to Galil at ${galilConfig.host}:${galilConfig.port}")
               throw ex
           }
-        }
-        val galilIo = connectToGalil()
 
-        // Open a dedicated second TCP connection for status polling (QR and analog inputs).
-        // The Galil DMC-500x0 supports up to 8 simultaneous TCP handles; using separate
-        // connections for commands and status means QR/AI polls never contend with
-        // command traffic (SendCommand, ExecuteProgram, HaltExecution) at the socket level.
-        val statusIo = connectToGalil()
-
-        // Spawn ControllerConsoleActor as child — opens a dedicated second TCP handle
-        // to receive unsolicited MG output from embedded programs. Skipped in simulation
-        // mode (simulator has no second handle or CF/CW routing infrastructure).
-        //
-        // The latch blocks this Behaviors.setup block until CF I + CW 2 complete.
-        // GalilHcd.initialize() blocks on GetIdentity after ctx.spawn(CI actor), so
-        // the wait is inline in the init chain — #Init will not run until the console
-        // handle is live and capturing MG output.
+        // Spawn ControllerConsoleActor as a child — opens its own TCP handle and
+        // claims unsolicited MG output via CF I + CW 2. Skipped in simulation mode.
+        // The latch blocks setup until CF I + CW 2 complete, guaranteeing the console
+        // handle is live before #Init runs.
         if !simulate then
           val consoleLatch = new java.util.concurrent.CountDownLatch(1)
           ctx.spawn(
@@ -215,141 +194,6 @@ private[hcd] object ControllerInterfaceActor {
               log.warn(s"No free threads available (_NO=0x${threadStatus.toHexString})")
               None
           }
-        }
-
-        def handleDataRecordResponse(dr: DataRecord, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
-          log.debug(s"handleDataRecordResponse $dr")
-          val returnResponse = DataRecord.makeCommandResponse(runId, maybeObsId, dr)
-          commandResponseManager.updateCommand(returnResponse)
-        }
-
-        def handleDataRecordRawResponse(
-            bs: ByteString,
-            runId: Id,
-            maybeObsId: Option[ObsId],
-            cmdMapEntry: CommandMapEntry
-        ): Unit = {
-          val returnResponse = Completed(runId, new Result().add(DataRecord.key.set(bs.toByteBuffer.array())))
-          commandResponseManager.updateCommand(returnResponse)
-        }
-
-        def handleUploadProgram(filename: String, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
-          log.info(s"Uploading program from file: $filename")
-          
-          // NOTE: StatusMonitor QR polling is paused by GalilHcd before this is called
-          
-          try {
-            // Small delay to let any in-flight QR command complete
-            Thread.sleep(100)
-            
-            ProgramFileManager.readProgramFile(filename, config) match {
-              case Success(programText) =>
-                val cleanedProgram = ProgramFileManager.prepareProgramForUpload(programText)
-                log.debug(s"Program prepared: ${cleanedProgram.length} characters")
-                
-                try {
-                  galilIo.synchronized {
-                    log.debug("Halting running programs (HX)")
-                    val hxResponses = galilIo.send("HX")
-                    log.debug(s"HX response: ${hxResponses.map(_._2.utf8String).mkString}")
-                    
-                    log.debug("Entering DL mode")
-                    galilIo.writeRaw("DL")
-                    
-                    log.debug(s"Streaming ${cleanedProgram.length} characters of program data")
-                    galilIo.writeRaw(cleanedProgram)
-                    
-                    log.debug("Sending DL terminator")
-                    val termResponses = galilIo.send("\\")
-                    val termResponse = termResponses.map(_._2.utf8String).mkString.trim
-                    log.debug(s"Terminator response: '$termResponse'")
-                    
-                    if (termResponse.nonEmpty && !termResponse.contains(":")) {
-                      throw new RuntimeException(s"Upload terminator failed: $termResponse")
-                    }
-                    
-                    val residual = galilIo.drainAndShowBuffer()
-                    if (residual.nonEmpty) {
-                      log.warn(s"Residual data after DL (${residual.length} bytes): ${residual.take(200)}")
-                    }
-                  }
-                  
-                  log.info(s"Program uploaded successfully from $filename")
-                  commandResponseManager.updateCommand(Completed(runId, new Result()))
-                } catch {
-                  case ex: Exception =>
-                    log.error(s"Failed to upload program: ${ex.getMessage}")
-                    commandResponseManager.updateCommand(
-                      Error(runId, s"Upload failed: ${ex.getMessage}")
-                    )
-                }
-                
-              case Failure(ex) =>
-                log.error(s"Failed to read program file $filename: ${ex.getMessage}")
-                commandResponseManager.updateCommand(
-                  Error(runId, s"Failed to read program file: ${ex.getMessage}")
-                )
-            }
-          } finally {
-            // NOTE: StatusMonitor QR polling is resumed by GalilHcd after this completes
-            Thread.sleep(100)
-          }
-        }
-
-        def handledownloadProgram(filename: String, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
-          log.info(s"Downloading program to file: $filename")
-          
-          // NOTE: StatusMonitor QR polling is paused by GalilHcd before this is called
-          
-          try {
-            // Small delay to let any in-flight QR complete
-            Thread.sleep(100)
-            
-            val responses = galilIo.synchronized {
-              val preUL = galilIo.drainAndShowBuffer()
-              if (preUL.nonEmpty && !(preUL.length == 1 && preUL == ":")) {
-                log.warn(s"Unexpected data before UL command (${preUL.length} bytes)")
-              }
-              galilIo.send("UL")
-            }
-            log.debug(s"UL returned ${responses.size} chunks")
-            
-            val allText = responses.map(_._2.utf8String).mkString
-            val cleanedProgram = allText
-              .stripSuffix("\\")
-              .stripSuffix("\u001A")
-              .trim
-            log.debug(s"Program received: ${cleanedProgram.length} characters")
-            
-            ProgramFileManager.writeProgramFile(filename, cleanedProgram, config) match {
-              case Success(filePath) =>
-                log.info(s"Program downloaded successfully to $filePath")
-                commandResponseManager.updateCommand(
-                  Completed(runId, new Result().add(CSWDeviceAdapter.filenameKey.set(filePath)))
-                )
-                
-              case Failure(ex) =>
-                log.error(s"Failed to write program file: ${ex.getMessage}")
-                commandResponseManager.updateCommand(
-                  Error(runId, s"Failed to write program file: ${ex.getMessage}")
-                )
-            }
-          } catch {
-            case ex: Exception =>
-              log.error(s"Failed to download programs: ${ex.getMessage}")
-              commandResponseManager.updateCommand(
-                Error(runId, s"Download failed: ${ex.getMessage}")
-              )
-          } finally {
-            // NOTE: StatusMonitor QR polling is resumed by GalilHcd after this completes
-            Thread.sleep(100)
-          }
-        }
-
-        def handleGalilResponse(response: String, runId: Id, maybeObsId: Option[ObsId], cmdMapEntry: CommandMapEntry): Unit = {
-          log.debug(s"handleGalilResponse $response")
-          val returnResponse = adapter.makeResponse(runId, maybeObsId, cmdMapEntry, response)
-          commandResponseManager.updateCommand(returnResponse)
         }
 
         Behaviors.receiveMessage[GalilCommandMessage] {
@@ -522,99 +366,16 @@ private[hcd] object ControllerInterfaceActor {
             }
             Behaviors.same
 
-          // GetQR handler for StatusMonitor integration — uses dedicated status connection.
-          case GalilCommandMessage.GetQR(replyTo) =>
-            try {
-              val response = statusIo.synchronized {
-                statusIo.send("QR")
-              }
-              val bs = response.head._2
-              val dr = DataRecord(bs)
-              replyTo ! GalilCommandMessage.QRResult(dr)
-            } catch {
-              case ex: Exception =>
-                log.error(s"QR command failed: ${ex.getMessage}")
-                // Don't send reply on error - StatusMonitor will timeout and retry
-            }
+          // GalilCommand, QRResult, DownloadProgramResult, SendCommandResult are reply-direction
+          // message types that should never be sent to this actor. Log and ignore.
+          case unexpected =>
+            log.warn(s"ControllerCommandActor received unexpected message: $unexpected")
             Behaviors.same
 
-          // SendStatusCommand — routes to the dedicated status connection.
-          // Used by StatusMonitor for analog input polling so that AI queries
-          // do not contend with command traffic on the command connection.
-          case GalilCommandMessage.SendStatusCommand(commandString, replyTo) =>
-            try {
-              log.debug(s"SendStatusCommand: $commandString")
-              val responses = statusIo.synchronized {
-                statusIo.send(commandString)
-              }
-              val allResponses = responses.map(_._2.utf8String).mkString
-              replyTo ! GalilCommandMessage.SendCommandResult(allResponses)
-            } catch {
-              case ex: Exception =>
-                log.error(s"SendStatusCommand failed: ${ex.getMessage}")
-                replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
-            }
-            Behaviors.same
-
-          case GalilRequest(commandString, runId, maybeObsId, commandKey, setup) =>
-            log.debug(s"GalilRequest: ${commandKey.name}")
-            
-            // Check for special commands that need file handling
-            commandKey.name match {
-              case "uploadProgram" =>
-                setup.get(CSWDeviceAdapter.filenameKey) match {
-                  case Some(param) =>
-                    val filename = param.head
-                    handleUploadProgram(filename, runId, maybeObsId, commandKey)
-                  case None =>
-                    log.error("uploadProgram command missing filename parameter")
-                    commandResponseManager.updateCommand(
-                      Error(runId, "Missing filename parameter")
-                    )
-                }
-                Behaviors.same
-                
-              case "downloadProgram" =>
-                setup.get(CSWDeviceAdapter.filenameKey) match {
-                  case Some(param) =>
-                    val filename = param.head
-                    handledownloadProgram(filename, runId, maybeObsId, commandKey)
-                  case None =>
-                    log.error("downloadProgram command missing filename parameter")
-                    commandResponseManager.updateCommand(
-                      Error(runId, "Missing filename parameter")
-                    )
-                }
-                Behaviors.same
-                
-              case "getDataRecord" | "getDataRecordRaw" if commandString.startsWith("QR") =>
-                val response = galilIo.send(commandString)
-                val bs       = response.head._2
-                log.debug(s"Data Record size: ${bs.size})")
-                if (commandKey.name.equals("getDataRecord")) {
-                  val dr = DataRecord(bs)
-                  log.debug(s"Data Record: $dr")
-                  handleDataRecordResponse(dr, runId, maybeObsId, commandKey)
-                }
-                else {
-                  handleDataRecordRawResponse(bs, runId, maybeObsId, commandKey)
-                }
-                Behaviors.same
-                
-              case _ =>
-                val response = galilSend(commandString)
-                handleGalilResponse(response, runId, maybeObsId, commandKey)
-                Behaviors.same
-            }
-            
-          case _ =>
-            // Handle other GalilCommandMessage types if needed
-            Behaviors.same
         }.receiveSignal {
           case (_, org.apache.pekko.actor.typed.PostStop) =>
-            log.info("ControllerInterfaceActor stopping — closing command and status connections")
-            try galilIo.close()  catch { case _: Exception => () }
-            try statusIo.close() catch { case _: Exception => () }
+            log.info("ControllerCommandActor stopping — closing command connection")
+            try galilIo.close() catch { case _: Exception => () }
             Behaviors.same
         }
       }

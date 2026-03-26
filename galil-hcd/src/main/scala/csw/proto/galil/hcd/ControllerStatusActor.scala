@@ -5,8 +5,7 @@ import csw.logging.client.scaladsl.LoggerFactory
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import csw.proto.galil.io.DataRecord
 import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
-import org.apache.pekko.actor.typed.scaladsl.AskPattern
-import org.apache.pekko.util.Timeout
+import csw.proto.galil.io.{GalilIo, GalilIoTcp}
 
 import java.time.Instant
 import scala.concurrent.Future
@@ -14,20 +13,20 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 /**
- * StatusMonitor Actor (SDD Section 4.6.3)
- * 
+ * ControllerStatusActor (SDD Section 4.6.5)
+ *
+ * Owns the status TCP connection to the Galil DMC-500x0 controller.
+ * Opens its own GalilIo instance independently of ControllerCommandActor,
+ * so QR and AI polls never contend with command traffic at the socket or
+ * actor-mailbox level.
+ *
  * Responsibilities:
- * - Periodically poll controller with QR command
- * - Parse DataRecord response
- * - Update InternalStateActor with current positions, velocities, switches, etc.
- * - Handle errors and maintain polling even on failures
- * 
- * Integration:
- * - Requests QR from ControllerInterfaceActor
- * - Updates state via InternalStateActor
- * - Runs at configurable rate (default: 10Hz / 100ms)
+ *   - Opens and maintains the status TCP handle (statusIo)
+ *   - Polls the DataRecord (QR) at an adaptive rate (1Hz standby / 10Hz action)
+ *   - Polls analog inputs (MG @AN[1..8]) at 1Hz independently
+ *   - Parses DataRecord and updates InternalStateActor with positions, I/O, threads
  */
-object StatusMonitor:
+object ControllerStatusActor:
   
   // Protocol
   sealed trait Command
@@ -49,28 +48,17 @@ object StatusMonitor:
   private case class AnalogInputsResult(values: Array[Float]) extends Command
   
   /**
-   * Response from ControllerInterface with QR data
+   * Inject a parsed DataRecord directly (used in tests).
    */
   case class QRResponse(dataRecord: DataRecord) extends Command
   
   /**
-   * Error from ControllerInterface
+   * Inject a QR error directly (used in tests).
    */
   case class QRError(error: String) extends Command
   
   /**
-   * Command to pause QR polling (for file operations - UL/DL)
-   * CRITICAL: Must be called before file operations to prevent buffer corruption
-   */
-  case object PauseQRPolling extends Command
-  
-  /**
-   * Command to resume QR polling (after file operations)
-   */
-  case object ResumeQRPolling extends Command
-  
-  /**
-   * Command to start/stop polling (deprecated - use Pause/Resume instead)
+   * Command to start/stop polling
    */
   case class SetPolling(enabled: Boolean) extends Command
   
@@ -95,23 +83,27 @@ object StatusMonitor:
    * Response to GetPollingStatus
    */
   case class PollingStatus(
-    enabled: Boolean, 
-    rateHz: Double, 
-    lastPollTime: Option[Long], 
-    errorCount: Int,
-    paused: Boolean  // NEW: Indicates if paused for file operations
+    enabled: Boolean,
+    rateHz: Double,
+    lastPollTime: Option[Long],
+    errorCount: Int
   )
   
   /**
-   * Create StatusMonitor actor
-   * 
-   * @param controllerInterface Actor to request QR data from
-   * @param internalState Actor to update with parsed data
+   * Create ControllerStatusActor.
+   *
+   * In production (simulate=false) the actor opens its own GalilIoTcp connection.
+   * In test mode (simulate=true or when a mock statusIo is injected via the
+   * test-only overload below) it uses the provided GalilIo instead.
+   *
+   * @param galilConfig          Host/port for the status TCP connection
+   * @param internalState        Actor to update with parsed data
+   * @param loggerFactory        CSW logger factory
    * @param standbyPollingRateHz Polling rate when all axes idle (default: 1Hz)
-   * @param actionPollingRateHz Polling rate when any axis active (default: 10Hz)
+   * @param actionPollingRateHz  Polling rate when any axis active (default: 10Hz)
    */
   def apply(
-    controllerInterface: ActorRef[GalilCommandMessage],
+    galilConfig: GalilConfig,
     internalState: ActorRef[InternalStateActor.Command],
     loggerFactory: LoggerFactory,
     standbyPollingRateHz: Double = 1.0,
@@ -119,7 +111,26 @@ object StatusMonitor:
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
-        new StatusMonitor(context, timers, controllerInterface, internalState,
+        val statusIo: GalilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
+        new ControllerStatusActor(context, timers, statusIo, internalState,
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz)
+      }
+    }
+
+  /**
+   * Test-only factory: accepts a pre-built GalilIo (mock or real) instead of
+   * opening a new TCP connection. Used by ControllerStatusActorTest and IOTest.
+   */
+  private[hcd] def withIo(
+    statusIo: GalilIo,
+    internalState: ActorRef[InternalStateActor.Command],
+    loggerFactory: LoggerFactory,
+    standbyPollingRateHz: Double = 1.0,
+    actionPollingRateHz: Double = 10.0
+  ): Behavior[Command] =
+    Behaviors.setup { context =>
+      Behaviors.withTimers { timers =>
+        new ControllerStatusActor(context, timers, statusIo, internalState,
           loggerFactory, standbyPollingRateHz, actionPollingRateHz)
       }
     }
@@ -127,17 +138,17 @@ object StatusMonitor:
 /**
  * Actor implementation
  */
-class StatusMonitor(
-  context: ActorContext[StatusMonitor.Command],
-  timers: TimerScheduler[StatusMonitor.Command],
-  controllerInterface: ActorRef[GalilCommandMessage],
+class ControllerStatusActor(
+  context: ActorContext[ControllerStatusActor.Command],
+  timers: TimerScheduler[ControllerStatusActor.Command],
+  statusIo: GalilIo,
   internalState: ActorRef[InternalStateActor.Command],
   loggerFactory: LoggerFactory,
   standbyPollingRateHz: Double,
   actionPollingRateHz: Double
-) extends AbstractBehavior[StatusMonitor.Command](context):
+) extends AbstractBehavior[ControllerStatusActor.Command](context):
   
-  import StatusMonitor._
+  import ControllerStatusActor._
 
   private val log = loggerFactory.getLogger(context)
 
@@ -147,7 +158,6 @@ class StatusMonitor(
   
   // Current state (mutable, but only accessed within actor)
   private var pollingEnabled: Boolean = true
-  private var pollingPaused: Boolean = false  // Pause for file operations
   private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
@@ -166,7 +176,7 @@ class StatusMonitor(
   // Start 1Hz analog input polling (independent of QR rate)
   timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
   
-  log.info(s"Started — standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
+  log.info(s"ControllerStatusActor started — standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
   override def onMessage(msg: Command): Behavior[Command] =
     msg match
@@ -189,12 +199,6 @@ class StatusMonitor(
       case QRError(error) =>
         handleQRError(error)
         
-      case PauseQRPolling =>
-        handlePauseQRPolling()
-        
-      case ResumeQRPolling =>
-        handleResumeQRPolling()
-        
       case SetPolling(enabled) =>
         handleSetPolling(enabled)
         
@@ -202,34 +206,24 @@ class StatusMonitor(
         handleSetPollingRate(newRateHz)
         
       case GetPollingStatus(replyTo) =>
-        replyTo ! PollingStatus(pollingEnabled, pollingRateHz, lastPollTime, errorCount, pollingPaused)
+        replyTo ! PollingStatus(pollingEnabled, pollingRateHz, lastPollTime, errorCount)
         Behaviors.same
       
       case AxisStateChanged(stateChanged) =>
         handleAxisStateChanged(stateChanged)
   
-  /**
-   * Handle periodic poll trigger
-   * 
-   * CRITICAL: Checks pollingPaused flag to prevent interference with file operations
-   */
   private def handlePollController(): Behavior[Command] =
-    // Guard: Skip if paused for file operations (handles queued timer messages)
-    if pollingPaused then
-      log.debug("Skipping QR - polling is paused for file operation")
-      return Behaviors.same
-    
     if pollingEnabled then
       log.debug("Polling controller for QR data")
-      
-      // Create adapter to convert GalilCommandMessage.QRResult → StatusMonitor.QRResponse
-      val adapter = context.messageAdapter[GalilCommandMessage.QRResult] {
-        case GalilCommandMessage.QRResult(dr: DataRecord) => QRResponse(dr)
-      }
-      
-      // Request QR from ControllerInterface
-      controllerInterface ! GalilCommandMessage.GetQR(adapter)
-    
+      try
+        val response = statusIo.send("QR")
+        val bs = response.head._2
+        val dr = DataRecord(bs)
+        handleQRResponse(dr)
+      catch
+        case ex: Exception =>
+          log.error(s"QR poll failed: ${ex.getMessage}")
+          errorCount += 1
     Behaviors.same
   
   /**
@@ -265,40 +259,6 @@ class StatusMonitor(
   private def handleQRError(error: String): Behavior[Command] =
     log.error(s"QR request failed: $error")
     errorCount += 1
-    Behaviors.same
-  
-  /**
-   * Pause QR polling for file operations (UL/DL)
-   * 
-   * CRITICAL: Must be called BEFORE file operations to prevent buffer corruption.
-   * Pattern from existing ControllerInterfaceActor:
-   * 1. Set pause flag (prevents new QR requests)
-   * 2. Cancel timer (stops scheduling new requests)
-   * 3. Caller should wait ~100ms for in-flight QR to complete
-   * 4. Then safe to execute file operation
-   */
-  private def handlePauseQRPolling(): Behavior[Command] =
-    if !pollingPaused then
-      log.info("Pausing QR polling for file operation")
-      pollingPaused = true
-      stopPolling()
-    else
-      log.debug("QR polling already paused")
-    Behaviors.same
-  
-  /**
-   * Resume QR polling after file operations
-   */
-  private def handleResumeQRPolling(): Behavior[Command] =
-    if pollingPaused then
-      log.info("Resuming QR polling after file operation")
-      pollingPaused = false
-      if pollingEnabled then
-        startPolling()
-        // Restart analog input timer — it was cancelled by handlePauseQRPolling via stopPolling()
-        timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
-    else
-      log.debug("QR polling was not paused")
     Behaviors.same
   
   /**
@@ -353,7 +313,7 @@ class StatusMonitor(
       
       pollingRateHz = targetRate
       log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
-      if pollingEnabled && !pollingPaused then
+      if pollingEnabled then
         stopPolling()
         startPolling()
       
@@ -365,51 +325,30 @@ class StatusMonitor(
     
     Behaviors.same
   
-  /**
-   * Poll all 8 general-purpose analog inputs via `MG @AN[n]` (1-indexed per Galil convention).
-   *
-   * These are the 8 uncommitted analog inputs on the DMC-500x0 main board — distinct from
-   * the per-axis analogInput field in the QR DataRecord (which is the axis-specific latch input).
-   *
-   * Runs at 1Hz independently of the QR polling rate. Each channel is queried individually;
-   * failures are logged and that channel retains its previous value (zero at startup).
-   * Results are pushed into HcdState.analogInputs[0..7] via UpdateHcdState.
-   *
-   * The simulator returns 2.5000 for all @AN[n] queries.
-   */
   private def handlePollAnalogInputs(): Behavior[Command] =
-    if pollingPaused then return Behaviors.same
-
-    implicit val timeout: Timeout = Timeout(2.seconds)
-    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = context.system.scheduler
-
     log.debug("AI poll: sending compound MG @AN query")
 
-    // Single compound MG command — one round-trip instead of 8 sequential asks.
+    // Single compound MG command — one round-trip instead of 8 sequential calls.
     // Hardware returns space-separated values on one line: "2.5839 2.5839 0.0000 ..."
-    // Uses SendStatusCommand so the query goes on the dedicated status connection,
-    // keeping analog input polling off the command connection.
+    // Called directly on statusIo — no actor message-passing overhead.
     val mgCmd = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
 
-    val future = AskPattern.Askable(controllerInterface).ask[GalilCommandMessage.SendCommandResult](
-      ref => GalilCommandMessage.SendStatusCommand(mgCmd, ref)
-    )
+    val future = Future {
+      val responses = statusIo.send(mgCmd)
+      responses.map(_._2.utf8String).mkString
+    }(context.executionContext)
 
     context.pipeToSelf(future) {
-      case Success(result: GalilCommandMessage.SendCommandResult) if result.error.isEmpty =>
-        log.debug(s"AI poll response: '${result.response}'")
-        // Split on any whitespace (spaces or newlines) and skip empty tokens.
-        val tokens = result.response.trim.split("\\s+").filter(_.nonEmpty)
+      case Success(responseText) =>
+        log.debug(s"AI poll response: '$responseText'")
+        val tokens = responseText.trim.split("\\s+").filter(_.nonEmpty)
         val values = Array.tabulate(8) { i =>
           if i < tokens.length then Try(tokens(i).toFloat).getOrElse(0.0f)
           else 0.0f
         }
         AnalogInputsResult(values)
-      case Success(result: GalilCommandMessage.SendCommandResult) =>
-        log.warn(s"AI poll error: ${result.error.getOrElse("unknown")}")
-        AnalogInputsResult(Array.fill(8)(0.0f))
       case Failure(ex) =>
-        log.warn(s"AI poll future failed: ${ex.getMessage}")
+        log.warn(s"AI poll failed: ${ex.getMessage}")
         AnalogInputsResult(Array.fill(8)(0.0f))
     }
 
@@ -622,4 +561,9 @@ class StatusMonitor(
    */
   private def stopPolling(): Unit =
     timers.cancel(PollController)
-    timers.cancel(PollAnalogInputs)
+  override def onSignal: PartialFunction[org.apache.pekko.actor.typed.Signal, Behavior[Command]] = {
+    case org.apache.pekko.actor.typed.PostStop =>
+      log.info("ControllerStatusActor stopping — closing status connection")
+      try statusIo.close() catch { case _: Exception => () }
+      this
+  }

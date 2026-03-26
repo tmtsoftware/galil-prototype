@@ -139,8 +139,7 @@ and `positionWheel` apply an approach algorithm that resolves the correct absolu
 identically to `positionAxis`. The command is rejected if the axis is not configured as
 Rotating or if `countsPerRevolution` is not set.
 
-`selectWheel` does not use the approach algorithm — it delegates to the embedded
-`#SelectX` program
+`selectWheel` does not use the approach algorithm — it delegates to the embedded `#SelectX` program.
 
 ---
 
@@ -243,6 +242,17 @@ by default; header shows mini 8-dot DI and DO summary indicators.
 
 ### Architecture
 
+The HCD uses three independent TCP connections to the controller (all on the same port —
+the DMC-500x0 assigns each to one of its 8 Ethernet handles internally):
+
+| Actor | Connection | Role |
+|-------|-----------|------|
+| `ControllerCommandActor` | command socket | SendCommand, ExecuteProgram, HaltExecution, thread allocation |
+| `ControllerStatusActor` | status socket | QR polling, analog input queries |
+| `ControllerConsoleActor` | console socket | Unsolicited MG output via `CF I` (hardware only) |
+
+This means QR/AI polls never contend with command traffic at either the socket or actor-mailbox level.
+
 - **HmiServer** (Pekko HTTP) — WebSocket `/ws/state`, REST `POST /api/command`, `GET/POST /api/loglevel`
 - **HmiJsonProtocol** — Serializes HcdState to JSON
 - **HmiLogAppender** — Routes all CSW log output (including Galil MG console) to WebSocket
@@ -255,7 +265,7 @@ by default; header shows mini 8-dot DI and DO summary indicators.
 ### Unit Tests (no hardware or CSW services required)
 
 ```bash
-sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest \
+sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusActorTest \
   *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest \
   *RotatingMechanismTest *AxisStateValidationTest *IOTest"
 ```
@@ -264,7 +274,7 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest \
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
 | InternalStateActorTest | 41 | State management, pub/sub |
-| StatusMonitorTest | 19 | QR polling, adaptive rate, analog input polling |
+| ControllerStatusActorTest | 15 | QR polling, adaptive rate, analog input polling |
 | CommandHandlerActorTest | 17 | Immediate commands, validation |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
 | LongRunningCommandTest | 29 | Motion command handlers |
@@ -276,7 +286,7 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *StatusMonitorTest \
 
 ```bash
 sbt "galil-simulator/run"   # Terminal 1 (for simulator tests)
-sbt "galil-hcd/testOnly *ControllerInterfaceActorTest"      # 16 tests
+sbt "galil-hcd/testOnly *ControllerCommandActorTest"        # 16 tests
 sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator only)
 ```
 
@@ -286,7 +296,8 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator
 
 ```bash
 # Against hardware:
-sbt "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~50s
+sbt -Dgalil.config.path=GalilHcdConfig-Hardware.conf \
+    "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~50s
 
 # Against simulator:
 sbt "galil-simulator/run"
@@ -297,7 +308,7 @@ sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf \
 ### Simulator Tests
 
 ```bash
-sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 72 tests
+sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 ```
 
 ### Full Test Summary
@@ -306,15 +317,15 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 72 tests
 |-------|------:|-------------|
 | GalilHcdConfigTest | 9 | None |
 | InternalStateActorTest | 41 | None |
-| StatusMonitorTest | 19 | None |
+| ControllerStatusActorTest | 15 | None |
 | CommandHandlerActorTest | 17 | None |
 | CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
 | RotatingMechanismTest | 26 | None |
 | AxisStateValidationTest | 14 | None |
 | IOTest | 17 | None |
-| ControllerInterfaceActorTest | 16 | Hardware or Simulator (no CSW services) |
+| ControllerCommandActorTest | 16 | Hardware or Simulator (no CSW services) |
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
 | HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
-| GalilSimulatorActorTest | 72 | None |
-| **Total** | **297** | |
+| GalilSimulatorActorTest | 73 | None |
+| **Total** | **290** | |

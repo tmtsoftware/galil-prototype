@@ -12,12 +12,21 @@ import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState, Header}
 import scala.concurrent.duration._
 
 /**
- * Tests for StatusMonitor Actor
+ * Tests for ControllerStatusActor Actor
  */
-class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
+class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll:
   
   private val testKit = ActorTestKit()
   private val loggerFactory = new LoggerFactory(Prefix("APS.ICS.HCD.GalilMotion"))
+
+  /** No-op GalilIo stub — used when tests inject QRResponse/QRError directly. */
+  private def noOpIo: csw.proto.galil.io.GalilIo = new csw.proto.galil.io.GalilIo {
+    import org.apache.pekko.util.ByteString
+    override protected def write(sendBuf: Array[Byte]): Unit = ()
+    override protected def read(): ByteString = ByteString(":")
+    override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+    override def close(): Unit = ()
+  }
   
   override def afterAll(): Unit =
     testKit.shutdownTestKit()
@@ -95,19 +104,18 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
       switches = switchesB, stopCode = stopCodeB, positionError = positionErrorB)
     DataRecord(header, generalState, Array(axisA, axisB))
 
-  test("StatusMonitor should update InternalState from QR response") {
+  test("ControllerStatusActor should update InternalState from QR response") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     val dataRecord = createTestDataRecord(
       motorPositionA = 123456, velocityA = 5000 * 64,
       motorPositionB = 789012, velocityB = -3000 * 64
     )
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probeA = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
@@ -123,135 +131,83 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     stateB.get.velocity should be (-3000.0)
   }
   
-  test("StatusMonitor should handle QR errors gracefully") {
+  test("ControllerStatusActor should handle QR errors gracefully") {
     val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    statusMonitor ! StatusMonitor.QRError("Communication timeout")
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.QRError("Communication timeout")
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     val status = statusProbe.receiveMessage()
     status.errorCount should be (1)
-    statusMonitor ! StatusMonitor.QRError("Buffer overflow")
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.QRError("Buffer overflow")
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     val status2 = statusProbe.receiveMessage()
     status2.errorCount should be (2)
     val dataRecord = createTestDataRecord()
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(50)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     val status3 = statusProbe.receiveMessage()
     status3.errorCount should be (0)
   }
   
-  test("StatusMonitor should support enabling/disabling polling") {
+  test("ControllerStatusActor should support enabling/disabling polling") {
     val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().enabled should be (true)
-    statusMonitor ! StatusMonitor.SetPolling(false)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.SetPolling(false)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().enabled should be (false)
-    statusMonitor ! StatusMonitor.SetPolling(true)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.SetPolling(true)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().enabled should be (true)
   }
   
-  test("StatusMonitor should support changing polling rate") {
+  test("ControllerStatusActor should support changing polling rate") {
     val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be (10.0)
-    statusMonitor ! StatusMonitor.SetPollingRate(20.0)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.SetPollingRate(20.0)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be (20.0)
-    statusMonitor ! StatusMonitor.SetPollingRate(5.0)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.SetPollingRate(5.0)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be (5.0)
   }
   
-  test("StatusMonitor should update lastPollTime on successful QR") {
+  test("ControllerStatusActor should update lastPollTime on successful QR") {
     val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().lastPollTime should be (None)
     val dataRecord = createTestDataRecord()
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(50)
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     val status2 = statusProbe.receiveMessage()
     status2.lastPollTime should not be None
     status2.lastPollTime.get should be > 0L
   }
   
-  test("StatusMonitor should pause QR polling for file operations") {
-    val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
-    val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
-    )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
-    statusProbe.receiveMessage().paused should be (false)
-    statusMonitor ! StatusMonitor.PauseQRPolling
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
-    statusProbe.receiveMessage().paused should be (true)
-  }
-  
-  test("StatusMonitor should skip queued QR when paused") {
-    val internalState = testKit.spawn(InternalStateActor(
-      HcdState().initializeAxis(Axis.A)
-    ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
-    val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
-    )
-    statusMonitor ! StatusMonitor.PauseQRPolling
-    Thread.sleep(50)
-    val dataRecord = createTestDataRecord(motorPositionA = 999)
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
-    Thread.sleep(50)
-    val axisProbe = testKit.createTestProbe[Option[AxisState]]()
-    internalState ! InternalStateActor.GetAxisState(Axis.A, axisProbe.ref)
-    axisProbe.receiveMessage().get.position should be (999.0)
-  }
-  
-  test("StatusMonitor should resume QR polling after file operations") {
-    val internalState = testKit.spawn(InternalStateActor())
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
-    val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
-    )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    statusMonitor ! StatusMonitor.PauseQRPolling
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
-    statusProbe.receiveMessage().paused should be (true)
-    statusMonitor ! StatusMonitor.ResumeQRPolling
-    statusMonitor ! StatusMonitor.GetPollingStatus(statusProbe.ref)
-    statusProbe.receiveMessage().paused should be (false)
-  }
-  
-  test("StatusMonitor should parse multiple axes from QR") {
+  test("ControllerStatusActor should parse multiple axes from QR") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B).initializeAxis(Axis.C).initializeAxis(Axis.D)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     val header = Header(List("A", "B", "C", "D"))
     val generalState = GeneralState(
@@ -269,7 +225,7 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
       GalilAxisStatus(motorPosition = 4000, velocity = 400 * 64)
     )
     val dataRecord = DataRecord(header, generalState, axisStatuses)
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val axes = List(Axis.A, Axis.B, Axis.C, Axis.D)
     val expectedPositions = List(1000.0, 2000.0, 3000.0, 4000.0)
@@ -285,20 +241,15 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     }
   }
   
-  test("StatusMonitor should send GetQR requests to ControllerInterface") {
+  test("ControllerStatusActor should update InternalState from injected QR data") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val controllerProbe = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(controllerProbe.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    Thread.sleep(150)
-    val getQrMessage = controllerProbe.receiveMessage(200.millis)
-    getQrMessage shouldBe a[GalilCommandMessage.GetQR]
-    val replyTo = getQrMessage.asInstanceOf[GalilCommandMessage.GetQR].replyTo
     val dataRecord = createTestDataRecord(motorPositionA = 98765, velocityA = 1234 * 64)
-    replyTo ! GalilCommandMessage.QRResult(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probe = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
@@ -306,32 +257,14 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     state should not be None
     state.get.position should be (98765.0)
     state.get.velocity should be (1234.0)
-    val getQrMessage2 = controllerProbe.receiveMessage(200.millis)
-    getQrMessage2 shouldBe a[GalilCommandMessage.GetQR]
-  }
-  
-  test("StatusMonitor should pause polling when PauseQRPolling is sent") {
-    val internalState = testKit.spawn(InternalStateActor(HcdState()))
-    val controllerProbe = testKit.createTestProbe[GalilCommandMessage]()
-    val statusMonitor = testKit.spawn(
-      StatusMonitor(controllerProbe.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
-    )
-    controllerProbe.receiveMessage(200.millis) shouldBe a[GalilCommandMessage.GetQR]
-    statusMonitor ! StatusMonitor.PauseQRPolling
-    Thread.sleep(50)
-    controllerProbe.expectNoMessage(250.millis)
-    statusMonitor ! StatusMonitor.ResumeQRPolling
-    Thread.sleep(50)
-    controllerProbe.receiveMessage(200.millis) shouldBe a[GalilCommandMessage.GetQR]
   }
 
-  test("StatusMonitor should decode named switch fields from QR response") {
+  test("ControllerStatusActor should decode named switch fields from QR response") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     val switchesA: Byte = (0x08 | 0x02).toByte  // forwardLimit + homeInput
     val switchesB: Byte = 0x04.toByte            // reverseLimit only
@@ -340,7 +273,7 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
       motorPositionB = 2000, switchesB = switchesB,
       statusB = 0x0001.toShort  // motorOff in status word bit 0
     )
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probeA = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
@@ -362,19 +295,18 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     stateB.motorOff should be(true)
   }
 
-  test("StatusMonitor should route moving and stopCode to AxisCmdState") {
+  test("ControllerStatusActor should route moving and stopCode to AxisCmdState") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     val dataRecord = createExtendedDataRecord(
       statusA = 0x8000.toShort, stopCodeA = 0,
       statusB = 0x0000.toShort, stopCodeB = 1
     )
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
@@ -393,20 +325,19 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
   // (as CommandHandlerActor does after XQ) to establish the axis↔thread mapping; the
   // registry is the only authoritative source since thread assignment is dynamic.
 
-  test("StatusMonitor should decode threadStatus into per-axis activeThread") {
+  test("ControllerStatusActor should decode threadStatus into per-axis activeThread") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     // Register axis A on thread 1 (as CommandHandlerActor does after XQ #HomeA,1)
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)
     // QR reports thread 1 active (bit 1 = 0x02)
     val dataRecord = createExtendedDataRecord(threadStatus = 0x02.toByte)
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
@@ -416,13 +347,12 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     probeB.receiveMessage().get.activeThread should be(0)
   }
 
-  test("StatusMonitor should decode multiple active threads") {
+  test("ControllerStatusActor should decode multiple active threads") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     // Register A on thread 1, B on thread 2 (as CommandHandlerActor does after XQ)
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
@@ -430,7 +360,7 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     Thread.sleep(20)
     // QR reports both threads active (bits 1+2 = 0x06)
     val dataRecord = createExtendedDataRecord(threadStatus = 0x06.toByte)
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val probeA = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA.ref)
@@ -440,39 +370,37 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     probeB.receiveMessage().get.activeThread should be(2)
   }
 
-  test("StatusMonitor should set activeThread to 0 when thread stops") {
+  test("ControllerStatusActor should set activeThread to 0 when thread stops") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     // Register axis A on thread 1, then simulate QR with thread active
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)
     val dr1 = createExtendedDataRecord(threadStatus = 0x02.toByte)
-    statusMonitor ! StatusMonitor.QRResponse(dr1)
+    statusMonitor ! ControllerStatusActor.QRResponse(dr1)
     Thread.sleep(100)
     val probeA1 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA1.ref)
     probeA1.receiveMessage().get.activeThread should be(1)
     // Now thread 1 stops — registry clears it and sets activeThread=0
     val dr2 = createExtendedDataRecord(threadStatus = 0x00.toByte)
-    statusMonitor ! StatusMonitor.QRResponse(dr2)
+    statusMonitor ! ControllerStatusActor.QRResponse(dr2)
     Thread.sleep(100)
     val probeA2 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA2.ref)
     probeA2.receiveMessage().get.activeThread should be(0)
   }
 
-  test("StatusMonitor QR should update both AxisState and AxisCmdState") {
+  test("ControllerStatusActor QR should update both AxisState and AxisCmdState") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A)
     ))
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val statusMonitor = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
     // Register axis A on thread 1 before sending QR data
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
@@ -484,7 +412,7 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
       positionErrorA = 5, switchesA = switchByte, stopCodeA = 0,
       threadStatus = 0x02.toByte
     )
-    statusMonitor ! StatusMonitor.QRResponse(dataRecord)
+    statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
     val axisProbe = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.A, axisProbe.ref)
@@ -502,39 +430,37 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
     cmdState.activeThread should be(1)
   }
   
-  test("StatusMonitor should switch to action rate when axis state becomes active") {
+  test("ControllerStatusActor should switch to action rate when axis state becomes active") {
     val internalState = testKit.spawn(InternalStateActor(), "is-adaptive-rate")
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val sm = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory,
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory,
         standbyPollingRateHz = 1.0, actionPollingRateHz = 10.0)
     )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(1.0)
     val replyProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     internalState ! InternalStateActor.UpdateAxisState(
       Axis.A, Map("axisState" -> AxisStateEnum.Moving), replyProbe.ref)
     replyProbe.receiveMessage()
     Thread.sleep(100)
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(10.0)
     internalState ! InternalStateActor.UpdateAxisState(
       Axis.A, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
     replyProbe.receiveMessage()
     Thread.sleep(100)
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(1.0)
   }
   
-  test("StatusMonitor should stay at action rate while any axis is active") {
+  test("ControllerStatusActor should stay at action rate while any axis is active") {
     val internalState = testKit.spawn(InternalStateActor(), "is-multi-axis-rate")
-    val mockController = testKit.createTestProbe[GalilCommandMessage]()
     val sm = testKit.spawn(
-      StatusMonitor(mockController.ref, internalState, loggerFactory,
+      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory,
         standbyPollingRateHz = 1.0, actionPollingRateHz = 10.0)
     )
-    val statusProbe = testKit.createTestProbe[StatusMonitor.PollingStatus]()
+    val statusProbe = testKit.createTestProbe[ControllerStatusActor.PollingStatus]()
     val replyProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     internalState ! InternalStateActor.UpdateAxisState(
       Axis.A, Map("axisState" -> AxisStateEnum.Moving), replyProbe.ref)
@@ -543,18 +469,18 @@ class StatusMonitorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll
       Axis.B, Map("axisState" -> AxisStateEnum.Homing), replyProbe.ref)
     replyProbe.receiveMessage()
     Thread.sleep(100)
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(10.0)
     internalState ! InternalStateActor.UpdateAxisState(
       Axis.A, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
     replyProbe.receiveMessage()
     Thread.sleep(100)
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(10.0)  // B still active
     internalState ! InternalStateActor.UpdateAxisState(
       Axis.B, Map("axisState" -> AxisStateEnum.Idle), replyProbe.ref)
     replyProbe.receiveMessage()
     Thread.sleep(100)
-    sm ! StatusMonitor.GetPollingStatus(statusProbe.ref)
+    sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(1.0)  // Both idle now
   }

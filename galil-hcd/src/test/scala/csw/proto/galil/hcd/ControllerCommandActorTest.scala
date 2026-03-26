@@ -9,7 +9,7 @@ import scala.compiletime.uninitialized
 import scala.concurrent.duration._
 
 /**
- * Unit tests for ControllerInterfaceActor (SDD Section 6.3 - Controller Interface)
+ * Unit tests for ControllerCommandActor (SDD Section 6.3 - Command Interface)
  * 
  * These tests verify the low-level controller interface implementation:
  * - Command send/receive protocol
@@ -23,7 +23,7 @@ import scala.concurrent.duration._
  * - Galil controller or simulator must be running
  * - Configure host/port in test or via system properties
  */
-class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
+class ControllerCommandActorTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   // Configure controller connection
   // Try: 1) System property, 2) Environment variable, 3) Default to simulator
@@ -39,7 +39,7 @@ class ControllerInterfaceActorTest extends AnyFunSuite with Matchers with Before
 
   override def beforeAll(): Unit = {
     super.beforeAll()
-    println(s"ControllerInterfaceActorTest: Connecting to Galil at $galilHost:$galilPort")
+    println(s"ControllerCommandActorTest: Connecting to Galil at $galilHost:$galilPort")
     galilIo = GalilIoTcp(galilHost, galilPort)
   }
 

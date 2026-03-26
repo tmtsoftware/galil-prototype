@@ -73,7 +73,7 @@ object CommandHandlerActor {
     internalStateActor: ActorRef[InternalStateActor.Command],
     commandResponseManager: CommandResponseManager,
     loggerFactory: LoggerFactory,
-    statusMonitor: ActorRef[StatusMonitor.Command]
+    statusMonitor: ActorRef[ControllerStatusActor.Command]
   ): Behavior[Command] =
     Behaviors.setup { ctx =>
       val log = loggerFactory.getLogger(ctx)
@@ -719,7 +719,7 @@ object CommandHandlerActor {
    * embedded programs (homeAxis, positionAxis, offsetAxis, selectWheel, trackAxis).
    *
    * Flow:
-   *   1. Pre-escalate StatusMonitor to action polling rate
+   *   1. Pre-escalate ControllerStatusActor to action polling rate
    *   2. Ask CI actor to ExecuteProgram (sends XQ, then MG _NO atomically)
    *   3. If XQ rejected → set Error state, report Error to CRM
    *   4. If thread confirmed active → spawn CommandWatcher normally
@@ -733,9 +733,9 @@ object CommandHandlerActor {
    * @param runId         CSW command run ID
    * @param mask          CompletionMask for the CommandWatcher
    * @param completionAxisState  AxisState to transition to on completion (Idle or Tracking)
-   * @param ciActor       ControllerInterfaceActor reference
+   * @param ciActor       ControllerCommandActor reference
    * @param internalStateActor  InternalStateActor reference
-   * @param statusMonitor StatusMonitor reference (for rate escalation)
+   * @param statusMonitor ControllerStatusActor reference (for rate escalation)
    * @param crm           CommandResponseManager for CRM updates
    * @param log           Logger
    * @param askTimeout    Timeout for ask pattern
@@ -752,7 +752,7 @@ object CommandHandlerActor {
     completionAxisState: AxisStateEnum,
     ciActor: ActorRef[GalilCommandMessage],
     internalStateActor: ActorRef[InternalStateActor.Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     crm: CommandResponseManager,
     log: csw.logging.api.scaladsl.Logger,
     askTimeout: Timeout,
@@ -764,7 +764,7 @@ object CommandHandlerActor {
   ): Unit = {
     // Step 1: Pre-escalate polling rate so StatusMonitor is at action rate
     // before the program starts. This ensures IS updates flow quickly.
-    statusMonitor ! StatusMonitor.SetPollingRate(10.0)
+    statusMonitor ! ControllerStatusActor.SetPollingRate(10.0)
 
     // Step 2: Execute program via CI actor (thread allocated from pool, optional preCommands,
     // XQ, and MG _NO confirmation all inside galilIo.synchronized in the CI actor)
@@ -879,7 +879,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(PositionAxisCommand.axisKey).head
@@ -1007,7 +1007,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(HomeAxisCommand.axisKey).head
@@ -1088,7 +1088,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(StopAxisCommand.axisKey).head
@@ -1167,7 +1167,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(OffsetAxisCommand.axisKey).head
@@ -1297,7 +1297,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(SelectWheelCommand.axisKey).head
@@ -1391,7 +1391,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(PositionWheelCommand.axisKey).head
@@ -1545,7 +1545,7 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    statusMonitor: ActorRef[StatusMonitor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     loggerFactory: LoggerFactory
   ): Unit = {
     val axisChoice = setup(TrackAxisCommand.axisKey).head

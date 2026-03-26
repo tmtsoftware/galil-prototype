@@ -107,7 +107,7 @@ class RotatingMechanismTest extends AnyFunSuite with Matchers with BeforeAndAfte
 
     val isActor = testKit.spawn(InternalStateActor(state))
     val ciActor = testKit.spawn(MockCIActor.behavior())
-    val smStub  = testKit.spawn(Behaviors.receiveMessage[StatusMonitor.Command] { _ => Behaviors.same })
+    val smStub  = testKit.spawn(Behaviors.receiveMessage[ControllerStatusActor.Command] { _ => Behaviors.same })
     val handler = testKit.spawn(
       CommandHandlerActor.behavior(ciActor, isActor, null, new LoggerFactory(hcdPrefix), smStub)
     )
@@ -361,7 +361,7 @@ class RotatingMechanismTest extends AnyFunSuite with Matchers with BeforeAndAfte
     state = state.initializeAxis(Axis.B, MechanismType.Rotating)
     val isActor = testKit.spawn(InternalStateActor(state))
     val ciActor = testKit.spawn(MockCIActor.behavior())
-    val smStub  = testKit.spawn(Behaviors.receiveMessage[StatusMonitor.Command] { _ => Behaviors.same })
+    val smStub  = testKit.spawn(Behaviors.receiveMessage[ControllerStatusActor.Command] { _ => Behaviors.same })
     val handler = testKit.spawn(
       CommandHandlerActor.behavior(ciActor, isActor, null, new LoggerFactory(hcdPrefix), smStub)
     )
@@ -460,7 +460,7 @@ class RotatingMechanismTest extends AnyFunSuite with Matchers with BeforeAndAfte
     state = state.initializeAxis(Axis.B, MechanismType.Rotating)
     val isActor = testKit.spawn(InternalStateActor(state))
     val ciActor = testKit.spawn(MockCIActor.behavior())
-    val smStub  = testKit.spawn(Behaviors.receiveMessage[StatusMonitor.Command] { _ => Behaviors.same })
+    val smStub  = testKit.spawn(Behaviors.receiveMessage[ControllerStatusActor.Command] { _ => Behaviors.same })
     val handler = testKit.spawn(
       CommandHandlerActor.behavior(ciActor, isActor, null, new LoggerFactory(hcdPrefix), smStub)
     )

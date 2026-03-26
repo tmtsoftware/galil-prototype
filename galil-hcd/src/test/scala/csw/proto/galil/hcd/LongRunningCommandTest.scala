@@ -25,7 +25,7 @@ import scala.concurrent.duration._
  *
  * The MockCIActor responds to SendCommand messages with success (":") responses,
  * simulating the controller accepting commands. After the XQ command is sent,
- * the test simulates StatusMonitor-like QR updates to drive the CommandWatcher
+ * the test simulates ControllerStatusActor-like QR updates to drive the CommandWatcher
  * to completion.
  *
  * Section 1: positionAxis — full lifecycle
@@ -115,8 +115,8 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val ciActor = testKit.spawn(MockCIActor.behavior())
     val loggerFactory = new LoggerFactory(hcdPrefix)
 
-    // Stub StatusMonitor — absorbs SetPollingRate messages without doing anything
-    val smStub = testKit.spawn(Behaviors.receiveMessage[StatusMonitor.Command] { _ => Behaviors.same })
+    // Stub ControllerStatusActor — absorbs SetPollingRate messages without doing anything
+    val smStub = testKit.spawn(Behaviors.receiveMessage[ControllerStatusActor.Command] { _ => Behaviors.same })
 
     val handler = testKit.spawn(
       CommandHandlerActor.behavior(ciActor, isActor, null, loggerFactory, smStub)
@@ -160,7 +160,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     setup
 
   /**
-   * Simulate StatusMonitor QR updates for a completed position move.
+   * Simulate ControllerStatusActor QR updates for a completed position move.
    * First simulates the motor being active (as SM would see from QR),
    * then simulates completion.
    */
@@ -331,7 +331,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
-    // Simulate StatusMonitor: home complete — thread released, not moving
+    // Simulate ControllerStatusActor: home complete — thread released, not moving
     simulateHomeComplete(isActor, Axis.A)
     Thread.sleep(300)
 
@@ -354,7 +354,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe1.ref)
     probe1.receiveMessage().get.activeCommand should be(Some(ActiveCommand.Home))
 
-    // Simulate StatusMonitor: home complete
+    // Simulate ControllerStatusActor: home complete
     simulateHomeComplete(isActor, Axis.A)
     Thread.sleep(300)
 
@@ -372,13 +372,13 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
-    // Simulate StatusMonitor: QR poll sees thread 1 active, motor moving
+    // Simulate ControllerStatusActor: QR poll sees thread 1 active, motor moving
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
       Map("activeThread" -> 1, "moving" -> true),
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
-    // Simulate StatusMonitor: QR poll sees home complete
+    // Simulate ControllerStatusActor: QR poll sees home complete
     simulateHomeComplete(isActor, Axis.A)
     Thread.sleep(300)
 
@@ -467,13 +467,13 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
-    // Simulate StatusMonitor: QR poll sees thread active, motor decelerating
+    // Simulate ControllerStatusActor: QR poll sees thread active, motor decelerating
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
       Map("activeThread" -> 1, "moving" -> true),
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
-    // Simulate StatusMonitor: QR poll sees stop complete
+    // Simulate ControllerStatusActor: QR poll sees stop complete
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
       Map("activeThread" -> 0, "moving" -> false),
       testKit.system.ignoreRef)
@@ -592,7 +592,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
-    // Simulate StatusMonitor: QR poll sees thread active, motor moving
+    // Simulate ControllerStatusActor: QR poll sees thread active, motor moving
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
       Map("activeThread" -> 1, "moving" -> true),
       testKit.system.ignoreRef)
@@ -785,7 +785,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   // ========================================
 
   /**
-   * Simulate StatusMonitor QR updates for a completed track program.
+   * Simulate ControllerStatusActor QR updates for a completed track program.
    * The #TrackX program sets JG velocity + IP, then ENDs.
    * After program ends: thread is released BUT motor is still jogging (moving=true).
    * The axis should remain in Tracking state after completion.

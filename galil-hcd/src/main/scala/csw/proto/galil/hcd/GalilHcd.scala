@@ -14,9 +14,8 @@ import csw.params.core.models.{Id, ObsId}
 import csw.logging.client.commons.LogAdminUtil
 import csw.logging.models.Level
 import csw.prefix.models.Subsystem
-import csw.proto.galil.hcd.CSWDeviceAdapter.CommandMapEntry
-import csw.proto.galil.hcd.ControllerInterfaceActor.ControllerIdentity
-import csw.proto.galil.hcd.GalilCommandMessage.{GalilCommand, GalilRequest}
+import csw.proto.galil.hcd.ControllerCommandActor.ControllerIdentity
+import csw.proto.galil.hcd.GalilCommandMessage.GalilCommand
 import csw.proto.galil.io.DataRecord
 import csw.time.core.models.UTCTime
 
@@ -30,17 +29,7 @@ object GalilCommandMessage {
 
   case class GalilCommand(commandString: String) extends GalilCommandMessage
 
-  case class GalilRequest(
-      commandString: String, 
-      runId: Id, 
-      maybeObsId: Option[ObsId], 
-      cmdMapEntry: CommandMapEntry,
-      setup: Setup
-  ) extends GalilCommandMessage
-  
-  // Messages for StatusMonitor to request QR data
-  case class GetQR(replyTo: ActorRef[QRResult]) extends GalilCommandMessage
-  case class QRResult(dataRecord: DataRecord) extends GalilCommandMessage
+  // SendCommandResult is used by both ControllerCommandActor and ControllerStatusActor
   
   // Ask the CI actor for its controller identity (available after Behaviors.setup completes)
   case class GetIdentity(replyTo: ActorRef[ControllerIdentity]) extends GalilCommandMessage
@@ -52,11 +41,7 @@ object GalilCommandMessage {
 
   // Synchronous command execution for CommandHandlerActor — uses the dedicated command connection.
   case class SendCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
-  case class SendCommandResult(response: String, error: Option[String] = None)
-
-  // Status polling commands (QR, analog inputs) — uses the dedicated status connection.
-  // Routes to statusIo in the CI actor, keeping status traffic off the command connection.
-  case class SendStatusCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
+  case class SendCommandResult(response: String, error: Option[String] = None) extends GalilCommandMessage
 
   /**
    * Execute an embedded program with automatic thread allocation.
@@ -142,8 +127,6 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   private val log                           = loggerFactory.getLogger(ctx)
   implicit val ec: ExecutionContextExecutor = ctx.executionContext
-  private val config                        = ConfigFactory.load("GalilCommands.conf")
-  private val adapter                       = new CSWDeviceAdapter(config)
   
   // HCD Configuration - loaded during initialization
   // SDD Section 4.2: "Load controller and axis-specific parameters from the CSW Configuration Service"
@@ -203,12 +186,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   private val internalStateActor: ActorRef[InternalStateActor.Command] =
     ctx.spawn(InternalStateActor.apply(loggerFactory), "InternalStateActor")
   
-  // 2. ControllerInterfaceActor - created during initialize() after config is loaded
+  // 2. ControllerCommandActor - command TCP connection, created during initialize() after config is loaded
   //    Owns the GalilIo TCP connection. All Galil I/O goes through this actor.
-  private var controllerInterfaceActor: ActorRef[GalilCommandMessage] = uninitialized
+  private var controllerCommandActor: ActorRef[GalilCommandMessage] = uninitialized
   
-  // 3. StatusMonitor - 10 Hz QR polling (created during initialize() after CI actor)
-  private var statusMonitor: ActorRef[StatusMonitor.Command] = uninitialized
+  // 3. ControllerStatusActor - status TCP connection and QR polling, created during initialize()
+  private var statusMonitor: ActorRef[ControllerStatusActor.Command] = uninitialized
   
   // 4. CommandHandlerActor - created during initialize() after CI actor and InternalState are ready
   private var commandHandlerActor: ActorRef[CommandHandlerActor.Command] = uninitialized
@@ -270,28 +253,24 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     hcdConfig = loadConfiguration()
     
     // Phase 2: Connect to controller and verify identity
-    // Create ControllerInterfaceActor with config values directly.
+    // Create ControllerCommandActor — opens command TCP connection.
     // The actor connects to the Galil controller and identifies it during Behaviors.setup.
     // We use the ask pattern (standard CSW approach) to block until the actor is ready.
     log.info("Establishing controller connection")
     val galilConfig = GalilConfig(hcdConfig.controller.hostString, hcdConfig.controller.port)
-    controllerInterfaceActor = ctx.spawn(
-      ControllerInterfaceActor.behavior(
+    controllerCommandActor = ctx.spawn(
+      ControllerCommandActor.behavior(
         galilConfig,
-        config,
-        commandResponseManager,
-        adapter,
         loggerFactory,
         componentInfo.prefix,
-        cswCtx.currentStatePublisher,
         internalStateActor,
         simulate = hcdConfig.simulate
       ),
-      "ControllerInterfaceActor"
+      "ControllerCommandActor"
     )
     
     // Block until the actor has completed setup (connect + ID) — standard CSW init pattern
-    val identityFuture = controllerInterfaceActor.ask[ControllerIdentity](ref => GalilCommandMessage.GetIdentity(ref))
+    val identityFuture = controllerCommandActor.ask[ControllerIdentity](ref => GalilCommandMessage.GetIdentity(ref))
     val identity = Await.result(identityFuture, 5.seconds)
     log.info(s"Controller ready: firmware=${identity.firmware}, model=DMC-${identity.model}, axes=${identity.axisCount}")
     
@@ -305,17 +284,17 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val actionRate = hcdConfig.controller.actionPollingRateHz
     
     statusMonitor = ctx.spawn(
-      StatusMonitor.apply(
-        controllerInterfaceActor,
+      ControllerStatusActor.apply(
+        galilConfig,
         internalStateActor,
         loggerFactory,
         standbyPollingRateHz = standbyRate,
         actionPollingRateHz = actionRate
       ),
-      "StatusMonitor"
+      "ControllerStatusActor"
     )
-    statusMonitor ! StatusMonitor.SetPolling(enabled = true)
-    log.info(s"StatusMonitor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz")
+    statusMonitor ! ControllerStatusActor.SetPolling(enabled = true)
+    log.info(s"ControllerStatusActor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz")
     
     // Store configured polling rates in IS
     internalStateActor ! InternalStateActor.UpdateHcdState(
@@ -330,7 +309,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // Phase 3b: Create CommandHandlerActor
     commandHandlerActor = ctx.spawn(
       CommandHandlerActor.behavior(
-        controllerInterfaceActor,
+        controllerCommandActor,
         internalStateActor,
         commandResponseManager,
         loggerFactory,
@@ -424,9 +403,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       _ <- if (!hcdConfig.simulate) {
         for {
           _ <- verifyEmbeddedProgram()
-          // Brief pause to allow QR polling to resume and produce at least one
-          // threadStatus update before we start monitoring threads for completion.
-          // verifyEmbeddedProgram pauses QR during UL download, then resumes.
+          // Brief pause to allow QR polling to produce at least one threadStatus
+          // update before we start monitoring threads for completion.
           _ = Thread.sleep(1200) // > 1 standby poll cycle (1Hz)
         } yield ()
       } else {
@@ -516,11 +494,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
   
   /**
-   * Download current program from controller via ControllerInterfaceActor.
-   * 
-   * Pauses StatusMonitor QR polling before download (UL command needs exclusive
-   * socket access) and resumes after. Uses the ask pattern to block until
-   * the download completes.
+   * Download current program from controller via ControllerCommandActor.
+   * Uses the ask pattern to block until the download completes.
+   * QR polling continues uninterrupted on its dedicated status connection.
    */
   private def downloadProgramFromController(): Future[String] = {
     import scala.concurrent.Await
@@ -532,26 +508,18 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     
     log.info("Downloading current program from controller")
     
-    // Pause QR polling — UL needs exclusive socket access
-    statusMonitor ! StatusMonitor.PauseQRPolling
+    val resultFuture = controllerCommandActor.ask[GalilCommandMessage.DownloadProgramResult](
+      ref => GalilCommandMessage.DownloadProgram(ref)
+    )
+    val result = Await.result(resultFuture, 10.seconds)
     
-    try {
-      val resultFuture = controllerInterfaceActor.ask[GalilCommandMessage.DownloadProgramResult](
-        ref => GalilCommandMessage.DownloadProgram(ref)
-      )
-      val result = Await.result(resultFuture, 10.seconds)
-      
-      result.error match {
-        case Some(errMsg) =>
-          log.error(s"Download failed: $errMsg")
-          Future.failed(new RuntimeException(s"Download failed: $errMsg"))
-        case None =>
-          log.info(s"Downloaded program: ${result.program.length} characters")
-          Future.successful(result.program)
-      }
-    } finally {
-      // Resume QR polling
-      statusMonitor ! StatusMonitor.ResumeQRPolling
+    result.error match {
+      case Some(errMsg) =>
+        log.error(s"Download failed: $errMsg")
+        Future.failed(new RuntimeException(s"Download failed: $errMsg"))
+      case None =>
+        log.info(s"Downloaded program: ${result.program.length} characters")
+        Future.successful(result.program)
     }
   }
   
@@ -818,7 +786,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           log.debug(s"Axis $axisName motion config write: $cmdString")
 
           try {
-            val future = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+            val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
               ref => GalilCommandMessage.SendCommand(cmdString, ref)
             )
             val result = Await.result(future, 2.seconds)
@@ -870,7 +838,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     activeAxes.foreach { axisName =>
       val moCmd = s"MO$axisName"
       log.info(s"Motor off before setup: $moCmd")
-      val moFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+      val moFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
         ref => GalilCommandMessage.SendCommand(moCmd, ref)
       )
       val moResult = Await.result(moFuture, 5.seconds)
@@ -886,7 +854,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val cmd = s"XQ #Setup$axisName,$thread"
       log.info(s"Sending: $cmd")
 
-      val cmdFuture = controllerInterfaceActor.ask[GalilCommandMessage.SendCommandResult](
+      val cmdFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
         ref => GalilCommandMessage.SendCommand(cmd, ref)
       )
       val cmdResult = Await.result(cmdFuture, 5.seconds)
@@ -955,7 +923,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * uses CommandWatcherActor — during init, we're blocking in initialize() and
    * there's no CRM or external caller to notify.
    *
-   * The StatusMonitor is already running and updating threadStatus in the IS actor
+   * The ControllerStatusActor is already running and updating threadStatus in the IS actor
    * from QR polling. We query IS.HcdState.threadStatus to check if the target
    * thread bit has cleared.
    *
@@ -979,7 +947,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // 1. Send XQ via ExecuteProgram — allocates thread, sends XQ, then queries
       //    MG _NO to confirm the thread started. Returns threadWasActive as
       //    authoritative hardware truth.
-      val execFuture = controllerInterfaceActor.ask[GalilCommandMessage.ExecuteProgramResult](
+      val execFuture = controllerCommandActor.ask[GalilCommandMessage.ExecuteProgramResult](
         ref => GalilCommandMessage.ExecuteProgram(label, ref)
       )
       val execResult = Await.result(execFuture, 5.seconds)
@@ -1031,7 +999,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     if (hmiServer != null) hmiServer.stop()
     
     // Stop actors gracefully (null checks for case where initialize failed partway)
-    if (statusMonitor != null) statusMonitor ! StatusMonitor.SetPolling(enabled = false)
+    if (statusMonitor != null) statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
     currentStatePublisher ! CurrentStatePublisherActor.Shutdown
     
     log.info("Galil HCD shut down")
@@ -1057,20 +1025,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         } else if (CommandHandlerActor.isLongRunning(commandName)) {
           validateLongRunningCommand(runId, setup)
         } else {
-          // Legacy path: validate through CSWDeviceAdapter command map
-          val cmdMapEntry = adapter.getCommandMapEntry(setup)
-          if (cmdMapEntry.isSuccess) {
-            val cmdString = adapter.validateSetup(setup, cmdMapEntry.get)
-            if (cmdString.isSuccess) {
-              CommandResponse.Accepted(runId)
-            }
-            else {
-              CommandResponse.Invalid(runId, CommandIssue.ParameterValueOutOfRangeIssue(cmdString.failed.get.getMessage))
-            }
-          }
-          else {
-            CommandResponse.Invalid(runId, CommandIssue.OtherIssue(cmdMapEntry.failed.get.getMessage))
-          }
+          CommandResponse.Invalid(runId, CommandIssue.UnsupportedCommandIssue(s"Unknown command: $commandName"))
         }
       case _: Observe =>
         CommandResponse.Invalid(runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
@@ -1242,28 +1197,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           commandHandlerActor ! CommandHandlerActor.HandleCommand(setup, runId, setup.maybeObsId)
           CommandResponse.Started(runId)
         } else {
-          // Legacy path for non-immediate commands (file ops, data record, etc.)
-          val cmdMapEntry = adapter.getCommandMapEntry(setup)
-          val cmdString   = adapter.validateSetup(setup, cmdMapEntry.get)
-        
-          // Check if this is a file operation command that needs QR polling paused
-          if (commandName == "uploadProgram" || commandName == "downloadProgram") {
-            log.debug(s"Pausing QR polling for $commandName")
-            statusMonitor ! StatusMonitor.PauseQRPolling
-            Thread.sleep(50) // Brief delay to ensure pause message is processed
-          }
-        
-          // Forward command to ControllerInterfaceActor
-          controllerInterfaceActor ! GalilRequest(cmdString.get, runId, setup.maybeObsId, cmdMapEntry.get, setup)
-        
-          // Resume QR polling after file operation (async)
-          if (commandName == "uploadProgram" || commandName == "downloadProgram") {
-            import scala.concurrent.duration._
-            log.debug(s"Will resume QR polling in 5s after $commandName")
-            ctx.scheduleOnce(5.seconds, statusMonitor, StatusMonitor.ResumeQRPolling)
-          }
-        
-          CommandResponse.Started(runId)
+          CommandResponse.Error(runId, s"Unknown command: $commandName")
         }
       case x =>
         // Should not happen after validation
@@ -1273,14 +1207,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   override def onOneway(runId: Id, controlCommand: ControlCommand): Unit = {
     log.debug(s"onOneway called: $controlCommand")
-    controlCommand match {
-      case setup: Setup =>
-        val cmdMapEntry = adapter.getCommandMapEntry(setup)
-        val cmdString   = adapter.validateSetup(setup, cmdMapEntry.get)
-        // Send all oneway commands to ControllerInterfaceActor
-        controllerInterfaceActor ! GalilRequest(cmdString.get, runId, setup.maybeObsId, cmdMapEntry.get, setup)
-      case _ => // Only Setups handled
-    }
+    // All commands are dispatched via onSubmit; oneway is not used in this HCD
   }
 
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
