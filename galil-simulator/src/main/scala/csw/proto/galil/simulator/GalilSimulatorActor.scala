@@ -238,7 +238,9 @@ object GalilSimulatorActor {
     cmd2 match {
       // ---- Identity ----
       case `Identify` =>
-        val idResponse = "FW, DMC50040 Rev 1.2sim\r\nDMC, 50000, Rev 0\r\nCMB, 00000, 0.0v, Rev 0\r\nAMP1, 00000, Rev 0"
+        // Report as DMC-50080 (8-axis) matching the 8-axis simulation capability (axes A-H).
+        // The firmware model digit encodes axis count: DMC500x0 → x axes.
+        val idResponse = "FW, DMC50080 Rev 1.2sim\r\nDMC, 50000, Rev 0\r\nCMB, 00000, 0.0v, Rev 0\r\nAMP1, 00000, Rev 0"
         (formatReply(idResponse), state)
 
       // ---- QR DataRecord (binary) ----

@@ -192,6 +192,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   
   // 3. ControllerStatusActor - status TCP connection and QR polling, created during initialize()
   private var statusMonitor: ActorRef[ControllerStatusActor.Command] = uninitialized
+
+  // 4. ControllerConsoleActor - console TCP handle, hardware-only, spawned after command actor is ready
+  private var consoleActor: ActorRef[ControllerConsoleActor.Command] = uninitialized
   
   // 4. CommandHandlerActor - created during initialize() after CI actor and InternalState are ready
   private var commandHandlerActor: ActorRef[CommandHandlerActor.Command] = uninitialized
@@ -262,7 +265,6 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       ControllerCommandActor.behavior(
         galilConfig,
         loggerFactory,
-        componentInfo.prefix,
         internalStateActor,
         simulate = hcdConfig.simulate
       ),
@@ -273,6 +275,35 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val identityFuture = controllerCommandActor.ask[ControllerIdentity](ref => GalilCommandMessage.GetIdentity(ref))
     val identity = Await.result(identityFuture, 5.seconds)
     log.info(s"Controller ready: firmware=${identity.firmware}, model=DMC-${identity.model}, axes=${identity.axisCount}")
+
+    // Store controller axis count in HcdState so HMI can determine I/O capabilities
+    // (8-axis controllers support slave I/O expansion module, enabling bits 9-16)
+    if identity.axisCount > 0 then
+      internalStateActor ! InternalStateActor.UpdateHcdState(
+        Map("controllerAxisCount" -> identity.axisCount),
+        ctx.system.ignoreRef
+      )
+
+    // Phase 2b: Spawn ControllerConsoleActor as a sibling (hardware-only).
+    // Opens a dedicated third TCP handle; CF I + CW 2 claim all unsolicited MG output.
+    // The latch blocks until the handle is live so MG lines are captured before #Init runs.
+    // Skipped in simulation mode — no physical controller to receive CF I / CW 2.
+    if !hcdConfig.simulate then
+      val consoleLatch = new java.util.concurrent.CountDownLatch(1)
+      consoleActor = ctx.spawn(
+        ControllerConsoleActor(
+          host               = galilConfig.host,
+          port               = galilConfig.port,
+          prefix             = componentInfo.prefix,
+          log                = log,
+          readyLatch         = consoleLatch,
+          internalStateActor = internalStateActor
+        ),
+        "ControllerConsoleActor"
+      )
+      val ready = consoleLatch.await(ControllerConsoleActor.ReadyTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+      if !ready then
+        log.warn("ControllerConsoleActor did not become ready within timeout — proceeding without MG capture")
     
     // Phase 3: Start status monitoring with adaptive polling rate
     // Motor type (stepper vs servo) is read from the QR DataRecord switches byte,

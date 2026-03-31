@@ -25,6 +25,19 @@ enum HcdStateEnum:
   case Ready, Faulted
 
 /**
+ * Connection status for a single TCP handle to the Galil DMC-500x0.
+ *
+ * Disconnected — initial state before connect attempt, or after a detected drop.
+ * Connected    — TCP handle open and responding.
+ *
+ * Note: The console connection is hardware-only and informational; its status
+ * does not affect HCD operational readiness. Command and status connections
+ * are both required for normal operation.
+ */
+enum ConnectionStatus:
+  case Disconnected, Connected
+
+/**
  * Axis operational state (SDD Figure 4-2).
  * Published in CurrentStateAxis[A-H].axisState.
  * Transitions are command-lifecycle driven.
@@ -141,10 +154,18 @@ object Axis:
  * 
  * @param axisState Current operational state (command-lifecycle driven)
  * @param axisError Error message if in error state
- * @param position Current motor position (encoder counts)
+ * @param position Raw accumulated motor position in encoder counts, as reported directly by the
+ *   DMC-500x0. For rotating axes this value accumulates across revolutions (e.g. 800 after two
+ *   full revolutions of a 400-count axis). Used unchanged for all internal math: inPosition,
+ *   applyApproachAlgorithm, distance/timeout calculations. Also called "rawMotorPosition" in
+ *   comments — this is the authoritative source of truth for where the motor physically is.
+ *   See motorPosition for the wrapped 0..cpr display value.
  * @param velocity Current motor velocity (counts/sec)
  * @param positionError Current position error
- * @param demand Requested motor target (for calculating inPosition)
+ * @param demand Requested motor target in accumulated encoder counts (matches position space).
+ *   Set by CommandHandlerActor to the algorithm-adjusted absolute count after applyApproachAlgorithm.
+ *   Internal only — not published in CurrentStateAxis. inPosition is calculated as
+ *   |position - demand| <= inPositionThreshold, both in accumulated-count space.
  * @param inPositionThreshold Threshold for calculating inPosition
  * @param inPosition Whether axis is within threshold of demand (calculated)
  * @param forwardLimit Forward limit switch active (QR switches bit 0)
@@ -218,7 +239,41 @@ case class AxisState(
       val raw = (position / cpr * 360.0) % 360.0
       if raw < 0.0 then raw + 360.0 else raw
     }
-  
+
+  /**
+   * Wrapped motor position in encoder counts, for HMI display and CSW publication.
+   *
+   * For rotating axes: position modulo countsPerRevolution, in range [0, cpr).
+   * This is what the user or Assembly perceives as "current position" — it matches
+   * the demand space (0..cpr) used by positionAxis / offsetAxis commands.
+   * Example: rawMotorPosition=800 on a 400-count axis → motorPosition=0 (two full wraps).
+   *
+   * For linear axes: identical to position (no wrapping; countsPerRevolution is not set).
+   *
+   * Internal math (inPosition, applyApproachAlgorithm, distance/timeout) always uses
+   * the raw accumulated `position` field, not this value.
+   */
+  def motorPosition: Double =
+    countsPerRevolution.filter(_ > 0.0).map { cpr =>
+      val wrapped = position % cpr
+      if wrapped < 0.0 then wrapped + cpr else wrapped
+    }.getOrElse(position)
+
+  /**
+   * Wrapped demand in encoder counts, for HMI display only.
+   *
+   * Mirrors the wrapping logic of motorPosition so that the HMI "Demand" readout
+   * is in the same [0, cpr) frame as the displayed position.  The raw accumulated
+   * demand is retained in `demand` for all internal math (inPosition calculation).
+   *
+   * For linear axes: identical to demand.
+   */
+  def motorDemand: Double =
+    countsPerRevolution.filter(_ > 0.0).map { cpr =>
+      val wrapped = demand % cpr
+      if wrapped < 0.0 then wrapped + cpr else wrapped
+    }.getOrElse(demand)
+
   /**
    * Update this axis state with new values.
    * Uses a map of field names to values.
@@ -336,6 +391,9 @@ case class AxisCmdState(
  * @param controllerId Controller number (1-4)
  * @param controllerErrorMsg Controller error message
  * @param version Embedded version number
+ * @param controllerAxisCount Axis count reported by controller ID command (e.g. 4 or 8); -1 if unknown.
+ *   Parsed from firmware model string: DMC500x0 → x axes. Used by HMI to determine
+ *   which I/O bits are supported (8-axis controllers support slave I/O expansion, bits 9-16).
  * @param activeAxes Which axes (A-H) are configured for use
  * @param digitalInputs Current values of optoisolated inputs (16 bits)
  * @param digitalOutputs Current values of optoisolated outputs (16 bits)
@@ -344,6 +402,9 @@ case class AxisCmdState(
  * @param lastPollingTime Timestamp of last status monitor execution
  * @param debug Verbose logging flag
  * @param simulation Software-only simulation mode
+ * @param commandConnection Status of the command TCP handle (ControllerCommandActor)
+ * @param statusConnection Status of the status TCP handle (ControllerStatusActor)
+ * @param consoleConnection Status of the console TCP handle (ControllerConsoleActor, hardware-only/informational)
  * @param axes Operational state for each configured axis
  * @param cmdStates Command execution state for each configured axis
  */
@@ -352,6 +413,7 @@ case class HcdState(
   controllerId: Int = 1,
   controllerErrorMsg: String = "",
   version: Int = 0,
+  controllerAxisCount: Int = -1,
   activeAxes: Array[Boolean] = Array.fill(8)(false),
   digitalInputs: Array[Boolean] = Array.fill(16)(false),
   digitalOutputs: Array[Boolean] = Array.fill(16)(false),
@@ -363,9 +425,20 @@ case class HcdState(
   currentPollingRateHz: Double = 1.0,
   debug: Boolean = false,
   simulation: Boolean = false,
+  commandConnection: ConnectionStatus = ConnectionStatus.Disconnected,
+  statusConnection:  ConnectionStatus = ConnectionStatus.Disconnected,
+  consoleConnection: ConnectionStatus = ConnectionStatus.Disconnected,
   axes: Map[Axis, AxisState] = Map.empty,
   cmdStates: Map[Axis, AxisCmdState] = Map.empty
 ):
+  /**
+   * True when both command and status connections are established.
+   * Console connection is informational (hardware-only) and does not
+   * affect operational readiness.
+   */
+  def isOperational: Boolean =
+    commandConnection == ConnectionStatus.Connected &&
+    statusConnection  == ConnectionStatus.Connected
   /**
    * Update this HCD state with new values.
    * Uses a map of field names to values.
@@ -378,6 +451,7 @@ case class HcdState(
       case ("controllerId", v: Int) => updated = updated.copy(controllerId = v)
       case ("controllerErrorMsg", v: String) => updated = updated.copy(controllerErrorMsg = v)
       case ("version", v: Int) => updated = updated.copy(version = v)
+      case ("controllerAxisCount", v: Int) => updated = updated.copy(controllerAxisCount = v)
       case ("activeAxes", v: Array[Boolean @unchecked]) => updated = updated.copy(activeAxes = v)
       case ("digitalInputs", v: Array[Boolean @unchecked]) => updated = updated.copy(digitalInputs = v)
       case ("digitalOutputs", v: Array[Boolean @unchecked]) => updated = updated.copy(digitalOutputs = v)
@@ -389,6 +463,9 @@ case class HcdState(
       case ("currentPollingRateHz", v: Double) => updated = updated.copy(currentPollingRateHz = v)
       case ("debug", v: Boolean) => updated = updated.copy(debug = v)
       case ("simulation", v: Boolean) => updated = updated.copy(simulation = v)
+      case ("commandConnection", v: ConnectionStatus) => updated = updated.copy(commandConnection = v)
+      case ("statusConnection",  v: ConnectionStatus) => updated = updated.copy(statusConnection = v)
+      case ("consoleConnection", v: ConnectionStatus) => updated = updated.copy(consoleConnection = v)
       case (key, value) => 
         println(s"Warning: Unknown HCD state field: $key = $value")
     }

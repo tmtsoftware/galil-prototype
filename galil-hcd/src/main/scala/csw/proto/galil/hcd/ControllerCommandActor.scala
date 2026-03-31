@@ -5,7 +5,6 @@ import java.io.IOException
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import csw.logging.client.scaladsl.LoggerFactory
-import csw.prefix.models.Prefix
 import csw.proto.galil.hcd.GalilCommandMessage.GalilCommand
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
 
@@ -18,10 +17,12 @@ import scala.concurrent.duration._
  *   - Opens and maintains the command TCP handle (galilIo)
  *   - Serializes all command traffic: SendCommand, ExecuteProgram, HaltExecution, DownloadProgram
  *   - Manages thread allocation via MG _NO queries
- *   - Spawns ControllerConsoleActor (hardware only) to capture unsolicited MG output
+ *   - Reports commandConnection status to InternalStateActor on startup
  *
  * QR polling and analog input queries are handled by ControllerStatusActor on its
  * own independent TCP handle — no status traffic passes through this actor.
+ * Console MG output capture is handled by ControllerConsoleActor (hardware-only),
+ * spawned as a sibling by GalilHcd after this actor is ready.
  */
 private[hcd] object ControllerCommandActor {
 
@@ -43,7 +44,6 @@ private[hcd] object ControllerCommandActor {
   def behavior(
       galilConfig: GalilConfig,
       loggerFactory: LoggerFactory,
-      galilPrefix: Prefix,
       internalStateActor: ActorRef[InternalStateActor.Command],
       simulate: Boolean = false
   ): Behavior[GalilCommandMessage] =
@@ -60,25 +60,10 @@ private[hcd] object ControllerCommandActor {
               throw ex
           }
 
-        // Spawn ControllerConsoleActor as a child — opens its own TCP handle and
-        // claims unsolicited MG output via CF I + CW 2. Skipped in simulation mode.
-        // The latch blocks setup until CF I + CW 2 complete, guaranteeing the console
-        // handle is live before #Init runs.
-        if !simulate then
-          val consoleLatch = new java.util.concurrent.CountDownLatch(1)
-          ctx.spawn(
-            ControllerConsoleActor(
-              host       = galilConfig.host,
-              port       = galilConfig.port,
-              prefix     = galilPrefix,
-              log        = log,
-              readyLatch = consoleLatch
-            ),
-            "ControllerConsoleActor"
-          )
-          val ready = consoleLatch.await(ControllerConsoleActor.ReadyTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-          if !ready then
-            log.warn("ControllerConsoleActor did not become ready within timeout — proceeding without MG capture")
+        // Report command connection established to InternalStateActor
+        internalStateActor ! InternalStateActor.ReportConnectionStatus(
+          "commandConnection", ConnectionStatus.Connected
+        )
 
         def galilSend(cmd: String): String = {
           log.debug(s"Sending '$cmd' to Galil")

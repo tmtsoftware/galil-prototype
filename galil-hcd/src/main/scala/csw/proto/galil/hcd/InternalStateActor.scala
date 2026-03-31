@@ -138,6 +138,21 @@ object InternalStateActor:
    * Sent by StatusMonitor on every poll cycle.
    */
   case class UpdateThreadStatus(threadStatusByte: Int) extends Command
+
+  /**
+   * Report connection status for one TCP handle.
+   *
+   * Sent by each connection actor when its TCP handle is established or lost.
+   * IS updates the corresponding HcdState connection field and fires StateChanged
+   * so subscribers (HMI, CurrentStatePublisher) see the change immediately.
+   *
+   * @param connection  Which handle: "commandConnection", "statusConnection", "consoleConnection"
+   * @param status      New connection status
+   */
+  case class ReportConnectionStatus(
+    connection: String,
+    status: ConnectionStatus
+  ) extends Command
   
   // ========================================
   // Responses
@@ -303,6 +318,9 @@ class InternalStateActor(
 
       case UpdateThreadStatus(threadStatusByte) =>
         handleUpdateThreadStatus(threadStatusByte)
+
+      case ReportConnectionStatus(connection, status) =>
+        handleUpdateHcdState(Map(connection -> status), context.system.ignoreRef)
 
   /**
    * Update HCD-level state and notify operational state subscribers.

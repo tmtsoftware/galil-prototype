@@ -327,8 +327,10 @@ class CurrentStatePublisherActor(
       eventKey.source,
       StateName(eventKey.eventName.name),
       Set(
-        // Convert Double to Float per ICD
-        posKey.set(axisState.position.toFloat),
+        // Publish motorPosition (wrapped 0..cpr for rotating axes; equals raw position for linear).
+        // Assemblies send demands in 0..cpr space, so published position matches that frame.
+        // Raw accumulated encoder count is retained in AxisState.position for internal math.
+        posKey.set(axisState.motorPosition.toFloat),
         velKey.set(axisState.velocity.toFloat),
         stateKey.set(stateValue),
         inPosKey.set(axisState.inPosition),

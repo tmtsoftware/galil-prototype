@@ -334,6 +334,13 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
             e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:15,
                 fontVariantNumeric:'tabular-nums'}},
               (axState.position||0).toFixed(1)),
+            // Raw accumulated encoder count — debug only, rotating axes only
+            axState.mechanismType==='Rotating'
+              ? e('span',{style:{color:'#4B5563',fontSize:10.5}},'Raw') : null,
+            axState.mechanismType==='Rotating'
+              ? e('span',{style:{color:'#4B5563',fontSize:10.5,
+                  fontVariantNumeric:'tabular-nums'}},
+                  (axState.rawMotorPosition||0).toFixed(0)) : null,
             e('span',{style:{color:'#6B7280'}},'Velocity'),
             e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',
                 fontVariantNumeric:'tabular-nums'}},
@@ -613,12 +620,12 @@ const IOPanel = memo(function IOPanel({state, onCommand}) {
   const [open, setOpen] = React.useState(false);
   const activeAxes = state?.activeAxes || [];
 
-  // I/O availability is determined by controller size (number of configured axes).
-  // DMC-500x0 main board: 8 DI, 8 DO, 8 AI — always present.
+  // I/O availability is determined by the controller's axis count (from ID command).
+  // DMC-500x0 main board: 8 DI, 8 DO, 8 AI — always present (bits 1-8).
   // With a slave I/O expansion module (requires 8-axis controller): adds bits 9-16.
-  // activeAxes.length == 8 indicates a full 8-axis controller with slave module support.
-  const numAxes = activeAxes.length;
-  const isSupported = useCallback((bit1) => bit1 <= 8 || numAxes >= 8, [numAxes]);
+  // controllerAxisCount == 8 means the controller is a DMC-50080 with slave module support.
+  const controllerAxisCount = state?.controllerAxisCount ?? -1;
+  const isSupported = useCallback((bit1) => bit1 <= 8 || controllerAxisCount >= 8, [controllerAxisCount]);
 
   const dout = state?.digitalOutputs || Array(16).fill(false);
   const di   = state?.digitalInputs  || Array(16).fill(false);
@@ -735,6 +742,7 @@ function HcdLogPanel({lines}) {
   const [autoScroll, setAutoScroll] = useState(true);
   const [minLevel, setMinLevel] = useState('INFO');
   const [hcdLevel, setHcdLevel] = useState('INFO');
+  const [minimized, setMinimized] = useState(false);
 
   // Fetch current HCD log level on mount
   useEffect(() => {
@@ -756,10 +764,10 @@ function HcdLogPanel({lines}) {
   };
 
   useEffect(() => {
-    if (autoScroll && endRef.current) {
+    if (!minimized && autoScroll && endRef.current) {
       endRef.current.scrollIntoView({behavior: 'auto'});
     }
-  }, [lines.length, autoScroll]);
+  }, [lines.length, autoScroll, minimized]);
 
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
@@ -775,11 +783,24 @@ function HcdLogPanel({lines}) {
   const selectStyle = {backgroundColor:'#1F2937',color:'#9CA3AF',border:'1px solid #374151',
                        borderRadius:3,fontSize:9.5,padding:'1px 4px',cursor:'pointer'};
 
-  return e('div', {style:{display:'flex',flexDirection:'column',flex:1,
+  return e('div', {style:{display:'flex',flexDirection:'column',
+      ...(minimized ? {flexShrink:0} : {flex:1,minHeight:0}),
       backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px',
-      fontFamily:'var(--mono)',fontSize:11,minHeight:0}},
-    e('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4,flexShrink:0}},
-      e('span', {style:{color:'#6B7280',fontSize:9.5,fontWeight:700,letterSpacing:1.2}}, 'HCD LOG'),
+      fontFamily:'var(--mono)',fontSize:11}},
+    // Header row — always visible; click label area to toggle
+    e('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',
+        marginBottom: minimized ? 0 : 4, flexShrink:0}},
+      // Left: label + line count badge — click to minimize/expand
+      e('div', {style:{display:'flex',alignItems:'center',gap:6,cursor:'pointer'},
+          onClick: () => setMinimized(v => !v)},
+        e('span', {style:{color:'#6B7280',fontSize:9.5,fontWeight:700,letterSpacing:1.2}}, 'HCD LOG'),
+        e('span', {style:{fontSize:9,padding:'1px 5px',borderRadius:3,
+            backgroundColor:'#1F2937',color:'#4B5563'}},
+          `${visible.length} lines`),
+        e('span', {style:{fontSize:9,color:'#374151', userSelect:'none'}},
+          minimized ? '▲' : '▼')
+      ),
+      // Right: controls — always visible so log level can be changed while minimized
       e('div', {style:{display:'flex',gap:8,alignItems:'center'}},
         e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'HCD level:'),
         e('select', {
@@ -798,7 +819,7 @@ function HcdLogPanel({lines}) {
           },
           LOG_LEVELS.map(l => e('option', {key:l, value:l}, l))
         ),
-        e('span', {
+        !minimized && e('span', {
             style:{fontSize:9,color:autoScroll?'#065F46':'#4B5563',
                    backgroundColor:autoScroll?'#064E3B22':'transparent',
                    padding:'1px 6px',borderRadius:3,cursor:'pointer'},
@@ -808,7 +829,8 @@ function HcdLogPanel({lines}) {
         )
       )
     ),
-    e('div', {ref:containerRef, onScroll:handleScroll,
+    // Log lines — hidden when minimized
+    !minimized && e('div', {ref:containerRef, onScroll:handleScroll,
         style:{flex:1,overflowY:'auto',lineHeight:1.6,minHeight:0}},
       ...visible.map((l, i) => {
         const sev = (l.severity || 'INFO').toUpperCase();
@@ -905,7 +927,22 @@ function GalilHMI() {
         // Scan rate badge — shows current StatusMonitor polling rate
         state?.pollingRateHz != null && e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,
           backgroundColor:'#1F2937',color:'#6B7280',fontFamily:'var(--mono)'}},
-          `${(state.pollingRateHz).toFixed(0)} Hz`)),
+          `${(state.pollingRateHz).toFixed(0)} Hz`),
+        // Per-TCP-connection status: Cmd (command), Sts (status), Con (console/informational)
+        e('span',{style:{display:'inline-flex',alignItems:'center',gap:5,padding:'2px 7px',
+          borderRadius:3,backgroundColor:'#1F2937',fontFamily:'var(--mono)',fontSize:9.5}},
+          ...[
+            {label:'Cmd', key:'commandConnection',  informational:false},
+            {label:'Sts', key:'statusConnection',   informational:false},
+            {label:'Con', key:'consoleConnection',  informational:true},
+          ].map(({label, key, informational}) => {
+            const ok = state?.[key] === 'Connected';
+            const dot = ok ? '#10B981' : informational ? '#4B5563' : '#EF4444';
+            const txt = ok ? '#9CA3AF' : informational ? '#4B5563' : '#EF4444';
+            return e('span',{key:label, style:{display:'inline-flex',alignItems:'center',gap:3,color:txt}},
+              e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:dot,flexShrink:0}}),
+              label);
+          }))),
       e('div',{style:{display:'flex',alignItems:'center',gap:6}},
         e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
           padding:'2px 8px',borderRadius:10,fontSize:10,fontWeight:600,

@@ -174,6 +174,93 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
   }
 
   // ========================================
+  // Computed Field Tests — motorPosition, motorDemand, angularPosition
+  // ========================================
+
+  test("motorPosition should return raw position for linear axes (no countsPerRevolution)") {
+    val state = AxisState(position = 800.0)  // linear: no cpr set
+    state.motorPosition shouldBe 800.0
+  }
+
+  test("motorPosition should wrap accumulated counts into [0, cpr) for rotating axes") {
+    val cpr = 400.0
+    val state = AxisState(position = 0.0, countsPerRevolution = Some(cpr))
+
+    // Exact multiples of cpr → 0
+    state.copy(position = 0.0).motorPosition   shouldBe 0.0
+    state.copy(position = 400.0).motorPosition shouldBe 0.0
+    state.copy(position = 800.0).motorPosition shouldBe 0.0
+
+    // Mid-revolution positions
+    state.copy(position = 100.0).motorPosition shouldBe 100.0
+    state.copy(position = 500.0).motorPosition shouldBe 100.0  // 500 % 400 = 100
+    state.copy(position = 750.0).motorPosition shouldBe 350.0  // 750 % 400 = 350
+
+    // Negative positions (reverse from home)
+    state.copy(position = -100.0).motorPosition shouldBe 300.0  // -100 + 400
+    state.copy(position = -400.0).motorPosition shouldBe 0.0    // full negative rev
+    state.copy(position = -500.0).motorPosition shouldBe 300.0  // -500 % 400 = -100 → +300
+  }
+
+  test("motorPosition should return raw position when countsPerRevolution is zero (uninitialized)") {
+    // cpr=0.0 is the sentinel for \"not yet configured\" — must not divide by zero
+    val state = AxisState(position = 123.0, countsPerRevolution = Some(0.0))
+    state.motorPosition shouldBe 123.0
+  }
+
+  test("motorDemand should wrap accumulated demand into [0, cpr) for rotating axes") {
+    val cpr = 400.0
+    val state = AxisState(demand = 0.0, countsPerRevolution = Some(cpr))
+
+    state.copy(demand = 800.0).motorDemand  shouldBe 0.0    // two full wraps
+    state.copy(demand = 500.0).motorDemand  shouldBe 100.0
+    state.copy(demand = -100.0).motorDemand shouldBe 300.0
+  }
+
+  test("motorDemand should return raw demand for linear axes") {
+    val state = AxisState(demand = 800.0)
+    state.motorDemand shouldBe 800.0
+  }
+
+  test("motorPosition and motorDemand should be consistent after approach algorithm wraps target") {
+    // Simulate: user commands position 0 on a 400-count axis that has already done
+    // two full revolutions. applyApproachAlgorithm resolves rawTarget=0 to adjusted=800
+    // (Shortest path: already at 800, distance to next 0 is 0). Demand is stored as 800.
+    // Both motorPosition and motorDemand should display as 0.
+    val cpr = 400.0
+    val state = AxisState(
+      position = 800.0,
+      demand   = 800.0,
+      countsPerRevolution = Some(cpr)
+    )
+    state.motorPosition shouldBe 0.0
+    state.motorDemand   shouldBe 0.0
+  }
+
+  test("angularPosition should return None for linear axes") {
+    AxisState(position = 100.0).angularPosition shouldBe None
+  }
+
+  test("angularPosition should compute degrees in [0, 360) for rotating axes") {
+    val cpr = 400.0
+    val state = AxisState(position = 0.0, countsPerRevolution = Some(cpr))
+
+    state.copy(position = 0.0).angularPosition   shouldBe Some(0.0)
+    state.copy(position = 100.0).angularPosition shouldBe Some(90.0)   // quarter rev
+    state.copy(position = 200.0).angularPosition shouldBe Some(180.0)  // half rev
+    state.copy(position = 300.0).angularPosition shouldBe Some(270.0)  // three-quarter
+    state.copy(position = 400.0).angularPosition shouldBe Some(0.0)    // full rev wraps
+    state.copy(position = 500.0).angularPosition shouldBe Some(90.0)   // 500 % 400 = 100 → 90°
+
+    // Negative positions
+    state.copy(position = -100.0).angularPosition shouldBe Some(270.0) // -100/400*360 = -90 → +270
+  }
+
+  test("angularPosition should return None when countsPerRevolution is zero") {
+    AxisState(position = 100.0, countsPerRevolution = Some(0.0)).angularPosition shouldBe None
+  }
+
+  // ========================================
   // State Model Tests — AxisCmdState
   // ========================================
   // State Machine Tests — AxisStateEnum (SDD Figure 4-2)
@@ -352,6 +439,103 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     state.isThreadActive(2) shouldBe true
     state.isThreadActive(3) shouldBe false
     state.isThreadActive(7) shouldBe false
+  }
+
+  // ========================================
+  // Connection Status Tests
+  // ========================================
+
+  test("HcdState connection fields should default to Disconnected") {
+    val state = HcdState()
+    state.commandConnection shouldBe ConnectionStatus.Disconnected
+    state.statusConnection  shouldBe ConnectionStatus.Disconnected
+    state.consoleConnection shouldBe ConnectionStatus.Disconnected
+  }
+
+  test("HcdState.isOperational requires command and status connections; console is irrelevant") {
+    // Neither connected → not operational
+    HcdState().isOperational shouldBe false
+
+    // Only command connected → not operational
+    HcdState(commandConnection = ConnectionStatus.Connected).isOperational shouldBe false
+
+    // Only status connected → not operational
+    HcdState(statusConnection = ConnectionStatus.Connected).isOperational shouldBe false
+
+    // Both command and status connected → operational (console irrelevant)
+    HcdState(
+      commandConnection = ConnectionStatus.Connected,
+      statusConnection  = ConnectionStatus.Connected
+    ).isOperational shouldBe true
+
+    // All three connected → operational
+    HcdState(
+      commandConnection = ConnectionStatus.Connected,
+      statusConnection  = ConnectionStatus.Connected,
+      consoleConnection = ConnectionStatus.Connected
+    ).isOperational shouldBe true
+
+    // Command + status connected, console disconnected → still operational
+    HcdState(
+      commandConnection = ConnectionStatus.Connected,
+      statusConnection  = ConnectionStatus.Connected,
+      consoleConnection = ConnectionStatus.Disconnected
+    ).isOperational shouldBe true
+  }
+
+  test("HcdState.update should update individual connection fields") {
+    val state = HcdState()
+
+    val afterCmd = state.update(Map("commandConnection" -> ConnectionStatus.Connected))
+    afterCmd.commandConnection shouldBe ConnectionStatus.Connected
+    afterCmd.statusConnection  shouldBe ConnectionStatus.Disconnected
+    afterCmd.consoleConnection shouldBe ConnectionStatus.Disconnected
+
+    val afterSts = afterCmd.update(Map("statusConnection" -> ConnectionStatus.Connected))
+    afterSts.commandConnection shouldBe ConnectionStatus.Connected
+    afterSts.statusConnection  shouldBe ConnectionStatus.Connected
+    afterSts.consoleConnection shouldBe ConnectionStatus.Disconnected
+    afterSts.isOperational     shouldBe true
+
+    val afterCon = afterSts.update(Map("consoleConnection" -> ConnectionStatus.Connected))
+    afterCon.consoleConnection shouldBe ConnectionStatus.Connected
+    afterCon.isOperational     shouldBe true
+  }
+
+  test("InternalStateActor should handle ReportConnectionStatus messages") {
+    val actor = testKit.spawn(InternalStateActor())
+    val probe = testKit.createTestProbe[HcdState]()
+
+    // Report command connection
+    actor ! InternalStateActor.ReportConnectionStatus("commandConnection", ConnectionStatus.Connected)
+
+    // Allow message to process
+    Thread.sleep(100)
+
+    actor ! InternalStateActor.GetHcdState(probe.ref)
+    val state1 = probe.receiveMessage()
+    state1.commandConnection shouldBe ConnectionStatus.Connected
+    state1.statusConnection  shouldBe ConnectionStatus.Disconnected
+    state1.isOperational     shouldBe false
+
+    // Report status connection
+    actor ! InternalStateActor.ReportConnectionStatus("statusConnection", ConnectionStatus.Connected)
+    Thread.sleep(100)
+
+    actor ! InternalStateActor.GetHcdState(probe.ref)
+    val state2 = probe.receiveMessage()
+    state2.commandConnection shouldBe ConnectionStatus.Connected
+    state2.statusConnection  shouldBe ConnectionStatus.Connected
+    state2.isOperational     shouldBe true
+
+    // Console connection doesn't affect isOperational
+    actor ! InternalStateActor.ReportConnectionStatus("consoleConnection", ConnectionStatus.Connected)
+    Thread.sleep(100)
+
+    actor ! InternalStateActor.GetHcdState(probe.ref)
+    val state3 = probe.receiveMessage()
+    state3.consoleConnection shouldBe ConnectionStatus.Connected
+    state3.isOperational     shouldBe true
   }
 
   // ========================================

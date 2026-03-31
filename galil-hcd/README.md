@@ -226,6 +226,10 @@ axis count, not `activeAxes` config).
 - **Linear:** vertical track with position arrow from left, limit labels at ends. Arrow turns
   green when `inPosition`.
 
+**Position display:** For rotating axes, `Position` shows the wrapped value in `[0, cpr)` —
+matching the demand space used by commands — with a smaller `Raw` readout below it showing
+the accumulated encoder count for diagnostics. For linear axes both values are identical.
+
 **Command controls per axis:** Home, Stop, Position (counts), Offset (counts), Angular
 (degrees — `positionWheel`, rotating axes), Wheel (slot 0-7 — `selectWheel`, rotating axes),
 Track (position + velocity). Collapsible Config panel for motion parameters, mechanism type
@@ -235,21 +239,37 @@ Track (position + velocity). Collapsible Config panel for motion parameters, mec
 and log), unified log panel with runtime level control (INFO/DEBUG/TRACE), thread status bar,
 SIMULATING badge in simulator mode.
 
-**I/O panel:** Shows 16 digital inputs (read-only, bits 1-8 live on main board, 9-16 greyed
-on 4-axis controller), 16 digital outputs (clickable toggle → `setBit`, same availability),
-and 8 analog input channels (polled at 1Hz via `MG @AN[n]`, displayed in volts). Collapsed
-by default; header shows mini 8-dot DI and DO summary indicators.
+**I/O panel:** Shows 16 digital inputs (read-only, bits 1-8 live on main board, 9-16 active
+only on 8-axis controllers with slave I/O expansion module), 16 digital outputs (clickable
+toggle → `setBit`, same availability), and 8 analog input channels (polled at 1Hz via
+`MG @AN[n]`, displayed in volts). Collapsed by default; header shows mini 8-dot DI and DO
+summary indicators. Bit availability is determined by `controllerAxisCount` reported from the
+controller `ID` command — not by the number of configured axes.
+
+**Log panel:** Collapsible — click the `HCD LOG` label or chevron to minimize to a header
+bar, freeing vertical space. Line count badge visible when minimized. Log level controls
+(HCD runtime level and display filter) remain accessible in both states.
+
+**Connection status:** Header shows three dot indicators — `Cmd` (command TCP), `Sts` (status
+TCP), `Con` (console TCP, hardware-only, informational). Green = Connected, red = Disconnected
+(gray for console since it is not required for operation). `isOperational` requires both Cmd
+and Sts to be Connected.
 
 ### Architecture
 
 The HCD uses three independent TCP connections to the controller (all on the same port —
-the DMC-500x0 assigns each to one of its 8 Ethernet handles internally):
+the DMC-500x0 assigns each to one of its 8 Ethernet handles internally). All three actors
+are spawned as siblings directly under `GalilHcd` — none is a child of another:
 
 | Actor | Connection | Role |
 |-------|-----------|------|
 | `ControllerCommandActor` | command socket | SendCommand, ExecuteProgram, HaltExecution, thread allocation |
 | `ControllerStatusActor` | status socket | QR polling, analog input queries |
 | `ControllerConsoleActor` | console socket | Unsolicited MG output via `CF I` (hardware only) |
+
+Each actor reports its connection status to `InternalStateActor` on startup via
+`ReportConnectionStatus`. `HcdState.isOperational` is true when both command and status
+connections are `Connected` (console is informational and does not affect readiness).
 
 This means QR/AI polls never contend with command traffic at either the socket or actor-mailbox level.
 
@@ -273,7 +293,7 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusAct
 | Suite | Tests | Coverage |
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
-| InternalStateActorTest | 41 | State management, pub/sub |
+| InternalStateActorTest | 54 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus |
 | ControllerStatusActorTest | 15 | QR polling, adaptive rate, analog input polling |
 | CommandHandlerActorTest | 17 | Immediate commands, validation |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
@@ -316,7 +336,7 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | Suite | Tests | Dependencies |
 |-------|------:|-------------|
 | GalilHcdConfigTest | 9 | None |
-| InternalStateActorTest | 41 | None |
+| InternalStateActorTest | 54 | None |
 | ControllerStatusActorTest | 15 | None |
 | CommandHandlerActorTest | 17 | None |
 | CommandWatcherActorTest | 15 | None |
@@ -328,4 +348,4 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
 | HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
 | GalilSimulatorActorTest | 73 | None |
-| **Total** | **290** | |
+| **Total** | **307** | |

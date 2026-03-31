@@ -175,7 +175,12 @@ class ControllerStatusActor(
   startPolling()
   // Start 1Hz analog input polling (independent of QR rate)
   timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
-  
+
+  // Report status connection established to InternalStateActor
+  internalState ! InternalStateActor.ReportConnectionStatus(
+    "statusConnection", ConnectionStatus.Connected
+  )
+
   log.info(s"ControllerStatusActor started — standby: ${standbyPollingRateHz}Hz, action: ${actionPollingRateHz}Hz")
   
   override def onMessage(msg: Command): Behavior[Command] =

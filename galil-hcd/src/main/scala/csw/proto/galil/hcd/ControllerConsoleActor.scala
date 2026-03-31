@@ -1,6 +1,6 @@
 package csw.proto.galil.hcd
 
-import org.apache.pekko.actor.typed.{Behavior, PostStop}
+import org.apache.pekko.actor.typed.{ActorRef, Behavior, PostStop}
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import csw.logging.api.scaladsl.Logger
 import csw.prefix.models.Prefix
@@ -15,8 +15,9 @@ import scala.util.control.NonFatal
  * and emits each line as a CSW log message.
  *
  * Architecture:
- *   - Spawned as a child of ControllerInterfaceActor during CI actor setup.
- *   - Opens a dedicated second TCP handle and sends CF I + CW 2 to claim
+ *   - Spawned as a sibling of ControllerCommandActor and ControllerStatusActor
+ *     by GalilHcd after the command connection is established (hardware-only).
+ *   - Opens a dedicated third TCP handle and sends CF I + CW 2 to claim
  *     unsolicited MG output on this handle in ASCII format.
  *   - Each MG line from an embedded DMC program is emitted as:
  *       log.info(s"[GALIL:$prefix] $text")
@@ -57,15 +58,17 @@ object ControllerConsoleActor:
    * @param host       Controller IP address
    * @param port       Controller TCP port (usually 23)
    * @param prefix     HCD component prefix, used as log tag
-   * @param log        CSW logger
-   * @param readyLatch Counted down once CF I + CW 2 complete (or on failure).
+   * @param log                 CSW logger
+   * @param readyLatch          Counted down once CF I + CW 2 complete (or on failure).
+   * @param internalStateActor  IS actor to report consoleConnection status to.
    */
   def apply(
-    host:       String,
-    port:       Int,
-    prefix:     Prefix,
-    log:        Logger,
-    readyLatch: CountDownLatch
+    host:                String,
+    port:                Int,
+    prefix:              Prefix,
+    log:                 Logger,
+    readyLatch:          CountDownLatch,
+    internalStateActor:  ActorRef[InternalStateActor.Command]
   ): Behavior[Command] = Behaviors.setup { _ =>
 
     val logTag = s"[GALIL:$prefix]"
@@ -120,9 +123,12 @@ object ControllerConsoleActor:
                 log.debug(s"$logTag ControllerConsoleActor: CW 2 sent (no response, OK)")
 
             // ── Ready ────────────────────────────────────────────────────────
-            // CF I + CW 2 complete: handle is live. Unblock CI actor setup so
-            // GalilHcd proceeds to #Init knowing all MG output is captured.
+            // CF I + CW 2 complete: handle is live. Report connection status and
+            // unblock GalilHcd so it proceeds to #Init knowing all MG output is captured.
             log.info(s"$logTag ControllerConsoleActor: listening for MG output")
+            internalStateActor ! InternalStateActor.ReportConnectionStatus(
+              "consoleConnection", ConnectionStatus.Connected
+            )
             readyLatch.countDown()
 
             // ── Read loop ────────────────────────────────────────────────────

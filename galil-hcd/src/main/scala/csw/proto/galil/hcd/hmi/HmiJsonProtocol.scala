@@ -16,11 +16,17 @@ object HmiJsonProtocol {
   // ── AxisState → JSON ──────────────────────────────────────────────────
 
   private def axisStateToJson(s: AxisState): JsObject = Json.obj(
-    "position"     -> s.position,
+    // Wrapped position in encoder counts [0, cpr) for rotating axes; equals raw position for linear.
+    // Matches the demand space used by positionAxis/offsetAxis commands — no confusing wrap offsets.
+    "position"           -> s.motorPosition,
+    // Raw accumulated encoder counts from controller (accumulates across revolutions for rotating axes).
+    // Useful for diagnostics and verifying the wrapping logic.
+    "rawMotorPosition"   -> s.position,
     "velocity"     -> s.velocity,
     "axisState"    -> s.axisState.toString,
     "inPosition"   -> s.inPosition,
-    "demand"       -> s.demand,
+    // Wrapped demand [0, cpr) for rotating axes — matches motorPosition frame for HMI display.
+    "demand"       -> s.motorDemand,
     "axisErrorMsg" -> s.axisError,
     "forwardLimit" -> s.forwardLimit,
     "reverseLimit" -> s.reverseLimit,
@@ -87,10 +93,17 @@ object HmiJsonProtocol {
       "timestamp"          -> hcdState.lastPollingTime.toString,
       "hcdState"           -> hcdState.state.toString,
       "controllerErrorMsg" -> hcdState.controllerErrorMsg,
+      "controllerAxisCount" -> hcdState.controllerAxisCount,
       "simulation"         -> hcdState.simulation,
       "pollingRateHz"      -> hcdState.currentPollingRateHz,
       "threadStatus"       -> threadBits,
       "activeAxes"         -> activeAxesList,
+      // Per-connection status for the three TCP handles
+      "commandConnection"  -> hcdState.commandConnection.toString,
+      "statusConnection"   -> hcdState.statusConnection.toString,
+      "consoleConnection"  -> hcdState.consoleConnection.toString,
+      // True when both command and status connections are established
+      "isOperational"      -> hcdState.isOperational,
       "axes"               -> axesJson,
       "cmdState"           -> cmdStateJson,
       "digitalInputs"      -> JsArray(hcdState.digitalInputs.map(b => JsBoolean(b)).toIndexedSeq),
