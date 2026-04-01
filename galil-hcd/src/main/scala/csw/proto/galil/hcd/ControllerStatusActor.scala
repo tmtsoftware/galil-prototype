@@ -366,10 +366,11 @@ class ControllerStatusActor(
   private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
 
-    // inputs/outputs: 10 bytes in QR; only the first byte (bits 0-7) is meaningful
-    // on the DMC-500x0 main board (8 optoisolated DI, 8 optoisolated DO).
-    // We expand to a 16-element Boolean array for future slave-module support:
-    // bytes 0-1 → bits 0-15. Byte 1 will be zero on a 4-axis controller.
+    // inputs/outputs: 10 bytes in QR DataRecord.
+    // The number of usable DI/DO channels depends on the controller model:
+    //   DMC-50040 (4-axis): 8 DI, 8 DO  → only byte 0 is meaningful
+    //   DMC-50080 (8-axis): 16 DI, 16 DO → bytes 0 and 1 are meaningful
+    // We always expand to a 16-element Boolean array; byte 1 will be zero on a 4-axis controller.
     def bytesToBits(bytes: Array[Byte], count: Int): Array[Boolean] =
       (0 until count).map { i =>
         val byteIdx = i / 8

@@ -621,9 +621,10 @@ const IOPanel = memo(function IOPanel({state, onCommand}) {
   const activeAxes = state?.activeAxes || [];
 
   // I/O availability is determined by the controller's axis count (from ID command).
-  // DMC-500x0 main board: 8 DI, 8 DO, 8 AI — always present (bits 1-8).
-  // With a slave I/O expansion module (requires 8-axis controller): adds bits 9-16.
-  // controllerAxisCount == 8 means the controller is a DMC-50080 with slave module support.
+  // The number of DI/DO channels is an intrinsic property of the DMC-500x0 model:
+  //   DMC-50040 (4-axis): 8 DI, 8 DO  → bits 1-8 only
+  //   DMC-50080 (8-axis): 16 DI, 16 DO → bits 1-16
+  // No expansion module is involved — channel count is determined by the controller model itself.
   const controllerAxisCount = state?.controllerAxisCount ?? -1;
   const isSupported = useCallback((bit1) => bit1 <= 8 || controllerAxisCount >= 8, [controllerAxisCount]);
 

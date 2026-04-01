@@ -239,12 +239,13 @@ Track (position + velocity). Collapsible Config panel for motion parameters, mec
 and log), unified log panel with runtime level control (INFO/DEBUG/TRACE), thread status bar,
 SIMULATING badge in simulator mode.
 
-**I/O panel:** Shows 16 digital inputs (read-only, bits 1-8 live on main board, 9-16 active
-only on 8-axis controllers with slave I/O expansion module), 16 digital outputs (clickable
-toggle → `setBit`, same availability), and 8 analog input channels (polled at 1Hz via
-`MG @AN[n]`, displayed in volts). Collapsed by default; header shows mini 8-dot DI and DO
-summary indicators. Bit availability is determined by `controllerAxisCount` reported from the
-controller `ID` command — not by the number of configured axes.
+**I/O panel:** Shows 16 digital inputs (read-only) and 16 digital outputs (clickable toggle →
+`setBit`). The number of active channels is an intrinsic property of the controller model:
+DMC-50040 (4-axis) provides 8 DI / 8 DO (bits 1-8 live, 9-16 dimmed); DMC-50080 (8-axis)
+provides 16 DI / 16 DO (all bits live). No expansion module is involved. Channel availability
+is determined by `controllerAxisCount` from the controller `ID` command, not by the number of
+configured axes. Also shows 8 analog input channels (polled at 1Hz via `MG @AN[n]`, displayed
+in volts). Collapsed by default; header shows mini 8-dot DI and DO summary indicators.
 
 **Log panel:** Collapsible — click the `HCD LOG` label or chevron to minimize to a header
 bar, freeing vertical space. Line count badge visible when minimized. Log level controls

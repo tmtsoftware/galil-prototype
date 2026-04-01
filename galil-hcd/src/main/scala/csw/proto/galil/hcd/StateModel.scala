@@ -392,8 +392,12 @@ case class AxisCmdState(
  * @param controllerErrorMsg Controller error message
  * @param version Embedded version number
  * @param controllerAxisCount Axis count reported by controller ID command (e.g. 4 or 8); -1 if unknown.
- *   Parsed from firmware model string: DMC500x0 → x axes. Used by HMI to determine
- *   which I/O bits are supported (8-axis controllers support slave I/O expansion, bits 9-16).
+ *   Parsed from firmware model string: DMC500x0 → x axes. Determines the number of DI/DO
+ *   channels available on this controller model:
+ *     DMC-50040 (4-axis): 8 DI, 8 DO
+ *     DMC-50080 (8-axis): 16 DI, 16 DO
+ *   No expansion board is involved — channel count is intrinsic to the controller model.
+ *   Used by HMI to determine which I/O bits are active.
  * @param activeAxes Which axes (A-H) are configured for use
  * @param digitalInputs Current values of optoisolated inputs (16 bits)
  * @param digitalOutputs Current values of optoisolated outputs (16 bits)
