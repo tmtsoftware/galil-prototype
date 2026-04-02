@@ -883,36 +883,40 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     }
 
     // 2. Send all #SetupX commands — each on its own thread.
-    //    A small stagger delay between XQ commands is required for brushless servo axes:
-    //    the BZ (Brushless Zero) commutation routine occupies the controller long enough
-    //    that a back-to-back XQ for the next axis can time out on the socket read
-    //    (soTimeout = 3s). The embedded #Setup routine uses WT 2 for the same reason.
-    //    500ms gives the controller time to acknowledge each XQ without significantly
-    //    lengthening total setup time.
-    val SetupXqStaggerMs = 500
-
-    val threads = activeAxes.zipWithIndex.map { case (axisName, i) =>
+    //    Brushless servo axes (A/B/C) run BZ (Brushless Zero) commutation during setup,
+    //    which can occupy the controller long enough that a back-to-back XQ for the next
+    //    axis times out on the socket read (soTimeout = 3s). Time-based staggering is
+    //    fragile because BZ duration is hardware-dependent. Instead we use the same
+    //    ExecuteProgram path as #Init: send each XQ via ExecuteProgram, which does an
+    //    MG _NO confirmation query after each XQ. We confirm the thread is ACTIVE before
+    //    sending the next XQ — this is the most reliable way to ensure the controller has
+    //    finished processing the previous XQ before we send another.
+    //    Setup threads then run concurrently to completion; we poll for all to finish below.
+    val threads = activeAxes.map { axisName =>
       val axis = Axis.fromChar(axisName.head)
       val thread = axis.index + 1
-      val cmd = s"XQ #Setup$axisName,$thread"
-      log.info(s"Sending: $cmd")
+      val label = s"Setup$axisName"
+      log.info(s"Sending: XQ #$label,$thread")
 
-      if (i > 0) Thread.sleep(SetupXqStaggerMs)
-
-      val cmdFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
-        ref => GalilCommandMessage.SendCommand(cmd, ref)
+      val execFuture = controllerCommandActor.ask[GalilCommandMessage.ExecuteProgramResult](
+        ref => GalilCommandMessage.ExecuteProgram(label, ref)
       )
-      val cmdResult = Await.result(cmdFuture, 5.seconds)
-      cmdResult.error.foreach { err =>
-        throw new RuntimeException(s"$cmd failed: $err")
+      val execResult = Await.result(execFuture, 10.seconds)
+      execResult.error.foreach { err =>
+        throw new RuntimeException(s"XQ #$label,$thread failed: $err")
       }
-      (axisName, thread)
+      if (!execResult.threadWasActive)
+        log.warn(s"XQ #$label,$thread: thread $thread not observed active — setup may have completed instantly or been rejected")
+      else
+        log.info(s"XQ #$label,$thread confirmed active on thread ${execResult.thread}")
+
+      (axisName, execResult.thread)
     }
 
     // 3. Poll until all setup threads have completed.
-    //    Timeout must accommodate brushless servo BZ commutation running in parallel.
+    //    Timeout must accommodate brushless servo BZ commutation on multiple axes in parallel.
     //    Axes A/B/C each have BZ timeouts of 1-2 seconds in the embedded code; with
-    //    7 axes active and commutation concurrent, 30 seconds is a safe upper bound.
+    //    7 axes active and commutation running concurrently, 30 seconds is a safe upper bound.
     val threadMask = threads.map(_._2).foldLeft(0)((mask, t) => mask | (1 << t))
     log.info(s"Waiting for setup threads to complete (mask=0x${threadMask.toHexString})")
 
