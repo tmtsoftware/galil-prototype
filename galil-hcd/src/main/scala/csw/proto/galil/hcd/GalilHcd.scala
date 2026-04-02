@@ -583,12 +583,16 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * The Galil controller auto-compresses uploaded code by stripping:
    * - Inline comments (everything after ' on a line)
    * - REM comment lines
-   * - Blank lines  
-   * - Trailing whitespace
-   * 
-   * This normalization mimics that compression so the resource file
-   * (which has comments for documentation) can be compared against
-   * the downloaded program (which has been stripped by the controller).
+   * - Blank lines
+   * - All inter-token whitespace (spaces around operators, after keywords, etc.)
+   *
+   * The controller removes whitespace aggressively across the whole line,
+   * including inside MG string literals (a trailing tab/space in a string
+   * becomes a single space). We model this with a simple collapse: strip all
+   * whitespace from each line. This matches `diff -w` semantics and is correct
+   * for functional comparison — the only theoretical false-negative would be
+   * a string literal where spaces are load-bearing, which does not occur in
+   * this codebase.
    */
   private def normalizeProgram(program: String): String = {
     program
@@ -598,9 +602,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         val commentIdx = line.indexOf('\'')
         if (commentIdx >= 0) line.substring(0, commentIdx) else line
       }
-      .map(_.replaceAll("\\s+$", ""))  // Strip trailing whitespace
-      .filter(_.trim.nonEmpty)          // Remove blank lines
-      .filterNot(_.trim.startsWith("REM"))  // Remove REM comments
+      .filterNot { line => val t = line.trim; t.nonEmpty && t.startsWith("REM") }  // Remove REM comment lines
+      .map(_.replaceAll("\\s+", ""))  // Strip all whitespace — matches controller compression
+      .filter(_.nonEmpty)             // Remove blank lines
       .mkString("\n")
   }
   
@@ -878,12 +882,22 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       }
     }
 
-    // 2. Send all #SetupX commands — each on its own thread
-    val threads = activeAxes.map { axisName =>
+    // 2. Send all #SetupX commands — each on its own thread.
+    //    A small stagger delay between XQ commands is required for brushless servo axes:
+    //    the BZ (Brushless Zero) commutation routine occupies the controller long enough
+    //    that a back-to-back XQ for the next axis can time out on the socket read
+    //    (soTimeout = 3s). The embedded #Setup routine uses WT 2 for the same reason.
+    //    500ms gives the controller time to acknowledge each XQ without significantly
+    //    lengthening total setup time.
+    val SetupXqStaggerMs = 500
+
+    val threads = activeAxes.zipWithIndex.map { case (axisName, i) =>
       val axis = Axis.fromChar(axisName.head)
       val thread = axis.index + 1
       val cmd = s"XQ #Setup$axisName,$thread"
       log.info(s"Sending: $cmd")
+
+      if (i > 0) Thread.sleep(SetupXqStaggerMs)
 
       val cmdFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
         ref => GalilCommandMessage.SendCommand(cmd, ref)
@@ -895,11 +909,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       (axisName, thread)
     }
 
-    // 3. Poll until all setup threads have completed
+    // 3. Poll until all setup threads have completed.
+    //    Timeout must accommodate brushless servo BZ commutation running in parallel.
+    //    Axes A/B/C each have BZ timeouts of 1-2 seconds in the embedded code; with
+    //    7 axes active and commutation concurrent, 30 seconds is a safe upper bound.
     val threadMask = threads.map(_._2).foldLeft(0)((mask, t) => mask | (1 << t))
     log.info(s"Waiting for setup threads to complete (mask=0x${threadMask.toHexString})")
 
-    val deadline = 5.seconds.fromNow
+    val deadline = 30.seconds.fromNow
     var completed = false
     while (deadline.hasTimeLeft() && !completed) {
       Thread.sleep(100)
