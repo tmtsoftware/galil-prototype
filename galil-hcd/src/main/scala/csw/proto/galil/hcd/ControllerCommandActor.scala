@@ -233,7 +233,7 @@ private[hcd] object ControllerCommandActor {
           // Execute embedded program with automatic thread allocation and start confirmation.
           // Allocates a thread from hardware state (MG _NO), optionally sends preCommands,
           // sends XQ, then confirms via MG _NO. All steps run inside galilIo.synchronized.
-          case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands, readTimeoutMs) =>
+          case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
             try {
               galilIo.synchronized {
                 // Step 1: Allocate a thread (queries MG _NO, updates IS)
@@ -270,15 +270,10 @@ private[hcd] object ControllerCommandActor {
                           error = Some(errMsg))
 
                       case None =>
-                        // Step 3: Send XQ command, with optional extended read timeout.
-                        // BZ (Brushless Zero) commutation pauses all controller communication
-                        // per the Galil manual; readTimeoutMs allows callers to accommodate this.
+                        // Step 3: Send XQ command
                         val xqCmd = s"XQ #$label,$thread"
-                        log.info(s"ExecuteProgram: $xqCmd${readTimeoutMs.map(t => s" (readTimeout=${t}ms)").getOrElse("")}")
-                        val xqResponses = readTimeoutMs match {
-                          case Some(ms) => galilIo.withReadTimeout(ms) { galilIo.send(xqCmd) }
-                          case None     => galilIo.send(xqCmd)
-                        }
+                        log.info(s"ExecuteProgram: $xqCmd")
+                        val xqResponses = galilIo.send(xqCmd)
 
                         // Check for XQ rejection (? response)
                         val xqError = xqResponses.find { case (_, bs) =>

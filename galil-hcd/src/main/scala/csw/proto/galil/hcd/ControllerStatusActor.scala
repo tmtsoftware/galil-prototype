@@ -331,6 +331,7 @@ class ControllerStatusActor(
     Behaviors.same
   
   private def handlePollAnalogInputs(): Behavior[Command] =
+    if !pollingEnabled then return Behaviors.same
     log.debug("AI poll: sending compound MG @AN query")
 
     // Single compound MG command — one round-trip instead of 8 sequential calls.

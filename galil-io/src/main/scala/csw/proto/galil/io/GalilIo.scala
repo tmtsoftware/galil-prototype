@@ -50,21 +50,7 @@ abstract class GalilIo {
    */
   def close(): Unit
 
-  /**
-   * Execute a block with a temporarily overridden socket read timeout.
-   *
-   * Used during initialization for commands whose response may be delayed by
-   * the Galil BZ (Brushless Zero) commutation routine. Per the Galil manual:
-   * "While the BZ command is executing, DMC code, data records, and
-   * communication from the controller will pause until completion."
-   *
-   * The default implementation (for simulator/UDP) is a pass-through.
-   * GalilIoTcp overrides to save/restore the socket soTimeout.
-   *
-   * @param timeoutMs Read timeout in milliseconds for the duration of the block
-   * @param block     Code to execute with the extended timeout
-   */
-  def withReadTimeout[A](timeoutMs: Int)(block: => A): A = block
+
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -310,17 +296,6 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
   // UDP doesn't have the same buffering as TCP - just return empty
   override def drainAndShowBuffer(timeoutMs: Int = 200): String = {
     ""
-  }
-
-  /**
-   * Temporarily override the socket read timeout for the duration of a block.
-   * Saves the current soTimeout, applies the new one, runs the block, then restores.
-   */
-  override def withReadTimeout[A](timeoutMs: Int)(block: => A): A = {
-    val previous = socket.getSoTimeout
-    socket.setSoTimeout(timeoutMs)
-    try block
-    finally socket.setSoTimeout(previous)
   }
 
   override def close(): Unit = socket.close()

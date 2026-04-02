@@ -69,8 +69,7 @@ object GalilCommandMessage {
   case class ExecuteProgram(
     label: String,
     replyTo: ActorRef[ExecuteProgramResult],
-    preCommands: Option[String] = None,
-    readTimeoutMs: Option[Int] = None   // Override socket read timeout for BZ-affected setups
+    preCommands: Option[String] = None
   ) extends GalilCommandMessage
 
   /**
@@ -853,12 +852,22 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
 
   /**
-   * Set up all active axes on the controller.
+   * Set up all active axes on the controller by running the embedded #Setup program.
    *
-   * This is the motor/hardware setup phase of HCD initialization.
-   * Each #SetupX program configures motor type, feedback, amplifier limits,
-   * and safety parameters for its axis. Motors must be off before setup
-   * (MO command), and setups run in parallel on per-axis threads (A=1, B=2, etc.).
+   * #Setup (thread 0) launches #SetupA–G on threads 1–7 with WT 2 spacing.
+   * Brushless servo axes run BZ (Brushless Zero) commutation which, per the Galil
+   * manual, pauses all controller communication until complete. This means the
+   * firmware serializes BZ across axes regardless of thread count — #SetupB cannot
+   * start until #SetupA's BZ finishes.
+   *
+   * Thread 0 therefore stays active for almost the entire setup duration (it is
+   * blocked on each XQ call while BZ runs on the previous axis). We know setup is
+   * complete when ALL threads (0–7) are inactive per MG _NO.
+   *
+   * We poll MG _NO on the command connection rather than reading IS threadStatus,
+   * because QR polling on the status connection is suspended during setup (BZ
+   * pauses that connection too). A read timeout on MG _NO means BZ is in progress
+   * on that axis — we treat it as "still busy" and keep waiting.
    */
   private def setupAxes(): Future[Unit] = {
     import scala.concurrent.Await
@@ -868,55 +877,67 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
-    log.info("Initializing active axes")
-
     val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
     val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
-
     log.info(s"Active axes: ${activeAxes.mkString(", ")}")
 
-    // 1. Ensure all motors are off before setup.
-    //    Many embedded setup commands (MT, CE, TL, etc.) require the motor to be off.
-    //    This is safe on first power-up (#Init does MO), but required if re-initializing
-    //    after motors have been enabled by motion commands.
+    // 1. Motors off before setup — required by many embedded setup commands.
     activeAxes.foreach { axisName =>
       val moCmd = s"MO$axisName"
       log.info(s"Motor off before setup: $moCmd")
-      val moFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
-        ref => GalilCommandMessage.SendCommand(moCmd, ref)
-      )
-      val moResult = Await.result(moFuture, 5.seconds)
-      moResult.error.foreach { err =>
-        throw new RuntimeException(s"$moCmd failed: $err")
-      }
+      val moResult = Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+          ref => GalilCommandMessage.SendCommand(moCmd, ref)),
+        5.seconds)
+      moResult.error.foreach(err => throw new RuntimeException(s"$moCmd failed: $err"))
     }
 
-    // 2. Run #SetupX for each axis sequentially, waiting for each to complete before
-    //    launching the next.
-    //
-    //    Empirical testing shows that axes with brushless servo commutation (BZ command)
-    //    always run sequentially regardless of how they are launched — the firmware
-    //    serializes BZ across all axes. Per the Galil manual: "While the BZ command is
-    //    executing, DMC code, data records, and communication from the controller will
-    //    pause until completion." This means the XQ acknowledgment (":") is suppressed
-    //    for the full duration of BZ, which can be 10-15 seconds on the STB hardware.
-    //
-    //    We run sequentially to match actual controller behavior, and use a 15-second
-    //    socket read timeout for the XQ send to accommodate the BZ communication pause.
-    //    Stepper axes (no BZ) complete well within this window.
-    val bzReadTimeoutMs = 15 * 1000
+    // 2. Launch #Setup on thread 0. This spawns all #SetupX programs and returns
+    //    its ack promptly (before any BZ starts). We don't use sendAndWaitForThread
+    //    here because completion is detected differently — see step 3.
+    log.info("Running #Setup")
+    val xqResult = Await.result(
+      controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand("XQ #Setup,0", ref)),
+      5.seconds)
+    xqResult.error.foreach(err => throw new RuntimeException(s"XQ #Setup,0 failed: $err"))
+    log.info("XQ #Setup,0 launched — waiting for all threads to complete")
 
+    // 3. Poll MG _NO on the command connection until all threads (0–7) are inactive.
+    //    Thread 0 stays active until it has spawned all #SetupX programs.
+    //    Threads 1–7 go inactive as each axis finishes.
+    //    MG _NO = 0 means all threads idle — setup complete.
+    //
+    //    A read timeout means BZ is blocking the command channel on that poll cycle.
+    //    This is expected and normal — we log it at debug and keep waiting.
+    //    Total timeout is 120s (4 BZ axes × ~10s each + ample margin).
+    val setupDeadline = 120.seconds.fromNow
+    var allDone = false
+    while setupDeadline.hasTimeLeft() && !allDone do
+      Thread.sleep(500)
+      val noResult = Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+          ref => GalilCommandMessage.SendCommand("MG _NO", ref)),
+        6.seconds)  // slightly longer than soTimeout to let SendCommand return cleanly
+      noResult.error match {
+        case Some(err) =>
+          log.debug(s"MG _NO during setup: $err (BZ in progress — waiting)")
+        case None =>
+          val noValue = noResult.response.trim.toDoubleOption.map(_.toInt).getOrElse(-1)
+          log.debug(s"MG _NO = 0x${noValue.toHexString}")
+          if noValue == 0 then
+            log.info("All setup threads completed (_NO=0)")
+            allDone = true
+      }
+
+    if !allDone then
+      throw new RuntimeException("Setup timed out waiting for all threads to complete")
+
+    // 4. Apply per-axis config now that hardware setup is done.
     activeAxes.foreach { axisName =>
-      val label = s"Setup$axisName"
-      log.info(s"Running #$label")
-      sendAndWaitForThread(label, timeout = 10.seconds, readTimeoutMs = Some(bzReadTimeoutMs)) match {
-        case scala.util.Success(_) =>
-          hcdConfig.axes.get(axisName).foreach { axisConfig =>
-            storeMechanismConfig(axisName, axisConfig)
-            log.info(s"Axis $axisName setup complete")
-          }
-        case scala.util.Failure(ex) =>
-          throw new RuntimeException(s"#$label failed: ${ex.getMessage}", ex)
+      hcdConfig.axes.get(axisName).foreach { axisConfig =>
+        storeMechanismConfig(axisName, axisConfig)
+        log.info(s"Axis $axisName setup complete")
       }
     }
 
@@ -948,18 +969,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * from QR polling. We query IS.HcdState.threadStatus to check if the target
    * thread bit has cleared.
    *
-   * @param label         Program label without # prefix (e.g. "Init", "SetupA")
-   * @param timeout        Maximum time to wait for thread completion after XQ is acknowledged
-   * @param readTimeoutMs  Optional socket read timeout override for the XQ send itself.
-   *                       Required when the program runs BZ (Brushless Zero): per the Galil
-   *                       manual, BZ pauses all controller communication until it completes,
-   *                       so the XQ acknowledgment (":") may not arrive for 10–15 seconds.
+   * @param label   Program label without # prefix (e.g. "Init", "Setup")
+   * @param timeout Maximum time to wait for thread completion
    * @return Success(()) if thread completed, Failure if timeout or error
    */
   private def sendAndWaitForThread(
     label: String,
-    timeout: scala.concurrent.duration.FiniteDuration,
-    readTimeoutMs: Option[Int] = None
+    timeout: scala.concurrent.duration.FiniteDuration
   ): scala.util.Try[Unit] = {
     import scala.concurrent.Await
     import scala.concurrent.duration._
@@ -972,14 +988,10 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // 1. Send XQ via ExecuteProgram — allocates thread, sends XQ, then queries
       //    MG _NO to confirm the thread started. Returns threadWasActive as
       //    authoritative hardware truth.
-      // askTimeout must cover the full BZ pause if readTimeoutMs is set
-      val execAskTimeout = readTimeoutMs
-        .map(ms => org.apache.pekko.util.Timeout(scala.concurrent.duration.Duration(ms + 2000, "ms")))
-        .getOrElse(askTimeout)
       val execFuture = controllerCommandActor.ask[GalilCommandMessage.ExecuteProgramResult](
-        ref => GalilCommandMessage.ExecuteProgram(label, ref, readTimeoutMs = readTimeoutMs)
-      )(execAskTimeout, implicitly)
-      val execResult = Await.result(execFuture, execAskTimeout.duration + 1.second)
+        ref => GalilCommandMessage.ExecuteProgram(label, ref)
+      )
+      val execResult = Await.result(execFuture, 5.seconds)
 
       execResult.error.foreach { err =>
         throw new RuntimeException(s"ExecuteProgram '#$label' failed: $err")
