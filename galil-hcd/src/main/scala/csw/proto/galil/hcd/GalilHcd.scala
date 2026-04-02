@@ -444,7 +444,15 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         Future.successful(())
       }
       _ <- initController()
+      // Suspend QR polling during axis setup. BZ (Brushless Zero) commutation
+      // pauses all controller communication per the Galil manual, causing QR
+      // polls on the status connection to time out or return corrupt data.
+      // Polling is re-enabled after all setup programs complete.
+      _ = { statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
+            log.info("QR polling suspended for axis setup (BZ commutation)") }
       _ <- setupAxes()
+      _ = { statusMonitor ! ControllerStatusActor.SetPolling(enabled = true)
+            log.info("QR polling resumed after axis setup") }
       // Write motion config AFTER setupAxes — #SetupX establishes motor type
       // and hardware config; we then overwrite the motion parameters with the
       // authoritative values from the HCD config file. This applies to both
@@ -455,7 +463,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     } yield ()
     
     try {
-      Await.result(initFuture, 30.seconds)
+      Await.result(initFuture, 120.seconds)
     } catch {
       case ex: Exception =>
         log.error("Initialization failed", ex = ex)
