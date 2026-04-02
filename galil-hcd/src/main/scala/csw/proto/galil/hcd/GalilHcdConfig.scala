@@ -49,9 +49,13 @@ case class ControllerConfig(
  * during axis initialization and motion commands.
  * 
  * @param mechanismType "linear" or "rotating"
- * @param upperLimit Upper soft limit (mm or deg)
- * @param lowerLimit Lower soft limit (mm or deg)
- * @param algorithm Approach algorithm: "forward" or "shortest"
+ * @param upperLimit Upper soft limit (mm or deg). Required for linear; optional for rotating
+ *   (defaults to 0.0, which disables soft limit enforcement).
+ * @param lowerLimit Lower soft limit (mm or deg). Required for linear; optional for rotating
+ *   (defaults to 0.0).
+ * @param algorithm Approach algorithm: "forward", "reverse", or "shortest".
+ *   Required for rotating; optional for linear (defaults to "forward", the only meaningful
+ *   value for a linear mechanism).
  * @param inPositionThreshold Threshold for in-position status
  * @param indexOffset Offset applied after homing
  *
@@ -76,9 +80,9 @@ case class ControllerConfig(
  */
 case class AxisConfig(
   mechanismType: String,       // "linear" or "rotating"
-  upperLimit: Double,          // mm or degrees
-  lowerLimit: Double,          // mm or degrees
-  algorithm: String,           // "forward" or "shortest"
+  upperLimit: Double,          // mm or degrees (required for linear; optional for rotating)
+  lowerLimit: Double,          // mm or degrees (required for linear; optional for rotating)
+  algorithm: String,           // "forward", "reverse", or "shortest" (required for rotating; optional for linear)
   inPositionThreshold: Double, // Positional tolerance
   indexOffset: Double,         // Offset after homing
   // Motion parameters (optional — hardware values overwritten from controller at init)
@@ -146,11 +150,18 @@ object GalilHcdConfig {
           val axisConf = axesConfig.getConfig(axis)
           def optDouble(key: String, default: Double): Double =
             if axisConf.hasPath(key) then axisConf.getDouble(key) else default
+          val mechType = axisConf.getString("mechanismType")
+          val isLinear = mechType == "linear"
           Some(axis -> AxisConfig(
-            mechanismType       = axisConf.getString("mechanismType"),
-            upperLimit          = axisConf.getDouble("upperLimit"),
-            lowerLimit          = axisConf.getDouble("lowerLimit"),
-            algorithm           = axisConf.getString("algorithm"),
+            mechanismType       = mechType,
+            // limits: required for linear; optional for rotating (default 0.0 = no soft limit)
+            upperLimit          = optDouble("upperLimit", 0.0),
+            lowerLimit          = optDouble("lowerLimit", 0.0),
+            // algorithm: required for rotating; optional for linear (only "forward" is meaningful)
+            algorithm           = if axisConf.hasPath("algorithm") then axisConf.getString("algorithm")
+                                  else if isLinear then "forward"
+                                  else throw com.typesafe.config.ConfigException.Missing(
+                                    s"axes.$axis.algorithm is required for rotating mechanisms"),
             inPositionThreshold = axisConf.getDouble("inPositionThreshold"),
             indexOffset         = axisConf.getDouble("indexOffset"),
             // Motion params — optional, fall back to case class defaults
