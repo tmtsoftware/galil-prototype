@@ -205,6 +205,18 @@ private[hcd] object ControllerCommandActor {
 
           // Synchronous command execution for CommandHandlerActor
           // Supports compound commands (semicolon-separated) which return multiple responses
+          case GalilCommandMessage.SetReadTimeout(timeoutMs, replyTo) =>
+            try {
+              galilIo.synchronized { galilIo.setReadTimeout(timeoutMs) }
+              val label = s"${timeoutMs}ms"
+              log.info(s"Command connection read timeout set to $label")
+              replyTo ! GalilCommandMessage.SendCommandResult("")
+            } catch {
+              case ex: Exception =>
+                replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
           case GalilCommandMessage.SendCommand(commandString, replyTo) =>
             try {
               log.debug(s"SendCommand: $commandString")

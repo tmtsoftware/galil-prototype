@@ -561,7 +561,7 @@ object CommandHandlerActor {
   // Long-running command defaults
   // ========================================
 
-  private val defaultMotionTimeout = 30.seconds
+  private val defaultMotionTimeout = 3.minutes
 
   /** Minimum timeout floor — even very short moves get this much time */
   private val minimumMotionTimeout = 3.seconds

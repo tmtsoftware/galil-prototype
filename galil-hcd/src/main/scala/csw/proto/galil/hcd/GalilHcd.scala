@@ -43,6 +43,12 @@ object GalilCommandMessage {
   case class SendCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
   case class SendCommandResult(response: String, error: Option[String] = None) extends GalilCommandMessage
 
+  /** Set the socket read timeout on the command connection. 0 = infinite (block until response).
+   *  Used during axis setup to survive BZ commutation pauses without desynchronizing the socket. */
+  case class SetReadTimeout(timeoutMs: Int, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
+
+
+
   /**
    * Execute an embedded program with automatic thread allocation.
    *
@@ -874,7 +880,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     import scala.concurrent.duration._
     import org.apache.pekko.actor.typed.scaladsl.AskPattern._
 
-    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
+    // During setup the MG _NO poll blocks on the socket for up to 60s (the BZ read timeout).
+    // The Pekko ask timeout must exceed the socket read timeout or the ask fails while the
+    // actor is still blocked on the read. 75s covers 60s socket timeout + scheduling margin.
+    // This implicit governs all ask() calls in this method; Await.result durations are separate.
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(75.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
     val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
@@ -903,35 +913,54 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     xqResult.error.foreach(err => throw new RuntimeException(s"XQ #Setup,0 failed: $err"))
     log.info("XQ #Setup,0 launched — waiting for all threads to complete")
 
-    // 3. Poll MG _NO on the command connection until all threads (0–7) are inactive.
+    // 3. Poll MG _NO until all threads (0–7) are inactive (_NO = 0).
     //    Thread 0 stays active until it has spawned all #SetupX programs.
-    //    Threads 1–7 go inactive as each axis finishes.
-    //    MG _NO = 0 means all threads idle — setup complete.
+    //    Threads 1–7 go inactive as each axis completes.
     //
-    //    A read timeout means BZ is blocking the command channel on that poll cycle.
-    //    This is expected and normal — we log it at debug and keep waiting.
-    //    Total timeout is 120s (4 BZ axes × ~10s each + ample margin).
-    val setupDeadline = 120.seconds.fromNow
-    var allDone = false
-    while setupDeadline.hasTimeLeft() && !allDone do
-      Thread.sleep(500)
-      val noResult = Await.result(
+    //    BZ (Brushless Zero) pauses all controller communication per the Galil manual.
+    //    To avoid desynchronizing the socket with stale pending commands, we set the
+    //    command connection read timeout to 0 (infinite) for the duration of the wait.
+    //    Each MG _NO call will simply block through any BZ pause and return when the
+    //    controller responds. We restore the normal 3s timeout when done.
+    //
+    //    Overall timeout is enforced by the deadline — 120s covers 4 BZ axes at ~10s each.
+    def setReadTimeout(ms: Int): Unit =
+      Await.result(
         controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
-          ref => GalilCommandMessage.SendCommand("MG _NO", ref)),
-        6.seconds)  // slightly longer than soTimeout to let SendCommand return cleanly
-      noResult.error match {
-        case Some(err) =>
-          log.debug(s"MG _NO during setup: $err (BZ in progress — waiting)")
-        case None =>
-          val noValue = noResult.response.trim.toDoubleOption.map(_.toInt).getOrElse(-1)
-          log.debug(s"MG _NO = 0x${noValue.toHexString}")
-          if noValue == 0 then
-            log.info("All setup threads completed (_NO=0)")
-            allDone = true
-      }
+          ref => GalilCommandMessage.SetReadTimeout(ms, ref)),
+        5.seconds)
 
-    if !allDone then
-      throw new RuntimeException("Setup timed out waiting for all threads to complete")
+    // Use a large explicit timeout rather than 0 (infinite) — some JVM/OS combinations
+    // treat setSoTimeout(0) inconsistently. 60s comfortably covers the longest BZ pause.
+    setReadTimeout(60 * 1000)
+    log.info("Command connection read timeout set to 60s for setup")
+
+    try {
+      val setupDeadline = 120.seconds.fromNow
+      var allDone = false
+      while setupDeadline.hasTimeLeft() && !allDone do
+        Thread.sleep(500)
+        val noResult = Await.result(
+          controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+            ref => GalilCommandMessage.SendCommand("MG _NO", ref)),
+          130.seconds)  // must exceed setupDeadline; actual blocking is on the socket
+        noResult.error match {
+          case Some(err) =>
+            log.warn(s"MG _NO error during setup: $err")
+          case None =>
+            val noValue = noResult.response.trim.toDoubleOption.map(_.toInt).getOrElse(-1)
+            log.debug(s"MG _NO = 0x${noValue.toHexString}")
+            if noValue == 0 then
+              log.info("All setup threads completed (_NO=0)")
+              allDone = true
+        }
+
+      if !allDone then
+        throw new RuntimeException("Setup timed out waiting for all threads to complete")
+    } finally {
+      setReadTimeout(3000)  // restore normal operating timeout
+      log.info("Command connection read timeout restored to 3000ms")
+    }
 
     // 4. Apply per-axis config now that hardware setup is done.
     activeAxes.foreach { axisName =>

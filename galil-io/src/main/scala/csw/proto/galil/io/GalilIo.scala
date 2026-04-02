@@ -50,6 +50,14 @@ abstract class GalilIo {
    */
   def close(): Unit
 
+  /**
+   * Set the socket read timeout. 0 = block indefinitely until a response arrives.
+   * The normal operating value is 3000ms. During axis setup, callers may set this
+   * to 0 so that MG _NO polls block through BZ commutation pauses without timing
+   * out and desynchronizing the socket. Default implementation is a no-op (simulator).
+   */
+  def setReadTimeout(timeoutMs: Int): Unit = ()
+
 
 
   // From the Galil doc:
@@ -381,6 +389,8 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
     
     result.toString
   }
+
+  override def setReadTimeout(timeoutMs: Int): Unit = socket.setSoTimeout(timeoutMs)
 
   override def close(): Unit = socket.close()
 }
