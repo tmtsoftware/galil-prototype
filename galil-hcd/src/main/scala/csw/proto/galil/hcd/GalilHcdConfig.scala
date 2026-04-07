@@ -85,6 +85,7 @@ case class AxisConfig(
   algorithm: String,           // "forward", "reverse", or "shortest" (required for rotating; optional for linear)
   inPositionThreshold: Double, // Positional tolerance
   indexOffset: Double,         // Offset after homing
+  axisName: Option[String] = None, // Human-readable mechanism name (e.g. "ANT Linear")
   // Motion parameters (optional — hardware values overwritten from controller at init)
   maxSpeed: Double     = 1000.0,  // counts/sec
   acceleration: Double = 9216.0,  // counts/sec²
@@ -164,6 +165,7 @@ object GalilHcdConfig {
                                     s"axes.$axis.algorithm is required for rotating mechanisms"),
             inPositionThreshold = axisConf.getDouble("inPositionThreshold"),
             indexOffset         = axisConf.getDouble("indexOffset"),
+            axisName            = if axisConf.hasPath("name") then Some(axisConf.getString("name")) else None,
             // Motion params — optional, fall back to case class defaults
             maxSpeed            = optDouble("maxSpeed",     1000.0),
             acceleration        = optDouble("acceleration", 9216.0),

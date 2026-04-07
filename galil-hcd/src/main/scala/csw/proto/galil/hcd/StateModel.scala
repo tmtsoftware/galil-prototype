@@ -221,7 +221,8 @@ case class AxisState(
   indexOffset: Option[Double] = None,
   indexSpeed: Option[Double] = None,
   motionDelay: Option[Double] = None,
-  countsPerRevolution: Option[Double] = None  // rotating axes only; read from embedded cpd[]
+  countsPerRevolution: Option[Double] = None,  // rotating axes only; read from embedded cpd[]
+  axisName: Option[String] = None              // human-readable mechanism name from config
 ):
   /**
    * Calculate inPosition based on position, demand, and threshold.
@@ -314,6 +315,10 @@ case class AxisState(
         // uninitialized simulator). Storing Some(0.0) would mislead callers even
         // though angularPosition already filters it; None is the clearer sentinel.
         if v > 0.0 then updated = updated.copy(countsPerRevolution = Some(v))
+      case ("axisName", v: String) =>
+        if v.nonEmpty then updated = updated.copy(axisName = Some(v))
+      case ("axisName", v: Option[?]) =>
+        updated = updated.copy(axisName = v.asInstanceOf[Option[String]])
       case (key, value) => 
         // Log unknown keys but don't fail
         println(s"Warning: Unknown axis state field: $key = $value")

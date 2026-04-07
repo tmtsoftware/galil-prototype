@@ -48,7 +48,8 @@ object HmiJsonProtocol {
     "deceleration"        -> s.deceleration.getOrElse[Double](0.0),
     "indexOffset"          -> s.indexOffset.getOrElse[Double](0.0),
     "indexSpeed"           -> s.indexSpeed.getOrElse[Double](0.0),
-    "inPositionThreshold" -> s.inPositionThreshold
+    "inPositionThreshold" -> s.inPositionThreshold,
+    "axisName"            -> s.axisName.getOrElse("")
   )
 
   // ── AxisCmdState → JSON ───────────────────────────────────────────────

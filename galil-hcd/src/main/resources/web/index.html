@@ -164,6 +164,32 @@ function CmdRow({label,value,onChange,ph,onGo,goColor='#10B981'}) {
     e(Btn,{label:'Go',color:goColor,small:true,onClick:onGo}));
 }
 
+// Two CmdRows side by side on one line — used for Pos + Ofs
+function CmdRowPair({label1,value1,onChange1,ph1,onGo1,goColor1='#10B981',
+                     label2,value2,onChange2,ph2,onGo2,goColor2='#10B981'}) {
+  return e('div',{style:{display:'flex',gap:6,alignItems:'center',marginTop:4}},
+    // Left: label + input + Go
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label1),
+    e(In,{value:value1,onChange:onChange1,ph:ph1,onEnter:onGo1,style:{flex:1,minWidth:0}}),
+    e(Btn,{label:'Go',color:goColor1,small:true,onClick:onGo1}),
+    // Divider
+    e('span',{style:{color:'#374151',flexShrink:0}},'│'),
+    // Right: label + input + Go
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label2),
+    e(In,{value:value2,onChange:onChange2,ph:ph2,onEnter:onGo2,style:{flex:1,minWidth:0}}),
+    e(Btn,{label:'Go',color:goColor2,small:true,onClick:onGo2}));
+}
+
+// Collapsible section toggle label (▸ / ▾)
+function ExpandToggle({label, open, onToggle, color='#6B7280'}) {
+  return e('div',{
+    onClick:onToggle,
+    style:{display:'flex',alignItems:'center',gap:4,marginTop:5,cursor:'pointer',
+      userSelect:'none',fontSize:10,color,fontFamily:'var(--mono)'}},
+    e('span',{style:{fontSize:8,lineHeight:1}}, open ? '▾' : '▸'),
+    e('span',null, label));
+}
+
 function AxisErrorBar({msg}) {
   if (!msg) return null;
   return e('div',{style:{backgroundColor:'#451A1A',borderRadius:3,padding:'4px 8px',margin:'6px 0 2px',
@@ -173,7 +199,7 @@ function AxisErrorBar({msg}) {
     msg);
 }
 
-function AxisCard({axis,axState,cmdSt,onCommand,active}) {
+function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
   const [posTarget,setPosTarget] = useState('');
   const [offTarget,setOffTarget] = useState('');
   const [wheelPos,setWheelPos] = useState('');
@@ -192,6 +218,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   const [cfgThresh,setCfgThresh] = useState('');
   const [cfgLoaded,setCfgLoaded] = useState(false);
   const [showDemand,setShowDemand] = useState(false);
+  const [showTrk,setShowTrk] = useState(false);
   // Mechanism config fields
   const [cfgAlgorithm,setCfgAlgorithm] = useState('shortest');
   const [cfgUpperLimit,setCfgUpperLimit] = useState('');
@@ -270,8 +297,11 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
     return e('div',{style:{backgroundColor:'#0D1117',border:'1px solid #1F2937',
         borderRadius:8,overflow:'hidden',borderTop:'2px solid #1F2937'}},
       e('div',{style:{padding:'5px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
-        e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:12,color:'#4B5563',letterSpacing:1.5}},
-          `AXIS ${axis}`),
+        e('span',{style:{display:'flex',alignItems:'baseline',gap:6}},
+          e('span',{style:{fontFamily:'var(--mono)',fontWeight:600,fontSize:10,color:'#4B5563',letterSpacing:1.2}},`AXIS ${axis}`),
+          axState?.axisName
+            ? e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:12,color:'#4B5563'}}, axState.axisName)
+            : null),
         e('span',{style:{fontSize:8.5,color:'#4B5563',cursor:'pointer',
             padding:'2px 6px',borderRadius:3,border:'1px solid #27303f',userSelect:'none'},
             onClick:()=>setOverride(true),title:'Click to enable commands on this axis'},
@@ -279,12 +309,16 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
   }
 
   return e('div',{style:{backgroundColor:'#111827',border:`1px solid ${enabled?colors.bdr:'#1F2937'}`,
-    borderRadius:8,overflow:'hidden',minWidth:270,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
+    borderRadius:8,overflow:'hidden',minWidth:280,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
     opacity:enabled?1:0.85, position:'relative'}},
 
     // Header
-    e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
-      e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:14,color:enabled?'#F9FAFB':'#6B7280',letterSpacing:1.5}},`AXIS ${axis}`),
+    e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center',position:'relative'}},
+      e('span',{style:{display:'flex',alignItems:'baseline',gap:6}},
+        e('span',{style:{fontFamily:'var(--mono)',fontWeight:600,fontSize:11,color:enabled?'#9CA3AF':'#4B5563',letterSpacing:1.2}},`AXIS ${axis}`)),
+      axState.axisName ? e('span',{style:{position:'absolute',left:0,right:0,textAlign:'center',
+          fontFamily:'var(--mono)',fontWeight:700,fontSize:14,color:enabled?'#F9FAFB':'#6B7280',
+          letterSpacing:.3,pointerEvents:'none'}}, axState.axisName) : null,
       e('span',{style:{display:'flex',alignItems:'center',gap:6}},
         !active && override
           ? e('span',{style:{fontSize:8.5,color:'#F59E0B',cursor:'pointer',
@@ -296,106 +330,137 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
         e('span',{style:{display:'flex',alignItems:'center',fontSize:11.5,fontWeight:600,color:colors.text}},
           e(StatusDot,{axisState:axState.axisState}), axState.axisState))),
 
-    // Telemetry — type badge header + two-column layout (text left, visual right)
-    e('div',{style:{padding:'8px 12px 4px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim}},
+    // Telemetry + commands body
+    e('div',{style:{padding:'6px 12px 8px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim}},
 
-      // Type badge row — spans full width, consistent for all mechanism types
+      // Error bar — immediately below header when present
+      e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null}),
+
+      // Type badge + Home/Stop/Config on same row
       e('div',{style:{display:'flex',gap:5,alignItems:'center',marginBottom:6,
-          paddingBottom:5,borderBottom:'1px solid #1F2937'}},
+          paddingBottom:5,borderBottom:'1px solid #1F2937',flexWrap:'wrap'}},
         axState.mechanismType==='Rotating'
           ? e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
-              backgroundColor:'#2D1B69',color:'#A78BFA',fontWeight:700,letterSpacing:.5}},
-              'ROTATING')
+              backgroundColor:'#2D1B69',color:'#A78BFA',fontWeight:700,letterSpacing:.5}},'ROTATING')
           : e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
-              backgroundColor:'#1C3240',color:'#67E8F9',fontWeight:700,letterSpacing:.5}},
-              'LINEAR'),
+              backgroundColor:'#1C3240',color:'#67E8F9',fontWeight:700,letterSpacing:.5}},'LINEAR'),
         axState.mechanismType==='Rotating'
-          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},'alg:')
-          : null,
+          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},'alg:') : null,
         axState.mechanismType==='Rotating'
-          ? e('span',{style:{fontSize:9.5,color:'#C4B5FD'}},
-              (axState.algorithm||'\u2014').toLowerCase())
-          : null,
-        axState.mechanismType==='Rotating'
-          ? e('span',{style:{fontSize:9.5,color:'#374151'}},' \u00b7 ')
-          : null,
-        axState.mechanismType==='Rotating'
-          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},
-              (axState.countsPerRevolution||0).toFixed(0)+' cnt/rev')
-          : null),
+          ? e('span',{style:{fontSize:9.5,color:'#C4B5FD'}},(axState.algorithm||'\u2014').toLowerCase()) : null,
+        e('span',{style:{flex:1}}),
+        enabled ? e('span',{style:{display:'flex',gap:4}},
+          e(Btn,{label:'Home',color:'#3B82F6',small:true,onClick:()=>cmd('homeAxis')}),
+          e(Btn,{label:'Stop',color:'#EF4444',small:true,onClick:()=>cmd('stopAxis')}),
+          e(Btn,{label:showConfig?'Cfg\u2715':'Cfg',color:'#6B7280',small:true,onClick:()=>setShowConfig(!showConfig)}))
+        : null),
 
-      // Two-column: telemetry grid left, visual right
-      e('div',{style:{display:'flex',gap:8,alignItems:'flex-start'}},
+      // ── ROTATING: (telemetry + dial) left, commands right — mirrors linear layout ──
+      axState.mechanismType==='Rotating' ? e('div',{style:{display:'flex',gap:8,alignItems:'flex-start'}},
 
-        // Left column — position/velocity/demand
-        e('div',{style:{flex:1,minWidth:0}},
-          e('div',{style:{display:'grid',gridTemplateColumns:'76px 1fr',rowGap:2}},
+        // Left column — telemetry grid then dial
+        e('div',{style:{flexShrink:0,fontFamily:'var(--mono)',fontSize:11.5}},
+          e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2,marginBottom:5}},
             e('span',{style:{color:'#6B7280'}},'Position'),
-            e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:15,
-                fontVariantNumeric:'tabular-nums'}},
+            e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}},
               (axState.position||0).toFixed(1)),
-            // Raw accumulated encoder count — debug only, rotating axes only
-            axState.mechanismType==='Rotating'
-              ? e('span',{style:{color:'#4B5563',fontSize:10.5}},'Raw') : null,
-            axState.mechanismType==='Rotating'
-              ? e('span',{style:{color:'#4B5563',fontSize:10.5,
-                  fontVariantNumeric:'tabular-nums'}},
-                  (axState.rawMotorPosition||0).toFixed(0)) : null,
             e('span',{style:{color:'#6B7280'}},'Velocity'),
-            e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',
-                fontVariantNumeric:'tabular-nums'}},
+            e('span',{style:{color:(axState.velocity||0)!==0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
               (axState.velocity||0).toFixed(1)),
-            // Demand: visible only after positionAxis/offsetAxis, hidden for all other commands
-            showDemand ? e('span',{style:{color:'#6B7280'}},'Demand') : null,
-            showDemand ? e('span',{style:{color:'#93C5FD',fontVariantNumeric:'tabular-nums'}},
-              (axState.demand||0).toFixed(1)) : null)),
+            e('span',{style:{color:showDemand?'#6B7280':'#374151'}},'Demand'),
+            e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
+              (axState.demand||0).toFixed(1)),
+            // Raw Pos — hidden in compact
+            !compact ? e('span',{style:{color:'#4B5563',fontSize:10.5}},'Raw Pos') : null,
+            !compact ? e('span',{style:{color:'#4B5563',fontSize:10.5,fontVariantNumeric:'tabular-nums'}},
+              (axState.rawMotorPosition||0).toFixed(0)) : null),
+          !compact ? e(AxisVisual,{axState,colors,showDemand}) : null),
 
-        // Right column — visual
-        e('div',{style:{flexShrink:0}},
-          e(AxisVisual,{axState, colors, showDemand}))),
+        // Right column — Whl+Ang always; Pos+Ofs hidden in compact
+        enabled ? e('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:3,fontFamily:'var(--mono)'}},
+          e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#8B5CF6',width:22,flexShrink:0}},'Whl'),
+            e(In,{value:wheelPos,onChange:setWheelPos,ph:'pos #',
+              onEnter:()=>cmd('selectWheel',{target:wheelPos}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#8B5CF6',small:true,onClick:()=>cmd('selectWheel',{target:wheelPos})})),
+          e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#8B5CF6',width:22,flexShrink:0}},'Ang'),
+            e(In,{value:angPos,onChange:setAngPos,ph:'degrees',
+              onEnter:()=>cmd('positionWheel',{target:angPos}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#8B5CF6',small:true,onClick:()=>cmd('positionWheel',{target:angPos})})),
+          !compact ? e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#6B7280',width:22,flexShrink:0}},'Pos'),
+            e(In,{value:posTarget,onChange:setPosTarget,ph:'target',
+              onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('positionAxis',{target:posTarget})})) : null,
+          !compact ? e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#6B7280',width:22,flexShrink:0}},'Ofs'),
+            e(In,{value:offTarget,onChange:setOffTarget,ph:'offset',
+              onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})) : null)
+        : null)
+      // ── LINEAR: telemetry left + commands right, wide track below ──
+      : e('div',null,
+        e('div',{style:{display:'flex',gap:8,alignItems:'flex-start',marginBottom:4}},
+          e('div',{style:{flex:1,minWidth:0}},
+            e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2}},
+              e('span',{style:{color:'#6B7280'}},'Position'),
+              e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}},
+                (axState.position||0).toFixed(1)),
+              e('span',{style:{color:'#6B7280'}},'Velocity'),
+              e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
+                (axState.velocity||0).toFixed(1)),
+              e('span',{style:{color:'#6B7280'}},'Demand'),
+              e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
+                (axState.demand||0).toFixed(1)))),
+          enabled ? e('div',{style:{flexShrink:0,display:'flex',flexDirection:'column',gap:3}},
+            e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+              e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Pos'),
+              e(In,{value:posTarget,onChange:setPosTarget,ph:'target',
+                onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:80}}),
+              e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('positionAxis',{target:posTarget})})),
+            e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+              e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Ofs'),
+              e(In,{value:offTarget,onChange:setOffTarget,ph:'offset',
+                onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:80}}),
+              e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})))
+          : null),
+        !compact && e(AxisVisual,{axState,colors,showDemand})),
 
-      e('div',{style:{marginTop:6,display:'flex',flexWrap:'wrap'}},
+      // Bool flags — nowrap, card is wide enough at 310px+
+      e('div',{style:{marginTop:5,display:'flex',flexWrap:'nowrap',gap:0}},
         e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
         e(BoolFlag,{value:axState.isStepper,label:'Stepper',trueColor:'#8B5CF6'}),
         e(BoolFlag,{value:!axState.motorOff,label:'Motor',trueColor:'#10B981',falseColor:'#EF4444'}),
         e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444'}),
         e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444'})),
 
-      // CmdState — single line
-      e('div',{style:{marginTop:6,padding:'4px 7px',backgroundColor:'#1F2937',borderRadius:4,
-        fontSize:10.5,color:'#9CA3AF',display:'flex',gap:10,alignItems:'center'}},
+      // CmdState bar + Tracking toggle at right end
+      e('div',{style:{marginTop:4,padding:'3px 7px',backgroundColor:'#1F2937',borderRadius:4,
+          fontSize:10.5,color:'#9CA3AF',display:'flex',gap:8,alignItems:'center'}},
         e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
-        e('span',{style:{color:'#374151'}},'│'),
+        e('span',{style:{color:'#374151'}},'\u2502'),
         e('span',null,'Mov: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Y':'N')),
-        e('span',{style:{color:'#374151'}},'│'),
-        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
+        e('span',{style:{color:'#374151'}},'\u2502'),
+        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—')),
+        e('span',{style:{flex:1}}),
+        enabled ? e('span',{onClick:()=>setShowTrk(!showTrk),
+            style:{cursor:'pointer',userSelect:'none',fontSize:9.5,display:'flex',alignItems:'center',gap:2,
+              color:showTrk?'#06B6D4':'#4B5563'}},
+          e('span',{style:{fontSize:8}},showTrk?'\u25be':'\u25b8'),'Trk') : null),
 
-      // Error bar (shows when either source has non-empty msg)
-      e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null})),
+      // Tracking inputs
+      showTrk && enabled
+        ? e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:3}},
+            e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},'Trk'),
+            e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
+            e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
+            e(Btn,{label:'Go',color:'#06B6D4',small:true,
+              onClick:()=>cmd('trackAxis',{target:trackPos,target2:trackVel})}))
+        : null,
 
-    // Commands (hidden when not enabled)
-    enabled ? e('div',{style:{padding:'6px 12px 10px',borderTop:'1px solid #1F2937'}},
-      e('div',{style:{display:'flex',gap:5,marginBottom:5}},
-        e(Btn,{label:'Home',color:'#3B82F6',onClick:()=>cmd('homeAxis')}),
-        e(Btn,{label:'Stop',color:'#EF4444',onClick:()=>cmd('stopAxis')}),
-        e(Btn,{label:showConfig?'Hide Cfg':'Config',color:'#6B7280',onClick:()=>setShowConfig(!showConfig)})),
-      e(CmdRow,{label:'Pos',value:posTarget,onChange:setPosTarget,ph:'target',
-        onGo:()=>cmd('positionAxis',{target:posTarget})}),
-      e(CmdRow,{label:'Ofs',value:offTarget,onChange:setOffTarget,ph:'offset',
-        onGo:()=>cmd('offsetAxis',{target:offTarget})}),
-      e(CmdRow,{label:'Whl',value:wheelPos,onChange:setWheelPos,ph:'pos #',
-        onGo:()=>cmd('selectWheel',{target:wheelPos}),goColor:'#8B5CF6'}),
-      e(CmdRow,{label:'Ang',value:angPos,onChange:setAngPos,ph:'degrees',
-        onGo:()=>cmd('positionWheel',{target:angPos}),goColor:'#8B5CF6'}),
-      e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:4}},
-        e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},'Trk'),
-        e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
-        e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
-        e(Btn,{label:'Go',color:'#06B6D4',small:true,
-          onClick:()=>cmd('trackAxis',{target:trackPos,target2:trackVel})})),
-
-      // Config panel (collapsible)
-      showConfig ? e('div',{style:{marginTop:8,padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
+      // Config panel
+      showConfig && enabled ? e('div',{style:{marginTop:6,padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
         border:'1px solid #1F2937'}},
 
         // ── MOTION CONFIG ──
@@ -450,7 +515,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active}) {
         e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
           e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig}))
 
-      ) : null) : null);
+      ) : null));
 }
 
 function AxisVisual({axState, colors, showDemand}) {
@@ -458,13 +523,13 @@ function AxisVisual({axState, colors, showDemand}) {
   const isRotating = axState.mechanismType === 'Rotating' && axState.countsPerRevolution > 0;
 
   if (isRotating) {
-    // ── Rotating dial ── 108×108
+    // ── Rotating dial ── 76×76
     const angDeg = axState.angularPosition || 0;
     const demandDeg = axState.countsPerRevolution > 0
       ? ((axState.demand / axState.countsPerRevolution * 360) % 360 + 360) % 360
       : null;
     const toRad = d => (d - 90) * Math.PI / 180;
-    const cx = 54, cy = 54, r = 44, rNeedle = 36, rDemand = 40;
+    const cx = 38, cy = 38, r = 30, rNeedle = 23, rDemand = 27;
     const nx = cx + rNeedle * Math.cos(toRad(angDeg));
     const ny = cy + rNeedle * Math.sin(toRad(angDeg));
     const dx = demandDeg != null ? cx + rDemand * Math.cos(toRad(demandDeg)) : null;
@@ -472,7 +537,7 @@ function AxisVisual({axState, colors, showDemand}) {
     const ticks = [0, 90, 180, 270];
     const tickLabels = ['0', '90', '180', '270'];
 
-    return e('svg', {width:108, height:108, style:{flexShrink:0}},
+    const dial = e('svg', {width:76, height:76, style:{flexShrink:0}},
       e('circle', {cx, cy, r, fill:'none', stroke:'#1F2937', strokeWidth:2}),
       e('circle', {cx, cy, r:r-2, fill:'#0D1117'}),
       ...ticks.map((t, i) => {
@@ -490,61 +555,52 @@ function AxisVisual({axState, colors, showDemand}) {
         stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.5}) : null,
       e('line', {x1:cx, y1:cy, x2:nx, y2:ny,
         stroke:colors.dot, strokeWidth:2, strokeLinecap:'round'}),
-      e('circle', {cx, cy, r:3, fill:colors.dot}),
-      // Angle readout — background rect drawn after needle so text always sits on top
-      e('rect', {x:cx-18, y:cy+10, width:36, height:14, rx:3, fill:'#0D1117', opacity:.85}),
-      e('text', {x:cx, y:cy+20, textAnchor:'middle', dominantBaseline:'middle', fontSize:11,
-        fill:'#A78BFA', fontFamily:'var(--mono)', fontWeight:700},
-        angDeg.toFixed(1)+'\u00b0')
+      e('circle', {cx, cy, r:3, fill:colors.dot})
     );
+
+    // Angle label beside the dial
+    const angleLabel = e('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',
+        alignItems:'flex-start',paddingLeft:4,fontFamily:'var(--mono)'}},
+      e('span',{style:{fontSize:9,color:'#6B7280',marginBottom:2}},'Angle'),
+      e('span',{style:{fontSize:13,fontWeight:700,color:'#A78BFA',fontVariantNumeric:'tabular-nums'}},
+        angDeg.toFixed(1)+'\u00b0'),
+      showDemand && demandDeg != null
+        ? e('span',{style:{fontSize:9,color:'#93C5FD',fontVariantNumeric:'tabular-nums',marginTop:2}},
+            '\u21d2 '+demandDeg.toFixed(1)+'\u00b0')
+        : null);
+
+    return e('div',{style:{display:'flex',alignItems:'center',flexShrink:0}}, dial, angleLabel);
   } else {
-    // ── Linear track ── horizontal, 108px tall to match dial height
-    // Layout (left→right within 108×108 box):
-    //   Left edge: position label + arrow pointing right to indicator
-    //   Center: vertical track line
-    //   Right of track: limit labels at top (hi) and bottom (lo) with tick marks
+    // ── Linear track ── wide/short, motion left→right
     const pos    = axState.position || 0;
     const lo     = axState.lowerLimit != null ? axState.lowerLimit : 0;
     const hi     = axState.upperLimit != null ? axState.upperLimit : 1000;
     const demand = axState.demand || 0;
-    const W = 108, H = 108;
-    const trackX = 62;   // x position of the vertical track line
-    const padT = 14, padB = 14;
-    const trackH = H - padT - padB;
+    const W = 252, H = 40;
+    const padL = 34, padR = 34;
+    const trackY = 22;
     const clamp  = v => Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)));
-    // Invert: bottom = lo, top = hi
-    const posY   = padT + (1 - clamp(pos))    * trackH;
-    const demY   = padT + (1 - clamp(demand)) * trackH;
+    const posX   = padL + clamp(pos)    * (W - padL - padR);
+    const demX   = padL + clamp(demand) * (W - padL - padR);
     const inPos  = axState.inPosition;
     const indColor = inPos ? '#10B981' : colors.dot;
 
-    return e('svg', {width:W, height:H, style:{flexShrink:0}},
-      // Vertical track
-      e('line', {x1:trackX, y1:padT, x2:trackX, y2:H-padB,
+    return e('svg', {width:'100%', viewBox:`0 0 ${W} ${H}`, style:{display:'block',marginTop:4}},
+      e('line', {x1:padL, y1:trackY, x2:W-padR, y2:trackY,
         stroke:'#374151', strokeWidth:2, strokeLinecap:'round'}),
-      // Hi limit tick + label (top)
-      e('line', {x1:trackX-4, y1:padT, x2:trackX+4, y2:padT,
-        stroke:'#4B5563', strokeWidth:1.5}),
-      e('text', {x:trackX+8, y:padT+1, dominantBaseline:'middle', fontSize:11,
-        fill:'#6B7280', fontFamily:'var(--mono)'}, hi.toFixed(0)),
-      // Lo limit tick + label (bottom)
-      e('line', {x1:trackX-4, y1:H-padB, x2:trackX+4, y2:H-padB,
-        stroke:'#4B5563', strokeWidth:1.5}),
-      e('text', {x:trackX+8, y:H-padB, dominantBaseline:'middle', fontSize:11,
-        fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
-      // Demand marker — same length as position arrow, only when demand is meaningful
-      showDemand ? e('line', {x1:30, y1:demY, x2:trackX, y2:demY,
-        stroke:'#93C5FD', strokeWidth:1, strokeDasharray:'2 2', opacity:.5}) : null,
-      // Position arrow — shorter shaft starting at x=30
-      e('line', {x1:30, y1:posY, x2:trackX-6, y2:posY,
-        stroke:indColor, strokeWidth:2}),
-      // Arrowhead pointing right at track
-      e('polygon', {
-        points:`${trackX-6},${posY-4} ${trackX},${posY} ${trackX-6},${posY+4}`,
-        fill:indColor}),
-      // Position label — left edge, larger font
-      e('text', {x:6, y:posY-5, textAnchor:'start', fontSize:11,
-        fill:'#F9FAFB', fontFamily:'var(--mono)', fontWeight:700},
+      e('line', {x1:padL, y1:trackY-4, x2:padL, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
+      e('text', {x:padL-4, y:trackY, textAnchor:'end', dominantBaseline:'middle',
+        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
+      e('line', {x1:W-padR, y1:trackY-4, x2:W-padR, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
+      e('text', {x:W-padR+4, y:trackY, textAnchor:'start', dominantBaseline:'middle',
+        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, hi.toFixed(0)),
+      showDemand ? e('line', {x1:demX, y1:trackY-9, x2:demX, y2:trackY+9,
+        stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.6}) : null,
+      e('line', {x1:posX, y1:trackY-11, x2:posX, y2:trackY+11,
+        stroke:indColor, strokeWidth:2, strokeLinecap:'round'}),
+      e('circle', {cx:posX, cy:trackY, r:4.5, fill:indColor}),
+      e('text', {x:posX, y:trackY-14, textAnchor:'middle', dominantBaseline:'auto',
+        fontSize:9.5, fill:'#F9FAFB', fontFamily:'var(--mono)', fontWeight:700},
         pos.toFixed(0))
     );
   }
@@ -878,6 +934,7 @@ function ErrorBanner({hcdState,controllerErrorMsg}) {
 function GalilHMI() {
   const {state, connected, submitCommand, logLines} = useHmiConnection();
   const [history, setHistory] = useState([]);
+  const [compact, setCompact] = useState(false);
   const tickRef = useRef(0);
 
   // Derive active axes from state
@@ -945,6 +1002,13 @@ function GalilHMI() {
               label);
           }))),
       e('div',{style:{display:'flex',alignItems:'center',gap:6}},
+        e('button',{
+          onClick:()=>setCompact(c=>!c),
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:600,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #374151',
+            backgroundColor:compact?'#1D4ED8':'#1F2937',
+            color:compact?'#BFDBFE':'#6B7280',transition:'all .15s'}},
+          compact ? 'Compact ✓' : 'Compact'),
         e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
           padding:'2px 8px',borderRadius:10,fontSize:10,fontWeight:600,
           backgroundColor:connected?'#064E3B':'#7F1D1D',
@@ -956,9 +1020,9 @@ function GalilHMI() {
     e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg}),
 
     // Axis cards (fixed height)
-    e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))',gap:10,marginBottom:10,flexShrink:0}},
+    e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(285px, 1fr))',gap:10,marginBottom:10,flexShrink:0}},
       ...allAxes.map(a =>
-        e(AxisCard,{key:a, axis:a, axState:state?.axes?.[a], cmdSt:state?.cmdState?.[a], onCommand:handleCommand, active:isActive(a)}))),
+        e(AxisCard,{key:a, axis:a, axState:state?.axes?.[a], cmdSt:state?.cmdState?.[a], onCommand:handleCommand, active:isActive(a), compact}))),
 
     // Position chart (fixed height)
     e('div',{style:{marginBottom:10,flexShrink:0}}, e(PositionChart,{history,activeAxes})),

@@ -410,7 +410,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           // writeMotionConfig() pushes this to cpr[] on the controller,
           // supplanting whatever #SetupX initialised. If 0.0 on a rotating
           // axis, writeMotionConfig() will log a warning and skip it.
-          "countsPerRevolution" -> axisConfig.countsPerRevolution
+          "countsPerRevolution" -> axisConfig.countsPerRevolution,
+          "axisName" -> axisConfig.axisName.getOrElse("")
         ),
         ctx.system.ignoreRef
       )
