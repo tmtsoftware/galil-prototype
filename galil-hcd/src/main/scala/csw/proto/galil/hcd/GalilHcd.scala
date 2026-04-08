@@ -1033,7 +1033,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // The post-XQ _NO query did not show the thread active. Either:
         //   (a) XQ was rejected silently (no ? but program didn't start), or
         //   (b) the program was so fast it completed before the _NO query.
-        // For init-time programs (#Init is <100ms) (b) is likely. Log and accept.
+        // We cannot distinguish these cases from _NO alone. Fall through to
+        // the Faulted check below — if the program errored, the status actor
+        // will have already set Faulted+controllerErrorMsg from the QR errorCode.
         log.info(s"Thread $allocatedThread completed (not observed active after XQ — " +
           s"program finished before _NO query, or was a no-op)")
       else
@@ -1060,6 +1062,47 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         if !completed then
           throw new RuntimeException(
             s"Thread $allocatedThread timed out after $timeout waiting for '#$label' to complete")
+
+      // Whether the thread was observed active or completed instantly, query TC 1
+      // on the command connection to check for a controller error from this execution.
+      // TC 1 returns the most recent error code and description, then clears the latch.
+      //
+      // We cannot rely on QR errorCode detection here because:
+      //   - QR is at 1Hz standby rate, so it may not fire before the caller suspends
+      //     polling (as happens immediately after #Init, before setupAxes).
+      //   - The controller error latch is shared across all programs; reading it here
+      //     while the thread just finished is the most accurate attribution.
+      //
+      // If TC 1 returns a nonzero code, we also set Faulted in IS so the error is
+      // visible in HCD state and the HMI, consistent with errors detected via QR.
+      val tcFuture = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand("TC 1", ref)
+      )
+      val tcResult = Await.result(tcFuture, 5.seconds)
+
+      tcResult.error match {
+        case Some(err) =>
+          // TC itself failed (unlikely — means the command connection is broken)
+          log.warn(s"TC 1 query after '#$label' failed: $err")
+        case None =>
+          val tcText = tcResult.response.trim
+          // TC 1 returns "N Description" where N>0 means error, or " 0" if no error.
+          // Extract the leading numeric code to determine whether an error occurred.
+          val errorCode = tcText.takeWhile(c => c.isDigit || c == ' ').trim.takeWhile(_.isDigit)
+          val isError   = errorCode.nonEmpty && errorCode != "0"
+          if isError then
+            val errorMsg = s"Controller Error: $tcText"
+            log.error(s"'#$label' failed: $errorMsg")
+            // Set Faulted in IS so the error is visible in HCD state and HMI
+            internalStateActor ! InternalStateActor.UpdateHcdState(
+              Map(
+                "state"              -> HcdStateEnum.Faulted,
+                "controllerErrorMsg" -> errorMsg
+              ),
+              ctx.system.ignoreRef
+            )
+            throw new RuntimeException(s"'#$label' failed: $errorMsg")
+      }
     }
   }
 
@@ -1071,6 +1114,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     
     // Stop actors gracefully (null checks for case where initialize failed partway)
     if (statusMonitor != null) statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
+    // Explicitly stop the console actor so its TCP handle is released immediately.
+    // Without this, the actor's blocking read thread runs until socket timeout
+    // (~3s) before PostStop fires — leaving the controller handle open in the
+    // interim. consoleActor is only created in hardware mode.
+    if (consoleActor != null) consoleActor ! ControllerConsoleActor.Stop
     currentStatePublisher ! CurrentStatePublisherActor.Shutdown
     
     log.info("Galil HCD shut down")

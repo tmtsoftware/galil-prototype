@@ -259,7 +259,7 @@ TLA=2.94/1.6;		'Torque Limit
 TKA=11.76/1.6;		'Peak Torque Limit
 KPA=30;   'Configure servo proportional constant
 KIA=1.5;  'Configure servo integrator constant
-KDA=70;   'Configure servo derivative constant
+KDA=200;   'Configure servo derivative constant
 BAA;		    'Set A as a Brushless axis
 BMA=51200;	'Set Brushless Modulo for this axis
 BZ <1000>1000;		'Set Brushless Zero routine timeouts
@@ -281,9 +281,9 @@ AFB=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
 AGB=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
 TLB=2.3/1.6;		'Torque Limit
 TKB=9.2/1.6;		'Peak Torque Limit
-KPB=8;    'Configure servo proportional constant
-KIB=0.4;  'Configure servo integrator constant
-KDB=10;   'Configure servo derivative constant
+KPB=20;    'Configure servo proportional constant
+KIB=0.9;  'Configure servo integrator constant
+KDB=150;   'Configure servo derivative constant
 BAB;		    'Set B as a Brushless axis
 BMB=8000; 'Set Brushless Modulo for this axis
 BZ <2000>2000;'Set Brushless Zero routine timeouts

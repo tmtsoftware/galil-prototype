@@ -45,6 +45,12 @@ object CommandWatcherActor:
   private case class CmdStateUpdate(notification: InternalStateActor.CmdStateChanged) extends Command
 
   /**
+   * HCD StateChanged notification from InternalStateActor (via adapter).
+   * Used to detect controller Faulted state during active command execution.
+   */
+  private case class HcdStateUpdate(notification: InternalStateActor.StateChanged) extends Command
+
+  /**
    * Timeout timer fired — command took too long.
    */
   private case object CommandTimeout extends Command
@@ -183,6 +189,12 @@ object CommandWatcherActor:
         val cmdStateAdapter = ctx.messageAdapter[InternalStateActor.CmdStateChanged](CmdStateUpdate(_))
         config.internalStateActor ! InternalStateActor.SubscribeCmdState(config.axis, cmdStateAdapter)
 
+        // Subscribe to StateChanged (HCD-level) to detect controller Faulted state.
+        // If the controller errors during execution, ControllerStatusActor will set
+        // Faulted+controllerErrorMsg via QR errorCode detection, and we fail the command.
+        val hcdStateAdapter = ctx.messageAdapter[InternalStateActor.StateChanged](HcdStateUpdate(_))
+        config.internalStateActor ! InternalStateActor.Subscribe(hcdStateAdapter, None)
+
         // Request initial snapshot — handles the race where the command completes
         // before the watcher subscribes (fast commands like homeAxis on steppers).
         // The snapshot reply arrives as a message through initialStateAdapter.
@@ -198,7 +210,7 @@ object CommandWatcherActor:
         // Start timeout timer
         timers.startSingleTimer(CommandTimeout, config.timeout)
 
-        watching(config, cmdStateAdapter, timers, log)
+        watching(config, cmdStateAdapter, hcdStateAdapter, timers, log)
       }
     }
 
@@ -213,11 +225,29 @@ object CommandWatcherActor:
   private def watching(
     config: WatchConfig,
     cmdStateAdapter: ActorRef[InternalStateActor.CmdStateChanged],
+    hcdStateAdapter: ActorRef[InternalStateActor.StateChanged],
     timers: TimerScheduler[Command],
     log: csw.logging.api.scaladsl.Logger
   ): Behavior[Command] =
     Behaviors.receive { (ctx, msg) =>
       msg match
+        case HcdStateUpdate(InternalStateActor.StateChanged(hcdState, _, _)) =>
+          if hcdState.state == HcdStateEnum.Faulted then
+            // Controller reported an error via QR errorCode — ControllerStatusActor
+            // has already called TC 1 and set controllerErrorMsg. Fail the command.
+            val errorMsg = s"${config.commandName} on axis ${config.axis} failed: ${hcdState.controllerErrorMsg}"
+            log.warn(s"Watch ${config.commandName}/${config.axis}: CONTROLLER FAULT — ${hcdState.controllerErrorMsg}")
+            config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
+              config.axis,
+              Map("clearActiveCommand" -> true),
+              ctx.system.ignoreRef
+            )
+            cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
+            reportResult(config, false, errorMsg, ctx)
+            Behaviors.stopped
+          else
+            Behaviors.same
+
         case CmdStateUpdate(InternalStateActor.CmdStateChanged(axis, cmdState, changedFields)) =>
           log.debug(s"CommandWatcher ${config.commandName}/${config.axis}: " +
             s"changed=$changedFields, thread=${cmdState.activeThread}, " +
@@ -233,7 +263,7 @@ object CommandWatcherActor:
               Map("commandHalted" -> false, "clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx, log)
+            cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
             reportResult(config, false,
               s"${config.commandName} on axis ${config.axis} was interrupted", ctx)
             Behaviors.stopped
@@ -250,7 +280,7 @@ object CommandWatcherActor:
               Map("clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx, log)
+            cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
             reportResult(config, false,
               s"${config.commandName} on axis ${config.axis} failed: ${cmdState.axisErrorMsg}", ctx)
             Behaviors.stopped
@@ -271,7 +301,7 @@ object CommandWatcherActor:
               Map("clearActiveCommand" -> true),
               ctx.system.ignoreRef
             )
-            cleanup(config, cmdStateAdapter, ctx, log)
+            cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
             reportResult(config, true, "completed", ctx)
             Behaviors.stopped
 
@@ -286,7 +316,7 @@ object CommandWatcherActor:
             Map("clearActiveCommand" -> true),
             ctx.system.ignoreRef
           )
-          cleanup(config, cmdStateAdapter, ctx, log)
+          cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
           reportResult(config, false,
             s"${config.commandName} on axis ${config.axis} timed out after ${config.timeout}", ctx)
           Behaviors.stopped
@@ -298,10 +328,12 @@ object CommandWatcherActor:
   private def cleanup(
     config: WatchConfig,
     cmdStateAdapter: ActorRef[InternalStateActor.CmdStateChanged],
+    hcdStateAdapter: ActorRef[InternalStateActor.StateChanged],
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
     log: csw.logging.api.scaladsl.Logger
   ): Unit =
     config.internalStateActor ! InternalStateActor.UnsubscribeCmdState(cmdStateAdapter)
+    config.internalStateActor ! InternalStateActor.Unsubscribe(hcdStateAdapter)
     log.debug(s"Watch ${config.commandName}/${config.axis}: cleaned up")
 
   /**

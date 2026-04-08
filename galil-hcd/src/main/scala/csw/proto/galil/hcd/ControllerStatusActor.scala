@@ -11,6 +11,7 @@ import java.time.Instant
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
+import csw.proto.galil.hcd.HcdStateEnum
 
 /**
  * ControllerStatusActor (SDD Section 4.6.5)
@@ -161,6 +162,11 @@ class ControllerStatusActor(
   private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
+  // Set true after the first controller error is detected and reported.
+  // Suppresses repeat TC 1 calls on subsequent QR polls — a running embedded error
+  // handler can fire CMDERR every few seconds, leaving errorCode nonzero on every poll.
+  // The HCD requires restart to clear a fault; there is no recovery path.
+  private var controllerFaulted: Boolean = false
   
   // Subscribe to IS axisState changes via message adapter
   private val stateChangedAdapter = context.messageAdapter[InternalStateActor.StateChanged](
@@ -363,6 +369,15 @@ class ControllerStatusActor(
   /**
    * Update HCD-level state from GeneralState and report thread status to IS.
    * IS owns the thread→axis registry and resolves completions from the bitmask.
+   *
+   * If the QR errorCode is nonzero, the controller has a pending error. We call
+   * TC 1 on the status connection immediately to retrieve and clear it, then set
+   * HcdState to Faulted with a descriptive controllerErrorMsg. This is a passive
+   * read from QR followed by a single TC 1 — no interaction with the command
+   * connection or actor mailbox.
+   *
+   * TC 1 clears the error latch on the controller, so a subsequent QR poll will
+   * show errorCode=0. The Faulted state remains until the HCD is restarted.
    */
   private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
@@ -395,6 +410,49 @@ class ControllerStatusActor(
     // to detect completions and set activeThread=0 on the correct axis.
     // No axis↔thread mapping here — IS owns that knowledge.
     internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte)
+
+    // Check for controller error. errorCode is a latch: nonzero means the controller
+    // recorded an error since the last TC call. Retrieve and clear it with TC 1,
+    // then fault the HCD so operators are forced to investigate.
+    // Skip if already Faulted — errors may repeat every poll cycle from a running
+    // embedded error handler; we only need to capture the first one.
+    val rawErrorCode = generalState.errorCode & 0xFF
+    if rawErrorCode != 0 && !controllerFaulted then
+      fetchAndReportControllerError(rawErrorCode)
+
+  /**
+   * Retrieve the controller error description via TC 1 and set HcdState to Faulted.
+   *
+   * Called when QR errorCode is nonzero. TC 1 returns a string of the form
+   * "N Description\r\n" (e.g. "66 Array space full") and clears the latch.
+   * We format it as "Controller Error: N Description" and push to IS.
+   *
+   * TC is called on statusIo (the status TCP connection) — same connection used
+   * for QR polling. This is safe: we are inside the synchronous QR poll path,
+   * so no interleaving can occur.
+   */
+  private def fetchAndReportControllerError(rawErrorCode: Int): Unit =
+    val errorMsg = Try {
+      val responses = statusIo.send("TC 1")
+      val tcText = responses.head._2.utf8String.trim
+      // TC 1 returns "N Description" — use as-is since it already contains the code.
+      // If TC somehow returns empty or just "0" (error already cleared by the time
+      // we called it), fall back to the raw code from QR.
+      if tcText.isEmpty || tcText == "0" then
+        s"Controller Error: $rawErrorCode (description unavailable)"
+      else
+        s"Controller Error: $tcText"
+    }.getOrElse(s"Controller Error: $rawErrorCode (TC call failed)")
+
+    log.error(errorMsg)
+    controllerFaulted = true
+    internalState ! InternalStateActor.UpdateHcdState(
+      Map(
+        "state"              -> HcdStateEnum.Faulted,
+        "controllerErrorMsg" -> errorMsg
+      ),
+      context.system.ignoreRef
+    )
   
   /**
    * Update axis state from GalilAxisStatus.

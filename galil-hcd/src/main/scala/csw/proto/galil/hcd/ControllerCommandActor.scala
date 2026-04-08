@@ -76,53 +76,64 @@ private[hcd] object ControllerCommandActor {
         }
 
         /**
-         * Identify the controller by sending the ID command.
-         * Runs during actor setup to verify the connection and log hardware identity.
+         * Identify the controller by sending ^R^V (firmware version) and ID (board inventory).
          *
-         * Real Galil response example (DMC-500):
-         *   FW, DMC50040 Rev 1.2a
-         *   DMC, 50000, Rev 0
-         *   CMB, 41023, 3.3v, Rev 1
-         *   AMP1, 44020, Rev 0
+         * ^R^V returns a single consistent line on both DMC-400 and DMC-500 series:
+         *   DMC-400 series:  "DMC4080 Rev 1.2h1-SIN"
+         *   DMC-500 series:  "DMC50040 Rev 1.2a"
          *
-         * The firmware model number encodes the number of axes:
-         *   DMC-500x0 where x = axis count (e.g., 50040 = 4 axes, 50080 = 8 axes)
+         * The model number encodes the axis count in both series:
+         *   DMC4080  → 8 axes   (400 series: 4-digit suffix, last digit before 0 = axes)
+         *   DMC50040 → 4 axes   (500 series: 5-digit suffix, 4th digit = axes)
+         *
+         * ID returns connector/board inventory (format differs by series) — logged for
+         * diagnostics but not parsed for model/axes.
          *
          * @return ControllerIdentity with parsed fields
          * @throws IOException if the controller does not respond or returns unexpected data
          */
         def identifyController(): ControllerIdentity = {
-          val response = galilSend("ID")
-          if (response.isEmpty || response == "?")
+          // Step 1: ^R^V — authoritative firmware version and model string
+          val rvResponse = galilSend("\u0012\u0016")
+          if (rvResponse.isEmpty || rvResponse == "?")
             throw new IOException(
-              s"Controller at ${galilConfig.host}:${galilConfig.port} did not respond to ID command"
+              s"Controller at ${galilConfig.host}:${galilConfig.port} did not respond to ^R^V"
             )
+          val firmware = rvResponse.trim
 
-          val lines = response.split("\r?\n").map(_.trim).filter(_.nonEmpty)
+          // Parse model token (first whitespace-delimited token, e.g. "DMC4080" or "DMC50040")
+          val modelToken = firmware.split("\\s+").headOption.getOrElse("unknown")
 
-          // Parse firmware line: "FW, DMC50040 Rev 1.2a"
-          val fwLine = lines.find(_.startsWith("FW,"))
-          val firmware = fwLine.map(_.stripPrefix("FW,").trim).getOrElse("unknown")
+          // Extract axis count from model number.
+          // Both series encode axes as the digit immediately before the trailing '0':
+          //   DMC4080  → digit at index 5 = '8'  → 8 axes
+          //   DMC50040 → digit at index 5 = '4'  → 4 axes
+          // Pattern: "DMC" followed by digits where the second-to-last digit is the axis count.
+          val axisCount = {
+            val digits = modelToken.dropWhile(!_.isDigit)  // e.g. "4080" or "50040"
+            if digits.length >= 2 && digits.last == '0' then
+              digits(digits.length - 2).toString.toIntOption.getOrElse(-1)
+            else -1
+          }
 
-          // Parse DMC model line: "DMC, 50000, Rev 0"
-          val dmcLine = lines.find(_.startsWith("DMC,"))
-          val model = dmcLine.map(_.stripPrefix("DMC,").trim.split(",").head.trim).getOrElse("unknown")
+          // Strip leading "DMC" for the model field since the log line prepends "DMC-"
+          val model = if modelToken.toUpperCase.startsWith("DMC") then modelToken.drop(3)
+                      else modelToken
 
-          // Extract axis count from firmware model number: DMC500x0 -> x is the axis digit
-          val axisCount = fwLine.flatMap { fw =>
-            val pattern = """DMC5\d{2}(\d)0""".r
-            pattern.findFirstMatchIn(fw).map(_.group(1).toInt)
-          }.getOrElse(-1) // -1 = unknown
+          // Step 2: ID — board/connector inventory; format varies by series, log as-is
+          val idResponse = galilSend("ID")
+          val idLines = if idResponse.isEmpty || idResponse == "?" then Seq.empty
+                        else idResponse.split("\r?\n").map(_.trim).filter(_.nonEmpty).toSeq
 
           val identity = ControllerIdentity(
             firmware = firmware,
             model = model,
             axisCount = axisCount,
-            rawResponse = response
+            rawResponse = s"^R^V: $firmware\nID:\n${idLines.mkString("\n")}"
           )
 
           log.info(s"Controller identified: firmware=$firmware, model=DMC-$model, axes=$axisCount")
-          lines.foreach(line => log.info(s"  ID: $line"))
+          idLines.foreach(line => log.info(s"  ID: $line"))
 
           identity
         }
