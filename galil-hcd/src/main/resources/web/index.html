@@ -310,7 +310,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
 
   return e('div',{style:{backgroundColor:'#111827',border:`1px solid ${enabled?colors.bdr:'#1F2937'}`,
     borderRadius:8,overflow:'hidden',minWidth:280,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
-    opacity:enabled?1:0.85, position:'relative'}},
+    opacity:enabled?1:0.85, position:'relative',display:'flex',flexDirection:'column'}},
 
     // Header
     e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center',position:'relative'}},
@@ -331,7 +331,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
           e(StatusDot,{axisState:axState.axisState}), axState.axisState))),
 
     // Telemetry + commands body
-    e('div',{style:{padding:'6px 12px 8px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim}},
+    e('div',{style:{padding:'6px 12px 8px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim,
+      display:'flex',flexDirection:'column',flex:1}},
 
       // Error bar — immediately below header when present
       e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null}),
@@ -356,24 +357,22 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
         : null),
 
       // ── ROTATING: (telemetry + dial) left, commands right — mirrors linear layout ──
-      axState.mechanismType==='Rotating' ? e('div',{style:{display:'flex',gap:8,alignItems:'flex-start'}},
+      axState.mechanismType==='Rotating' ? e('div',{style:{display:'flex',gap:8,alignItems:'flex-start',flex:1}},
 
         // Left column — telemetry grid then dial
         e('div',{style:{flexShrink:0,fontFamily:'var(--mono)',fontSize:11.5}},
           e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2,marginBottom:5}},
             e('span',{style:{color:'#6B7280'}},'Position'),
             e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}},
-              (axState.position||0).toFixed(1)),
+              (axState.position||0).toFixed(1),
+              e('span',{style:{fontSize:10,color:'#4B5563',fontWeight:400,marginLeft:5,fontVariantNumeric:'tabular-nums'}},
+                '(',(axState.rawMotorPosition||0).toFixed(0),')')),
             e('span',{style:{color:'#6B7280'}},'Velocity'),
             e('span',{style:{color:(axState.velocity||0)!==0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
               (axState.velocity||0).toFixed(1)),
             e('span',{style:{color:showDemand?'#6B7280':'#374151'}},'Demand'),
             e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
-              (axState.demand||0).toFixed(1)),
-            // Raw Pos — hidden in compact
-            !compact ? e('span',{style:{color:'#4B5563',fontSize:10.5}},'Raw Pos') : null,
-            !compact ? e('span',{style:{color:'#4B5563',fontSize:10.5,fontVariantNumeric:'tabular-nums'}},
-              (axState.rawMotorPosition||0).toFixed(0)) : null),
+              (axState.demand||0).toFixed(1))),
           !compact ? e(AxisVisual,{axState,colors,showDemand}) : null),
 
         // Right column — Whl+Ang always; Pos+Ofs hidden in compact
@@ -399,8 +398,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
               onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:0,flex:1,minWidth:0}}),
             e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})) : null)
         : null)
-      // ── LINEAR: telemetry left + commands right, wide track below ──
-      : e('div',null,
+      // ── LINEAR: telemetry left + commands right, wide track below; track grows to fill remaining height ──
+      : e('div',{style:{display:'flex',flexDirection:'column',flex:1}},
         e('div',{style:{display:'flex',gap:8,alignItems:'flex-start',marginBottom:4}},
           e('div',{style:{flex:1,minWidth:0}},
             e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2}},
@@ -413,22 +412,24 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
               e('span',{style:{color:'#6B7280'}},'Demand'),
               e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
                 (axState.demand||0).toFixed(1)))),
-          enabled ? e('div',{style:{flexShrink:0,display:'flex',flexDirection:'column',gap:3}},
+          enabled ? e('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:3}},
             e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
               e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Pos'),
               e(In,{value:posTarget,onChange:setPosTarget,ph:'target',
-                onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:80}}),
+                onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:0,flex:1,minWidth:0}}),
               e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('positionAxis',{target:posTarget})})),
             e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
               e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Ofs'),
               e(In,{value:offTarget,onChange:setOffTarget,ph:'offset',
-                onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:80}}),
+                onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:0,flex:1,minWidth:0}}),
               e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})))
           : null),
-        !compact && e(AxisVisual,{axState,colors,showDemand})),
+        // Track visual — grows to fill remaining card height, centered vertically
+        !compact && e('div',{style:{flex:1,display:'flex',alignItems:'center'}},
+          e(AxisVisual,{axState,colors,showDemand}))),
 
-      // Bool flags — nowrap, card is wide enough at 310px+
-      e('div',{style:{marginTop:5,display:'flex',flexWrap:'nowrap',gap:0}},
+      // Bool flags — nowrap; marginTop:auto pins to bottom of flex-column card body
+      e('div',{style:{marginTop:'auto',paddingTop:5,display:'flex',flexWrap:'nowrap',gap:0}},
         e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
         e(BoolFlag,{value:axState.isStepper,label:'Stepper',trueColor:'#8B5CF6'}),
         e(BoolFlag,{value:!axState.motorOff,label:'Motor',trueColor:'#10B981',falseColor:'#EF4444'}),
@@ -571,13 +572,13 @@ function AxisVisual({axState, colors, showDemand}) {
 
     return e('div',{style:{display:'flex',alignItems:'center',flexShrink:0}}, dial, angleLabel);
   } else {
-    // ── Linear track ── wide/short, motion left→right
+    // ── Linear track ── wide/short, motion left→right; lo/hi labels below the rail
     const pos    = axState.position || 0;
     const lo     = axState.lowerLimit != null ? axState.lowerLimit : 0;
     const hi     = axState.upperLimit != null ? axState.upperLimit : 1000;
     const demand = axState.demand || 0;
-    const W = 252, H = 40;
-    const padL = 34, padR = 34;
+    const W = 252, H = 56;
+    const padL = 8, padR = 8;
     const trackY = 22;
     const clamp  = v => Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)));
     const posX   = padL + clamp(pos)    * (W - padL - padR);
@@ -589,10 +590,11 @@ function AxisVisual({axState, colors, showDemand}) {
       e('line', {x1:padL, y1:trackY, x2:W-padR, y2:trackY,
         stroke:'#374151', strokeWidth:2, strokeLinecap:'round'}),
       e('line', {x1:padL, y1:trackY-4, x2:padL, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
-      e('text', {x:padL-4, y:trackY, textAnchor:'end', dominantBaseline:'middle',
-        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
       e('line', {x1:W-padR, y1:trackY-4, x2:W-padR, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
-      e('text', {x:W-padR+4, y:trackY, textAnchor:'start', dominantBaseline:'middle',
+      // lo/hi labels below the rail, left/right justified within track width
+      e('text', {x:padL, y:trackY+18, textAnchor:'start', dominantBaseline:'auto',
+        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
+      e('text', {x:W-padR, y:trackY+18, textAnchor:'end', dominantBaseline:'auto',
         fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, hi.toFixed(0)),
       showDemand ? e('line', {x1:demX, y1:trackY-9, x2:demX, y2:trackY+9,
         stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.6}) : null,
