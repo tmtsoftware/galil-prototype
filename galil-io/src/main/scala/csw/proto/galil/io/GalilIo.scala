@@ -333,10 +333,16 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
     socket.getOutputStream.flush()  // Force immediate send to controller
   }
 
-  // Receives a single reply for the given command and returns the result
+  // Receives a single reply for the given command and returns the result.
+  // InputStream.read() returns -1 when the remote end has closed the connection.
+  // ByteString.fromArray with a negative length throws ArrayIndexOutOfBoundsException,
+  // which surfaces as an opaque crash rather than a meaningful error. We detect -1
+  // explicitly and throw IOException so callers can handle it as a connection failure.
   override def read(): ByteString = {
     val buf    = Array.ofDim[Byte](bufSize)
     val length = socket.getInputStream.read(buf)
+    if (length == -1)
+      throw new java.io.IOException(s"Connection closed by remote ($host:$port)")
     ByteString.fromArray(buf, 0, length)
   }
 
@@ -370,6 +376,7 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
             if (length > 0) {
               result.append(ByteString.fromArray(buf, 0, length).utf8String)
             } else {
+              // 0 = timeout already handled by SocketTimeoutException; -1 = connection closed
               continue = false
             }
           } else {

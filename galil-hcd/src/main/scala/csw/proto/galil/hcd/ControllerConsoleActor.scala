@@ -73,7 +73,8 @@ object ControllerConsoleActor:
 
     val logTag = s"[GALIL:$prefix]"
 
-    @volatile var running      = false
+    @volatile var running           = false
+    @volatile var connectionLostFlag = false
     @volatile var readerThread: Thread = null
 
     def startReading(): Unit =
@@ -140,6 +141,7 @@ object ControllerConsoleActor:
                 val n = socket.getInputStream.read(readBuf)
                 if n < 0 then
                   log.warn(s"$logTag ControllerConsoleActor: connection closed by controller")
+                  connectionLostFlag = true
                   running = false
                 else if n > 0 then
                   lineBuffer.append(new String(readBuf, 0, n, "UTF-8"))
@@ -157,7 +159,17 @@ object ControllerConsoleActor:
                 case _: SocketTimeoutException => // no MG output this period — normal
                 case e: IOException if running =>
                   log.warn(s"$logTag ControllerConsoleActor: read error: ${e.getMessage}")
+                  connectionLostFlag = true
                   running = false
+
+            // If we exited the loop because of a connection loss (not a Stop command),
+            // report Disconnected. This is informational only — consoleConnection is
+            // excluded from isOperational — but ensures the HMI accurately reflects
+            // that the console handle is gone.
+            if connectionLostFlag then
+              internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                "consoleConnection", ConnectionStatus.Disconnected
+              )
 
           catch
             case e: IOException =>

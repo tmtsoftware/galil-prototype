@@ -138,7 +138,19 @@ private[hcd] object ControllerCommandActor {
           identity
         }
 
-        val controllerIdentity = identifyController()
+        val controllerIdentity =
+          if simulate then
+            // Simulator does not implement ^R^V or ID — return a synthetic identity.
+            // axisCount=-1 signals "unknown" to GalilHcd (no controllerAxisCount pushed to IS).
+            log.info("Simulation mode — skipping controller identification (^R^V / ID)")
+            ControllerIdentity(
+              firmware    = "Simulator",
+              model       = "Simulator",
+              axisCount   = -1,
+              rawResponse = "Simulator"
+            )
+          else
+            identifyController()
 
         // ========================================
         // Thread Allocation (from hardware state)
@@ -208,6 +220,11 @@ private[hcd] object ControllerCommandActor {
               log.info(s"Downloaded program: ${program.length} characters, ${program.linesIterator.size} lines")
               replyTo ! GalilCommandMessage.DownloadProgramResult(program)
             } catch {
+              case ex: IOException =>
+                log.error(s"Download — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.DownloadProgramResult("", error = Some(ex.getMessage))
               case ex: Exception =>
                 log.error(s"Download failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.DownloadProgramResult("", error = Some(ex.getMessage))
@@ -223,6 +240,11 @@ private[hcd] object ControllerCommandActor {
               log.info(s"Command connection read timeout set to $label")
               replyTo ! GalilCommandMessage.SendCommandResult("")
             } catch {
+              case ex: IOException =>
+                log.error(s"SetReadTimeout — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
               case ex: Exception =>
                 replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
             }
@@ -247,6 +269,11 @@ private[hcd] object ControllerCommandActor {
                   replyTo ! GalilCommandMessage.SendCommandResult(allResponses)
               }
             } catch {
+              case ex: IOException =>
+                log.error(s"SendCommand — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
               case ex: Exception =>
                 log.error(s"SendCommand failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.SendCommandResult("", error = Some(ex.getMessage))
@@ -324,6 +351,12 @@ private[hcd] object ControllerCommandActor {
                 }
               }
             } catch {
+              case ex: IOException =>
+                log.error(s"ExecuteProgram — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.ExecuteProgramResult(
+                  thread = -1, threadWasActive = false, error = Some(ex.getMessage))
               case ex: Exception =>
                 log.error(s"ExecuteProgram failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.ExecuteProgramResult(
@@ -368,6 +401,11 @@ private[hcd] object ControllerCommandActor {
                   replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
               }
             } catch {
+              case ex: IOException =>
+                log.error(s"HaltExecution — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(ex.getMessage))
               case ex: Exception =>
                 log.error(s"HaltExecution failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(ex.getMessage))

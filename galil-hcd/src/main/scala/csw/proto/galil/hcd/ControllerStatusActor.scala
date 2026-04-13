@@ -8,9 +8,8 @@ import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
 import csw.proto.galil.io.{GalilIo, GalilIoTcp}
 
 import java.time.Instant
-import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.util.{Failure, Success, Try}
+import scala.util.Try
 import csw.proto.galil.hcd.HcdStateEnum
 
 /**
@@ -43,11 +42,6 @@ object ControllerStatusActor:
    */
   private[hcd] case object PollAnalogInputs extends Command
 
-  /**
-   * Internal: result of async analog input poll, delivered via pipeToSelf.
-   */
-  private case class AnalogInputsResult(values: Array[Float]) extends Command
-  
   /**
    * Inject a parsed DataRecord directly (used in tests).
    */
@@ -197,13 +191,6 @@ class ControllerStatusActor(
       case PollAnalogInputs =>
         handlePollAnalogInputs()
 
-      case AnalogInputsResult(values) =>
-        internalState ! InternalStateActor.UpdateHcdState(
-          Map("analogInputs" -> values),
-          context.system.ignoreRef
-        )
-        Behaviors.same
-
       case QRResponse(dataRecord) =>
         handleQRResponse(dataRecord)
         
@@ -232,10 +219,24 @@ class ControllerStatusActor(
         val dr = DataRecord(bs)
         handleQRResponse(dr)
       catch
+        case ex: java.io.IOException =>
+          // TCP connection lost (remote close, broken pipe, or timeout).
+          // Stop polling immediately — continuing would hammer a dead socket.
+          // Report Disconnected to IS so HMI and operators see the failure.
+          // No reconnection here; HCD must be restarted to recover.
+          log.error(s"QR poll — status connection lost: ${ex.getMessage}")
+          stopPolling()
+          pollingEnabled = false
+          internalState ! InternalStateActor.ReportConnectionStatus(
+            "statusConnection", ConnectionStatus.Disconnected
+          )
+          Behaviors.same
         case ex: Exception =>
-          log.error(s"QR poll failed: ${ex.getMessage}")
+          log.error(s"QR poll failed (non-IO): ${ex.getMessage}")
           errorCount += 1
-    Behaviors.same
+          Behaviors.same
+    else
+      Behaviors.same
   
   /**
    * Handle QR response from controller
@@ -342,28 +343,38 @@ class ControllerStatusActor(
 
     // Single compound MG command — one round-trip instead of 8 sequential calls.
     // Hardware returns space-separated values on one line: "2.5839 2.5839 0.0000 ..."
-    // Called directly on statusIo — no actor message-passing overhead.
+    //
+    // Called directly on statusIo on the actor thread — NOT in a Future.
+    // Rationale: statusIo (a plain Socket) is not thread-safe. Running the AI poll
+    // in a Future on the execution context created a data race with PollController,
+    // which also calls statusIo.send() on the actor thread. Since PollController
+    // and PollAnalogInputs are serialized by the actor mailbox, keeping both on the
+    // actor thread eliminates the race with no additional synchronization.
     val mgCmd = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
-
-    val future = Future {
-      val responses = statusIo.send(mgCmd)
-      responses.map(_._2.utf8String).mkString
-    }(context.executionContext)
-
-    context.pipeToSelf(future) {
-      case Success(responseText) =>
-        log.debug(s"AI poll response: '$responseText'")
-        val tokens = responseText.trim.split("\\s+").filter(_.nonEmpty)
-        val values = Array.tabulate(8) { i =>
-          if i < tokens.length then Try(tokens(i).toFloat).getOrElse(0.0f)
-          else 0.0f
-        }
-        AnalogInputsResult(values)
-      case Failure(ex) =>
-        log.warn(s"AI poll failed: ${ex.getMessage}")
-        AnalogInputsResult(Array.fill(8)(0.0f))
-    }
-
+    try
+      val responses    = statusIo.send(mgCmd)
+      val responseText = responses.map(_._2.utf8String).mkString
+      log.debug(s"AI poll response: '$responseText'")
+      val tokens = responseText.trim.split("\\s+").filter(_.nonEmpty)
+      val values = Array.tabulate(8) { i =>
+        if i < tokens.length then Try(tokens(i).toFloat).getOrElse(0.0f)
+        else 0.0f
+      }
+      internalState ! InternalStateActor.UpdateHcdState(
+        Map("analogInputs" -> values),
+        context.system.ignoreRef
+      )
+    catch
+      case ex: java.io.IOException =>
+        // Same treatment as QR poll failure: connection is gone, stop polling.
+        log.error(s"AI poll — status connection lost: ${ex.getMessage}")
+        stopPolling()
+        pollingEnabled = false
+        internalState ! InternalStateActor.ReportConnectionStatus(
+          "statusConnection", ConnectionStatus.Disconnected
+        )
+      case ex: Exception =>
+        log.warn(s"AI poll failed (non-IO): ${ex.getMessage}")
     Behaviors.same
 
   /**
