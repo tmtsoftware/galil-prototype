@@ -52,7 +52,8 @@ private[hcd] object ControllerCommandActor {
         val log = loggerFactory.getLogger(ctx)
 
         // Open the command TCP connection
-        val galilIo: GalilIo =
+        // var so it can be replaced on successful reconnect
+        var galilIo: GalilIo =
           try GalilIoTcp(galilConfig.host, galilConfig.port)
           catch {
             case ex: Exception =>
@@ -410,6 +411,62 @@ private[hcd] object ControllerCommandActor {
                 log.error(s"HaltExecution failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.HaltExecutionResult(success = false, error = Some(ex.getMessage))
             }
+            Behaviors.same
+
+          // Attempt to verify and if necessary re-establish the command TCP connection.
+          // Step 1: test existing socket with MG 0. If that succeeds, report Connected and done.
+          // Step 2: if test fails, close dead socket, open fresh GalilIoTcp, retest.
+          // Reports commandConnection Connected/Disconnected to IS in either outcome.
+          case GalilCommandMessage.Reconnect(replyTo) =>
+            log.info(s"Reconnect: verifying command connection to ${galilConfig.host}:${galilConfig.port}")
+
+            def testCurrentSocket(): Boolean =
+              try
+                galilIo.synchronized {
+                  val responses = galilIo.send("MG 0")
+                  responses.nonEmpty // any response means socket is alive
+                }
+              catch
+                case _: Exception => false
+
+            def openFreshSocket(): Either[String, GalilIo] =
+              try
+                val newIo = GalilIoTcp(galilConfig.host, galilConfig.port)
+                // Verify the new socket with a test command
+                newIo.synchronized {
+                  newIo.send("MG 0")
+                }
+                Right(newIo)
+              catch
+                case ex: Exception =>
+                  Left(s"Failed to open new command connection: ${ex.getMessage}")
+
+            if testCurrentSocket() then
+              log.info("Reconnect: existing command socket is working — connection recovered on its own")
+              internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                "commandConnection", ConnectionStatus.Connected
+              )
+              replyTo ! GalilCommandMessage.ReconnectResult(success = true)
+            else
+              log.info("Reconnect: existing command socket unresponsive — closing and opening new connection")
+              try galilIo.close() catch case _: Exception => ()
+
+              openFreshSocket() match
+                case Right(newIo) =>
+                  galilIo = newIo
+                  log.info("Reconnect: new command connection established")
+                  internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                    "commandConnection", ConnectionStatus.Connected
+                  )
+                  replyTo ! GalilCommandMessage.ReconnectResult(success = true)
+
+                case Left(errMsg) =>
+                  log.error(s"Reconnect: $errMsg")
+                  internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                    "commandConnection", ConnectionStatus.Disconnected
+                  )
+                  replyTo ! GalilCommandMessage.ReconnectResult(success = false, error = Some(errMsg))
+
             Behaviors.same
 
           // GalilCommand, QRResult, DownloadProgramResult, SendCommandResult are reply-direction

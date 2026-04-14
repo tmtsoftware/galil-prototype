@@ -53,7 +53,7 @@ object CommandHandlerActor {
 
   private val immediateCommands = Set(
     "configAxis", "configRotatingAxis", "configLinearAxis",
-    "setBit", "setAO"
+    "setBit", "setAO", "faultReset"
   )
 
   private val longRunningCommands = Set(
@@ -108,6 +108,10 @@ object CommandHandlerActor {
                     askTimeout, askScheduler)
                 case "setAO" =>
                   handleSetAO(setup, runId, controllerInterfaceActor, commandResponseManager, log,
+                    askTimeout, askScheduler)
+                case "faultReset" =>
+                  handleFaultReset(setup, runId, internalStateActor, stateUpdateAdapter,
+                    controllerInterfaceActor, statusMonitor, commandResponseManager, log,
                     askTimeout, askScheduler)
                 case other =>
                   commandResponseManager.updateCommand(Error(runId, s"Unknown immediate command: $other"))
@@ -1641,4 +1645,114 @@ object CommandHandlerActor {
     ctx.spawn(CommandWatcherActor(config), watcherName)
     log.info(s"Spawned $watcherName for $commandName on axis $axis")
   }
+
+  /**
+   * Handle faultReset command (SDD Section 4.6.4 — Fault Recovery Actor).
+   *
+   * Severity levels (in order of intrusiveness):
+   *   None  — Clear error messages and transition HCD from Faulted to Ready.
+   *            The controller error latch was already cleared by the TC 1 call
+   *            that detected the fault. No controller interaction needed.
+   *            For connection-loss faults: clears the Faulted state so commands
+   *            are accepted again. If the connection is still down, the next
+   *            command attempt will re-fault with a fresh error message.
+   *   Init  — Reconnect dropped connections and re-run setup. (Not yet implemented.)
+   *   Minor — Reset controller and re-initialize. (Not yet implemented.)
+   *   Major — Reload embedded code and re-initialize. (Not yet implemented.)
+   *
+   * When reconnection logic is added (Init severity), it will attempt to re-open
+   * any Disconnected TCP handles then re-run #Init and #SetupX. That complexity
+   * may warrant a dedicated FaultRecoveryActor at that point.
+   */
+  private def handleFaultReset(
+    setup: Setup,
+    runId: Id,
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    stateUpdateAdapter: ActorRef[InternalStateActor.UpdateResponse],
+    controllerCommandActor: ActorRef[GalilCommandMessage],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
+    crm: CommandResponseManager,
+    log: csw.logging.api.scaladsl.Logger,
+    askTimeout: Timeout,
+    askScheduler: org.apache.pekko.actor.typed.Scheduler
+  ): Unit =
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+
+    val severity = try
+      setup(FaultResetCommand.severityKey).head.name
+    catch
+      case _: Exception => "None"  // default to least intrusive
+
+    log.info(s"faultReset: severity=$severity")
+
+    severity match
+      case "None" =>
+        // Step 1: attempt to reconnect any dropped TCP connections.
+        // Each actor first tests its existing socket (the connection may have
+        // recovered on its own), then opens a fresh socket if needed.
+        // We run command reconnect first, then status — sequentially via Await
+        // so results are clear in the log before we decide the overall outcome.
+        log.info("faultReset None: attempting connection recovery")
+
+        val cmdResult = Try {
+          Await.result(
+            AskPattern.Askable(controllerCommandActor).ask[GalilCommandMessage.ReconnectResult](
+              ref => GalilCommandMessage.Reconnect(ref)
+            )(Timeout(15.seconds), askScheduler),
+            16.seconds
+          )
+        }.getOrElse(GalilCommandMessage.ReconnectResult(
+          success = false,
+          error   = Some("Command reconnect ask timed out")))
+
+        val stsResult = Try {
+          Await.result(
+            AskPattern.Askable(statusMonitor).ask[ControllerStatusActor.ReconnectResult](
+              ref => ControllerStatusActor.Reconnect(ref)
+            )(Timeout(15.seconds), askScheduler),
+            16.seconds
+          )
+        }.getOrElse(ControllerStatusActor.ReconnectResult(
+          success = false,
+          error   = Some("Status reconnect ask timed out")))
+
+        // Step 2: evaluate results and update HCD state accordingly
+        val cmdOk = cmdResult.success
+        val stsOk = stsResult.success
+
+        log.info(s"faultReset None: command=${if cmdOk then "OK" else "FAILED"}, " +
+                 s"status=${if stsOk then "OK" else "FAILED"}")
+
+        if cmdOk && stsOk then
+          // Both connections working — clear fault and return to Ready
+          internalStateActor ! InternalStateActor.UpdateHcdState(
+            Map(
+              "state"              -> HcdStateEnum.Ready,
+              "controllerErrorMsg" -> ""
+            ),
+            stateUpdateAdapter
+          )
+          log.info("faultReset None: all connections recovered — HCD Ready")
+          crm.updateCommand(Completed(runId))
+        else
+          // One or both still down — build a clear error message and stay Faulted
+          val failures = Seq(
+            if !cmdOk then Some(s"Command: ${cmdResult.error.getOrElse("failed")}") else None,
+            if !stsOk then Some(s"Status: ${stsResult.error.getOrElse("failed")}") else None
+          ).flatten.mkString("; ")
+          val errorMsg = s"Connection recovery failed — $failures"
+          internalStateActor ! InternalStateActor.UpdateHcdState(
+            Map(
+              "state"              -> HcdStateEnum.Faulted,
+              "controllerErrorMsg" -> errorMsg
+            ),
+            stateUpdateAdapter
+          )
+          log.error(s"faultReset None: $errorMsg")
+          crm.updateCommand(Error(runId, errorMsg))
+
+      case other =>
+        val msg = s"faultReset severity='$other' not yet implemented"
+        log.warn(msg)
+        crm.updateCommand(Error(runId, msg))
 }

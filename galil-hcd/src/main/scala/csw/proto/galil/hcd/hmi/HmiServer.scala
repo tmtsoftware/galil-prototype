@@ -181,6 +181,17 @@ class HmiServer(
       val request = parseCommandRequest(body)
       val runId = Id()
 
+      // Gate: if HCD is Faulted, only faultReset is permitted.
+      // The HMI dispatches directly to CommandHandlerActor (bypassing CSW validateCommand),
+      // so we must enforce the same Faulted check here.
+      if request.commandName != "faultReset" then
+        val hcdState = queryHcdStateForHmi()
+        if hcdState.state == HcdStateEnum.Faulted then
+          val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
+                       else "HCD is Faulted"
+          log.warn(s"HMI command '${request.commandName}' rejected: $reason")
+          return commandResponseJson(runId.id, "Error", s"HCD Faulted: $reason")
+
       // Build CSW Setup from JSON params using ICD key objects
       val setup = buildSetup(request.commandName, request.params, runId)
 
@@ -197,6 +208,26 @@ class HmiServer(
         commandResponseJson("", "Error", ex.getMessage)
     }
   }
+
+  /**
+   * Synchronously query HcdState from InternalStateActor for HMI command gating.
+   * Fails closed — on query failure returns Faulted so commands are blocked.
+   */
+  private def queryHcdStateForHmi(): HcdState =
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    try
+      Await.result(
+        AskPattern.Askable(internalStateActor).ask[HcdState](
+          ref => InternalStateActor.GetHcdState(ref)
+        )(timeout, system.scheduler),
+        timeout.duration
+      )
+    catch
+      case ex: Exception =>
+        log.warn(s"HMI: HCD state query failed: ${ex.getMessage} — treating as Faulted")
+        HcdState(state = HcdStateEnum.Faulted,
+                 controllerErrorMsg = "HCD state query failed")
 
   /**
    * Build a CSW Setup command from the HMI JSON parameters.
@@ -281,6 +312,11 @@ class HmiServer(
       case "setBit" =>
         intParam("address").foreach(a => setup = setup.add(SetBitCommand.addressKey.set(a)))
         intParam("value").foreach(v => setup = setup.add(SetBitCommand.valueKey.set(v)))
+
+      case "faultReset" =>
+        // severity defaults to "None" if not provided — least intrusive recovery
+        val severity = stringParam("severity").getOrElse("None")
+        setup = setup.add(FaultResetCommand.severityKey.set(severity))
 
       case other =>
         throw new IllegalArgumentException(s"Unknown command: $other")

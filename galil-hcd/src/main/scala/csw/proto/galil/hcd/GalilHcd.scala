@@ -124,6 +124,26 @@ object GalilCommandMessage {
     error: Option[String] = None
   )
 
+  /**
+   * Result of a Reconnect attempt.
+   * @param success true if the connection is now working (existing or freshly opened)
+   * @param error   None on success, Some(description) on failure
+   */
+  case class ReconnectResult(success: Boolean, error: Option[String] = None)
+
+  /**
+   * Attempt to verify and if necessary re-establish the command TCP connection.
+   *
+   * Step 1: test the existing socket with a lightweight command (MG 0).
+   *   - If that succeeds the connection never actually dropped — report Connected, done.
+   * Step 2: if the test fails, close the dead socket and open a fresh GalilIoTcp.
+   *   - Retest with MG 0. Report Connected on success, Disconnected on failure.
+   *
+   * Reports commandConnection Connected/Disconnected to IS in either outcome.
+   * Used by faultReset (None severity) to recover from a detected connection loss.
+   */
+  case class Reconnect(replyTo: ActorRef[ReconnectResult]) extends GalilCommandMessage
+
 }
 
 class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
@@ -1137,7 +1157,18 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     controlCommand match {
       case setup: Setup =>
         val commandName = setup.commandName.name
-        
+
+        // Gate: if HCD is Faulted, only faultReset is permitted.
+        // This covers both controller errors and connection loss — any Faulted
+        // transition blocks commands until the operator explicitly clears the fault.
+        if commandName != "faultReset" then
+          val hcdState = queryHcdStateSync()
+          if hcdState.state == HcdStateEnum.Faulted then
+            val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
+                         else "HCD is Faulted"
+            log.warn(s"Command '$commandName' rejected: $reason")
+            return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(s"HCD Faulted: $reason"))
+
         // Immediate commands handled by CommandHandlerActor use ICD keys directly
         if (CommandHandlerActor.isImmediate(commandName)) {
           validateImmediateCommand(runId, setup)
@@ -1150,7 +1181,31 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         CommandResponse.Invalid(runId, CommandIssue.UnsupportedCommandIssue("Observe not supported"))
     }
   }
-  
+
+  /**
+   * Synchronously query HcdState from InternalStateActor.
+   * Used in validateCommand which runs on the CSW framework thread.
+   * Fails closed — on query failure returns a Faulted state so commands
+   * are blocked rather than silently allowed through.
+   */
+  private def queryHcdStateSync(): HcdState = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(2.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+    try
+      Await.result(
+        internalStateActor.ask[HcdState](ref => InternalStateActor.GetHcdState(ref)),
+        2.seconds
+      )
+    catch
+      case ex: Exception =>
+        log.warn(s"queryHcdStateSync failed: ${ex.getMessage} — treating as Faulted")
+        HcdState(state = HcdStateEnum.Faulted,
+                 controllerErrorMsg = "HCD state query failed — connection may be lost")
+  }
+
   /**
    * Validate immediate commands using ICD key definitions.
    * Checks required parameters are present and axis values are valid.
@@ -1192,6 +1247,10 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           // address and value are required
           setup(SetAOCommand.addressKey)
           setup(SetAOCommand.valueKey)
+          CommandResponse.Accepted(runId)
+
+        case "faultReset" =>
+          // severity is optional — defaults to None if absent
           CommandResponse.Accepted(runId)
           
         case other =>

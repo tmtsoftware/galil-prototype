@@ -922,14 +922,21 @@ function PositionChart({history,activeAxes}) {
           e(Line,{key:a,type:'monotone',dataKey:a,stroke:CHART_COLORS[a],dot:false,strokeWidth:1.5,isAnimationActive:false})))));
 }
 
-function ErrorBanner({hcdState,controllerErrorMsg}) {
+function ErrorBanner({hcdState,controllerErrorMsg,onCommand}) {
   if (hcdState==='Ready' && !controllerErrorMsg) return null;
+  const isFaulted = hcdState === 'Faulted';
   return e('div',{style:{backgroundColor:'#7F1D1D',border:'1px solid #991B1B',borderRadius:6,
     padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:10,fontFamily:'var(--mono)',fontSize:12}},
     e('span',{style:{fontSize:18,lineHeight:1}},'⚠'),
-    e('div',null,
+    e('div',{style:{flex:1}},
       e('div',{style:{color:'#FCA5A5',fontWeight:700}},'HCD State: '+hcdState),
-      controllerErrorMsg && e('div',{style:{color:'#FECACA',marginTop:2,fontSize:11}},controllerErrorMsg)));
+      controllerErrorMsg && e('div',{style:{color:'#FECACA',marginTop:2,fontSize:11}},controllerErrorMsg)),
+    isFaulted && e('button',{
+      onClick:()=>onCommand('faultReset',{severity:'None'}),
+      style:{padding:'4px 10px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#991B1B',
+        color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer',
+        flexShrink:0,whiteSpace:'nowrap'}},
+      'Clear Fault'));
 }
 
 // ── Main App ──
@@ -1019,7 +1026,7 @@ function GalilHMI() {
           connected?'Connected':'Disconnected'))),
 
     // Controller error banner
-    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg}),
+    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg,onCommand:handleCommand}),
 
     // Axis cards (fixed height)
     e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(285px, 1fr))',gap:10,marginBottom:10,flexShrink:0}},

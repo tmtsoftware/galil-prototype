@@ -66,6 +66,27 @@ object ControllerStatusActor:
    * Query current polling status
    */
   case class GetPollingStatus(replyTo: ActorRef[PollingStatus]) extends Command
+
+  /**
+   * Result of a Reconnect attempt.
+   * @param success true if the status connection is now working
+   * @param error   None on success, Some(description) on failure
+   */
+  case class ReconnectResult(success: Boolean, error: Option[String] = None)
+
+  /**
+   * Attempt to verify and if necessary re-establish the status TCP connection.
+   *
+   * Step 1: test the existing socket with a QR command.
+   *   - If that succeeds the connection never actually dropped — report Connected,
+   *     restart polling, done.
+   * Step 2: if the test fails, close the dead socket and open a fresh GalilIoTcp.
+   *   - Retest with QR. Report Connected + restart polling on success,
+   *     Disconnected on failure.
+   *
+   * Used by faultReset (None severity) to recover from a detected connection loss.
+   */
+  case class Reconnect(replyTo: ActorRef[ReconnectResult]) extends Command
   
   /**
    * Internal: axis state changed notification from InternalStateActor.
@@ -107,7 +128,7 @@ object ControllerStatusActor:
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
         val statusIo: GalilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
-        new ControllerStatusActor(context, timers, statusIo, internalState,
+        new ControllerStatusActor(context, timers, statusIo, galilConfig, internalState,
           loggerFactory, standbyPollingRateHz, actionPollingRateHz)
       }
     }
@@ -125,7 +146,9 @@ object ControllerStatusActor:
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
-        new ControllerStatusActor(context, timers, statusIo, internalState,
+        // Dummy galilConfig for test — reconnect is not exercised in unit tests
+        val testConfig = GalilConfig("127.0.0.1", 8888)
+        new ControllerStatusActor(context, timers, statusIo, testConfig, internalState,
           loggerFactory, standbyPollingRateHz, actionPollingRateHz)
       }
     }
@@ -136,14 +159,18 @@ object ControllerStatusActor:
 class ControllerStatusActor(
   context: ActorContext[ControllerStatusActor.Command],
   timers: TimerScheduler[ControllerStatusActor.Command],
-  statusIo: GalilIo,
+  initialStatusIo: GalilIo,
+  galilConfig: GalilConfig,
   internalState: ActorRef[InternalStateActor.Command],
   loggerFactory: LoggerFactory,
   standbyPollingRateHz: Double,
   actionPollingRateHz: Double
 ) extends AbstractBehavior[ControllerStatusActor.Command](context):
-  
+
   import ControllerStatusActor._
+
+  // Mutable socket reference — replaced on successful reconnect
+  private var statusIo: GalilIo = initialStatusIo
 
   private val log = loggerFactory.getLogger(context)
 
@@ -176,6 +203,22 @@ class ControllerStatusActor(
   // Start 1Hz analog input polling (independent of QR rate)
   timers.startTimerWithFixedDelay(PollAnalogInputs, 1.second)
 
+  // Clear any stale controller error from previous sessions before polling starts.
+  // A previous HCD session that ended with a connection loss (e.g. cable pull) may
+  // have left a latched error (e.g. "123 TCP lost sync or timeout") in the controller.
+  // Reading TC 1 now clears the latch so the first QR poll doesn't see a stale errorCode
+  // and trigger a spurious fault. Logged at INFO for session diagnostics.
+  try
+    val responses = statusIo.send("TC 1")
+    val tcText = responses.head._2.utf8String.trim
+    if tcText.nonEmpty && tcText != "0" && !tcText.startsWith(" 0") then
+      log.info(s"ControllerStatusActor: cleared stale controller error on connect — TC 1: '$tcText'")
+    else
+      log.info("ControllerStatusActor: TC 1 on connect — no stale controller error")
+  catch
+    case ex: Exception =>
+      log.warn(s"ControllerStatusActor: TC 1 on connect failed: ${ex.getMessage}")
+
   // Report status connection established to InternalStateActor
   internalState ! InternalStateActor.ReportConnectionStatus(
     "statusConnection", ConnectionStatus.Connected
@@ -206,10 +249,123 @@ class ControllerStatusActor(
       case GetPollingStatus(replyTo) =>
         replyTo ! PollingStatus(pollingEnabled, pollingRateHz, lastPollTime, errorCount)
         Behaviors.same
-      
+
+      case Reconnect(replyTo) =>
+        handleReconnect(replyTo)
+
       case AxisStateChanged(stateChanged) =>
         handleAxisStateChanged(stateChanged)
   
+  /**
+   * Attempt to verify and if necessary re-establish the status TCP connection.
+   *
+   * Step 1 — verify existing socket: send QR and parse the DataRecord response.
+   *   If this succeeds the connection was never truly lost (cable blip, OS recovery).
+   *   Drain the receive buffer to discard any stale accumulated data before resuming
+   *   polling, then report Connected and restart polling.
+   *
+   * Step 2 — if step 1 fails: close the dead socket, open a fresh GalilIoTcp,
+   *   retest with QR. On success: replace statusIo, drain buffer, report Connected,
+   *   restart polling. On failure: report Disconnected, reply failure.
+   *
+   * Polling remains suspended during the reconnect attempt. On success it is
+   * restarted at the current pollingRateHz.
+   *
+   * Buffer drain is critical: while polling was stopped the TCP receive buffer may
+   * have accumulated stale QR responses or other controller output. Resuming polls
+   * without draining causes DataRecord parse errors on the first post-recovery poll.
+   */
+  private def handleReconnect(replyTo: ActorRef[ReconnectResult]): Behavior[Command] =
+    log.info(s"Reconnect: verifying status connection to ${galilConfig.host}:${galilConfig.port}")
+
+    // Drain the receive buffer on the given socket.
+    // Called both before testing (to clear stale data that might confuse the test)
+    // and after a successful verify (to clear any remaining stale accumulation).
+    def drainBuffer(io: GalilIo): Unit =
+      val stale = io.drainAndShowBuffer(timeoutMs = 500)
+      if stale.nonEmpty then
+        log.info(s"Reconnect: drained ${stale.length} bytes of stale buffer data")
+
+    // Clear the controller's TC error latch and log the result.
+    // Called after any successful reconnect to consume any error recorded during
+    // the disconnect event (e.g. "123 TCP lost sync or timeout"). This prevents
+    // the first post-recovery QR poll from seeing a stale errorCode and re-faulting.
+    // Resets controllerFaulted so genuine future errors will be detected.
+    def clearTcLatch(io: GalilIo): Unit =
+      try
+        val responses = io.send("TC 1")
+        val tcText = responses.head._2.utf8String.trim
+        if tcText.nonEmpty && tcText != "0" && !tcText.startsWith(" 0") then
+          log.info(s"Reconnect: cleared controller error latch — TC 1: '$tcText' (expected after disconnect event)")
+        else
+          log.info("Reconnect: TC 1 — no latched controller error")
+        controllerFaulted = false
+      catch
+        case ex: Exception =>
+          log.warn(s"Reconnect: TC 1 failed: ${ex.getMessage} — controllerFaulted flag unchanged")
+
+    def testCurrentSocket(): Boolean =
+      try
+        // Pre-drain before testing: stale buffered data from before the fault
+        // could be misread as a valid test response. Drain first for a clean read.
+        drainBuffer(statusIo)
+        val response = statusIo.send("QR")
+        val bs = response.head._2
+        DataRecord(bs) // parse succeeds = connection alive
+        true
+      catch
+        case _: Exception => false
+
+    def openFreshSocket(): Either[String, GalilIo] =
+      try
+        val newIo = GalilIoTcp(galilConfig.host, galilConfig.port)
+        val response = newIo.send("QR")
+        val bs = response.head._2
+        DataRecord(bs)
+        Right(newIo)
+      catch
+        case ex: Exception =>
+          Left(s"Failed to open new status connection: ${ex.getMessage}")
+
+    // Step 1: test existing socket (pre-drain inside testCurrentSocket)
+    if testCurrentSocket() then
+      log.info("Reconnect: existing status socket is working — connection recovered on its own")
+      // Post-drain: clear any remaining stale data after the test QR
+      drainBuffer(statusIo)
+      clearTcLatch(statusIo)
+      pollingEnabled = true
+      startPolling()
+      internalState ! InternalStateActor.ReportConnectionStatus(
+        "statusConnection", ConnectionStatus.Connected
+      )
+      replyTo ! ReconnectResult(success = true)
+    else
+      // Step 2: close dead socket, open fresh one
+      log.info("Reconnect: existing socket unresponsive — closing and opening new connection")
+      try statusIo.close() catch case _: Exception => ()
+
+      openFreshSocket() match
+        case Right(newIo) =>
+          statusIo = newIo
+          drainBuffer(statusIo)
+          clearTcLatch(statusIo)
+          pollingEnabled = true
+          startPolling()
+          log.info("Reconnect: new status connection established — polling resumed")
+          internalState ! InternalStateActor.ReportConnectionStatus(
+            "statusConnection", ConnectionStatus.Connected
+          )
+          replyTo ! ReconnectResult(success = true)
+
+        case Left(errMsg) =>
+          log.error(s"Reconnect: $errMsg")
+          internalState ! InternalStateActor.ReportConnectionStatus(
+            "statusConnection", ConnectionStatus.Disconnected
+          )
+          replyTo ! ReconnectResult(success = false, error = Some(errMsg))
+
+    Behaviors.same
+
   private def handlePollController(): Behavior[Command] =
     if pollingEnabled then
       log.debug("Polling controller for QR data")

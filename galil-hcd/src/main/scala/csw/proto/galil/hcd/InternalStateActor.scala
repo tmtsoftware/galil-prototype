@@ -320,7 +320,26 @@ class InternalStateActor(
         handleUpdateThreadStatus(threadStatusByte)
 
       case ReportConnectionStatus(connection, status) =>
-        handleUpdateHcdState(Map(connection -> status), context.system.ignoreRef)
+        // Update the specific connection field.
+        // If either command or status connection is lost, also transition to Faulted
+        // so the HCD state machine reflects non-operational status and commands are
+        // rejected. The fault message names which connection was lost so operators
+        // know what to investigate. Console connection loss does not fault the HCD
+        // (console is excluded from isOperational).
+        val updates: Map[String, Any] = status match
+          case ConnectionStatus.Disconnected if connection != "consoleConnection" =>
+            val lostName = connection match
+              case "commandConnection" => "Command"
+              case "statusConnection"  => "Status"
+              case other               => other
+            Map(
+              connection           -> status,
+              "state"              -> HcdStateEnum.Faulted,
+              "controllerErrorMsg" -> s"Connection lost: $lostName TCP connection disconnected"
+            )
+          case _ =>
+            Map(connection -> status)
+        handleUpdateHcdState(updates, context.system.ignoreRef)
 
   /**
    * Update HCD-level state and notify operational state subscribers.
