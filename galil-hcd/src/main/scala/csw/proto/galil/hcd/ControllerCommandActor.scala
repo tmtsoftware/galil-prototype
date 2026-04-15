@@ -442,7 +442,7 @@ private[hcd] object ControllerCommandActor {
                   Left(s"Failed to open new command connection: ${ex.getMessage}")
 
             if testCurrentSocket() then
-              log.info("Reconnect: existing command socket is working — connection recovered on its own")
+              log.info("Reconnect: existing command socket is working")
               internalStateActor ! InternalStateActor.ReportConnectionStatus(
                 "commandConnection", ConnectionStatus.Connected
               )

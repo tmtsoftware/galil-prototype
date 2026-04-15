@@ -36,6 +36,9 @@ object ControllerStatusActor:
    */
   private case object PollController extends Command
 
+  /** Internal: result of the command-connection probe sent after a status IOException. */
+  private case class CommandProbeResult(result: GalilCommandMessage.SendCommandResult) extends Command
+
   /**
    * Periodic analog input polling trigger (1Hz, independent of QR rate)
    * Package-private for test access.
@@ -122,6 +125,7 @@ object ControllerStatusActor:
     galilConfig: GalilConfig,
     internalState: ActorRef[InternalStateActor.Command],
     loggerFactory: LoggerFactory,
+    commandActor: ActorRef[GalilCommandMessage],
     standbyPollingRateHz: Double = 1.0,
     actionPollingRateHz: Double = 10.0
   ): Behavior[Command] =
@@ -129,7 +133,7 @@ object ControllerStatusActor:
       Behaviors.withTimers { timers =>
         val statusIo: GalilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
         new ControllerStatusActor(context, timers, statusIo, galilConfig, internalState,
-          loggerFactory, standbyPollingRateHz, actionPollingRateHz)
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz, commandActor)
       }
     }
 
@@ -148,8 +152,10 @@ object ControllerStatusActor:
       Behaviors.withTimers { timers =>
         // Dummy galilConfig for test — reconnect is not exercised in unit tests
         val testConfig = GalilConfig("127.0.0.1", 8888)
+        // Dummy command actor for test — probe is not exercised in unit tests
+        val dummyCommandActor = context.system.deadLetters.asInstanceOf[ActorRef[GalilCommandMessage]]
         new ControllerStatusActor(context, timers, statusIo, testConfig, internalState,
-          loggerFactory, standbyPollingRateHz, actionPollingRateHz)
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz, dummyCommandActor)
       }
     }
 
@@ -164,7 +170,8 @@ class ControllerStatusActor(
   internalState: ActorRef[InternalStateActor.Command],
   loggerFactory: LoggerFactory,
   standbyPollingRateHz: Double,
-  actionPollingRateHz: Double
+  actionPollingRateHz: Double,
+  commandActor: ActorRef[GalilCommandMessage]
 ) extends AbstractBehavior[ControllerStatusActor.Command](context):
 
   import ControllerStatusActor._
@@ -255,6 +262,13 @@ class ControllerStatusActor(
 
       case AxisStateChanged(stateChanged) =>
         handleAxisStateChanged(stateChanged)
+
+      case CommandProbeResult(result) =>
+        if result.error.isDefined then
+          log.error(s"Command connection probe after status loss — ALSO FAILED: ${result.error.get}. Controller is likely completely unreachable.")
+        else
+          log.error(s"Command connection probe after status loss — OK (response: '${result.response.trim}'). Status connection died in isolation; controller is still alive.")
+        Behaviors.same
   
   /**
    * Attempt to verify and if necessary re-establish the status TCP connection.
@@ -329,7 +343,7 @@ class ControllerStatusActor(
 
     // Step 1: test existing socket (pre-drain inside testCurrentSocket)
     if testCurrentSocket() then
-      log.info("Reconnect: existing status socket is working — connection recovered on its own")
+      log.info("Reconnect: existing status socket is working")
       // Post-drain: clear any remaining stale data after the test QR
       drainBuffer(statusIo)
       clearTcLatch(statusIo)
@@ -386,6 +400,10 @@ class ControllerStatusActor(
           internalState ! InternalStateActor.ReportConnectionStatus(
             "statusConnection", ConnectionStatus.Disconnected
           )
+          // Probe the command connection to distinguish an isolated status connection
+          // failure from total controller loss. Result logged via CommandProbeResult.
+          val probeAdapter = context.messageAdapter[GalilCommandMessage.SendCommandResult](CommandProbeResult(_))
+          commandActor ! GalilCommandMessage.SendCommand("MG 1", probeAdapter)
           Behaviors.same
         case ex: Exception =>
           log.error(s"QR poll failed (non-IO): ${ex.getMessage}")

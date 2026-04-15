@@ -345,6 +345,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         galilConfig,
         internalStateActor,
         loggerFactory,
+        commandActor = controllerCommandActor,
         standbyPollingRateHz = standbyRate,
         actionPollingRateHz = actionRate
       ),
