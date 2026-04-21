@@ -790,50 +790,24 @@ object CommandHandlerActor {
         setErrorState(axis, commandName, s"failed to execute: ${execResult.error.get}",
           internalStateActor, crm, runId, ctx)
 
-      case Success(execResult) if execResult.threadWasActive =>
-        // Thread confirmed active — normal path.
-        // Register thread→axis in IS before spawning watcher. IS sets activeThread
-        // on the axis CmdState immediately so the watcher's initial snapshot sees
-        // the running thread and does not prematurely satisfy activeThread==0 masks.
-        // IS will clear activeThread when UpdateThreadStatus reports the thread done.
+      case Success(execResult) =>
+        // XQ accepted. Whether MG _NO showed the thread still active or already
+        // completed by the time we polled, we always register and spawn the
+        // watcher. The watcher evaluates the completion mask only after IS
+        // observes the next QR scan — which is also when CS reads ae[] for
+        // this axis and reports any program error. Without this uniform path,
+        // a fast-completing program that errored could be reported as Completed
+        // before the next QR scan surfaces the error. (SDD: a command must not
+        // be declared complete without confirmation from at least one full scan.)
         val thread = execResult.thread
-        log.info(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
+        if execResult.threadWasActive then
+          log.info(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
+        else
+          log.info(s"$commandName $axis: thread $thread already cleared in MG _NO " +
+            s"(completed faster than _NO query); registering and spawning watcher to await next scan")
         internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
           loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
-
-      case Success(execResult) =>
-        // Thread already finished — command completed faster than MG _NO.
-        // CI actor already released the thread back to the pool.
-        // Still spawn a watcher: the thread condition is already met, but
-        // other mask conditions (e.g. moving==false for stopAxis) may still
-        // be pending. The watcher's initial snapshot will evaluate the full
-        // mask and complete immediately if all conditions are met, or wait
-        // for the remaining conditions otherwise.
-        // NOTE: Do NOT push activeThread here — thread is already finished,
-        // pushing a non-zero value would prevent the watcher from seeing
-        // the completion condition (activeThread==0).
-        val thread = execResult.thread
-        log.info(s"$commandName $axis: thread $thread already finished (fast completion), spawning watcher for remaining conditions")
-
-        // Check for immediate error from the embedded program first
-        val cmdStateFuture = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
-          ref => InternalStateActor.GetAxisCmdState(axis, ref)
-        )(askTimeout, askScheduler)
-
-        Try(Await.result(cmdStateFuture, askTimeout.duration)) match {
-          case Success(Some(cmdState)) if cmdState.axisErrorMsg.nonEmpty =>
-            // Error from the embedded program — no point spawning watcher
-            log.warn(s"$commandName $axis: fast completion with error: ${cmdState.axisErrorMsg}")
-            setErrorState(axis, commandName, cmdState.axisErrorMsg,
-              internalStateActor, crm, runId, ctx)
-
-          case _ =>
-            // No error — spawn watcher to wait for full completion mask.
-            // Thread already released, so no thread to release on watcher completion.
-            spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
-              loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
-        }
     }
   }
 

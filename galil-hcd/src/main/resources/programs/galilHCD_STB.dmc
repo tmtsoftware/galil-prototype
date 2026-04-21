@@ -59,7 +59,7 @@ MG "HCD TCPERR ", _IA4
 RE
 REM Trap program errors so threads are not killed
 #CMDERR
-MG "HCD CMDERR ",_ED,_TA,_TC
+MG "HCD CMDERR ",_ED,_TA,_TC,_XQ
 EN
 REM Handle limits, treatment varies by mechanism
 #LIMSWI
@@ -251,6 +251,7 @@ REM Axis A - ANT linear stage commutation setup
 REM Single axis linear translation stage
 REM
 #SetupA
+ae[0]=1
 MTA=1.0;	  'Configure A as servo amplifier
 LDA=0;		  'Enable all limit switches on this axis
 AFA=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
@@ -269,21 +270,23 @@ speed[0]=20000; 'sync embedded speed array
 STA;		    'SAFETY: Stop Axis A
 MOA;		    'SAFETY: Stop Motor A
 MG "Axis A setup done"
+ae[0]=0
 EN
 REM 	Axis A done
 REM ----------------------------------------------------------------------------
 REM Axis B - ATS linear stage commutation setup
 REM Pupil mask X (horizontal) positioning stage
 #SetupB
+ae[1]=1
 MTB=1.0;  'Configure B as servo amplifier
 LDB=0;		  'Enable all limit switches on this axis
 AFB=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
 AGB=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
 TLB=2.3/1.6;		'Torque Limit
 TKB=9.2/1.6;		'Peak Torque Limit
-KPB=20;    'Configure servo proportional constant
-KIB=0.9;  'Configure servo integrator constant
-KDB=150;   'Configure servo derivative constant
+KPB=20;    'Configure servo proportional constant (was 8)
+KIB=0.9;  'Configure servo integrator constant (was 0.4)
+KDB=150;   'Configure servo derivative constant (was 10)
 BAB;		    'Set B as a Brushless axis
 BMB=8000; 'Set Brushless Modulo for this axis
 BZ <2000>2000;'Set Brushless Zero routine timeouts
@@ -293,12 +296,14 @@ speed[1]=20000; 'sync embedded speed array
 STB;		    'SAFETY: Stop Axis B
 MOB;		    'SAFETY: Stop Motor B
 MG "Axis B setup done"
+ae[1]=0
 EN
 REM 	Axis B done
 REM ----------------------------------------------------------------------------
 REM Axis C - AVS linear vertical (Z) positioner platform commutation setup
 REM Pupil mask Y (vertical) positioning
 #SetupC
+ae[2]=1
 MTC=1.0;	  'Configure C as servo amplifier
 LDC=0;		  'Enable all limit switches on this axis
 AFC=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
@@ -313,15 +318,18 @@ BMC=8000;	'Set Brushless Modulo for this axis
 BZ <2000>2000;	'Set Brushless Zero routine timeouts
 BZC=-2;		'Trigger the Brushless Zero command to set commutation
 SPC=20000;	'Set the speed (counts/second) for independent moves in axis C
+speed[2]=20000; 'sync embedded speed array
 STC;		    'SAFETY: Stop Axis C
 MOC;		    'SAFETY: Stop Motor C
 MG "Axis C setup done"
+ae[2]=0
 EN
 REM 	Axis C done
 REM ----------------------------------------------------------------------------
 REM Axis D - ALAR Clear-aperture rotary stage commutation setup
 REM Pupil mask ? (rotation) positioning
 #SetupD
+ae[3]=1
 MTD=1.0;	  'Configure D as servo amplifier
 LDD=3;		  'Disable all limit switches on this axis (it has none)
 AFD=0;		  'Use digital feedback
@@ -341,48 +349,58 @@ cpr[3]=629760; 'counts in one 360 degree rotation
 STD;		    'SAFETY: Stop Axis D
 MOD;		    'SAFETY: Stop Motor D
 MG "Axis D setup done"
+ae[3]=0
 EN
 REM 	Axis D done
 REM ----------------------------------------------------------------------------
 REM Axis E - Stepper Motor setup
 REM X-axis of a three-axis linear platform for fiber-source positioning
 #SetupE
+ae[4]=1
 MTE=-2.5; 'Stepper motor with active high step pulses, reversed direction
 LCE=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
 LDE=1;		  'Forward limit switch disabled, Reverse limit switch enabled
 AGE=1;		  'D4140 stepper amplifier - 0.85 A phase current
 SPE=10000;	'Value of jog speed in encoder counts/second
+speed[4]=10000; 'sync embedded speed array
 STE;		    'SAFETY: Stop Axis E
 MOE;		    'SAFETY: Stop Motor E
 MG "Axis E setup done"
+ae[4]=0
 EN
 REM Axis E done
 REM ----------------------------------------------------------------------------
 REM Axis F - Stepper Motor setup
 REM Y-axis of a three-axis linear platform for fiber-source positioning
 #SetupF
+ae[5]=1
 MTF=-2.5;  'Stepper motor with active high step pulses, reversed direction
 LCF=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
 LDF=1;		  'Forward limit switch disabled, Reverse limit switch enabled
 AGF=1;		  'D4140 stepper amplifier - 0.85 A phase current
 SPF=10000;	'Value of jog speed in encoder counts/second
+speed[5]=10000; 'sync embedded speed array
 STF;		    'SAFETY: Stop Axis F
 MOF;		    'SAFETY: Stop Motor F
 MG "Axis F setup done"
+ae[5]=0
 EN
 REM Axis F done
 REM ----------------------------------------------------------------------------
 REM Axis G - Stepper Motor setup
 REM Z-axis of a three-axis linear platform for fiber-source positioning
 #SetupG
+ae[6]=1
 MTG=-2.5; 'Stepper motor with active high step pulses, reversed direction
 LCG=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
 LDG=1;		  'Forward limit switch disabled, Reverse limit switch enabled
 AGG=1;		  'D4140 stepper amplifier - 0.85 A phase current
 SPG=10000;	'Value of jog speed in encoder counts/second
+speed[6]=10000; 'sync embedded speed array
 STG;	      'SAFETY: Stop Axis G
 MOG;		    'SAFETY: Stop Motor G
 MG "Axis G setup done"
+ae[6]=0
 EN
 REM Axis G done
 
@@ -393,6 +411,7 @@ REM ----------------------------------------------------------------------------
 REM Axis A - ANT
 REM ----------------------------------------------------------------------------
 #HomeA
+ae[0]=1
 MG "Home Motor A (ANT) started"
 HVA=hspd[0]
 SHA
@@ -420,9 +439,11 @@ ENDIF
 MG "Setting encoder to zero position."
 DPA=0
 MG "Motor A (ANT) homed."
+ae[0]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveA
+ae[0]=1
 SPA=speed[0]
 ACA=accel[0] 
 DCA=decel[0]
@@ -446,6 +467,7 @@ etime0=TIME
 dtime0=etime0-stime0
 tcon=1000000/_TM
 MG "Motor A (ANT) MOVE to ",_TPA," in ",dtime0/tcon," sec"
+ae[0]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackA
@@ -453,13 +475,16 @@ MG "Motor A (ANT) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopA
+ae[0]=1
 STA
 MG "Motor A STOP"
+ae[0]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis B - ATS
 REM ----------------------------------------------------------------------------
 #HomeB
+ae[1]=1
 MG "Home Motor B (ATS) started"
 HVB=hspd[1]
 SHB
@@ -493,9 +518,11 @@ ENDIF
 MG "Setting encoder to zero position."
 DPB=0
 MG "Motor B (ATS) homed."
+ae[1]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveB
+ae[1]=1
 SPB=speed[1]
 ACB=accel[1]
 DCB=decel[1]
@@ -511,6 +538,7 @@ etime1=TIME
 dtime1=etime1-stime1
 tcon=1000000/_TM
 MG "Motor B (ATS) MOVE to ",_TPB," in ",dtime1/tcon," sec"
+ae[1]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackB
@@ -518,13 +546,16 @@ MG "Motor B TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopB
+ae[1]=1
 STB
 MG "Motor B STOP"
+ae[1]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis C - AVS
 REM ----------------------------------------------------------------------------
 #HomeC
+ae[2]=1
 MG "Home Motor C (AVS) started"
 HVC=hspd[2]
 SHC
@@ -551,9 +582,11 @@ ENDIF
 MG "Setting encoder to zero position."
 DPC=0
 MG "Motor C (AVS) homed."
+ae[2]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveC
+ae[2]=1
 SPC=speed[2]
 ACC=accel[2]
 DCC=decel[2]
@@ -569,6 +602,7 @@ etime2=TIME
 dtime2=etime2-stime2
 tcon=1000000/_TM
 MG "Motor C (AVS) MOVE to ",_TPC," in ",dtime2/tcon," sec"
+ae[2]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackC
@@ -576,13 +610,16 @@ MG "Motor C (AVS) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopC
+ae[2]=1
 STC
 MG "Motor C (AVS) STOP"
+ae[2]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis D - ALAR
 REM ----------------------------------------------------------------------------
 #HomeD
+ae[3]=1
 MG "Home Axis D (ALAR) started"
 HVD=hspd[3]
 SHD
@@ -603,9 +640,11 @@ ENDIF
 MG "Setting encoder to zero position."
 DPD=0
 MG "Motor D (ALAR) homed."
+ae[3]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveD
+ae[3]=1
 SPD=speed[3]
 ACD=accel[3]
 DCD=decel[3]
@@ -621,9 +660,11 @@ etime3=TIME
 dtime3=etime3-stime3
 tcon=1000000/_TM
 MG "Motor D (ALAR) MOVE to ",_TPD," in ",dtime3/tcon," sec"
+ae[3]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackD
+ae[3]=1
 REM D will track a dmd consisting of a rotational target and a rot velocity.
 REM simply JG at the expected velocity and use IP to adjust the
 REM absolute position as needed.
@@ -636,17 +677,21 @@ IF (@ABS[(Dtarget[0]-_TPD)]>DIPLim)
 ELSE
  MG "Motor D TRACK  IP adj by  ", Dtarget[0]-_TPD
  IPD=Dtarget[0]-_TPD
+ ae[3]=0
 ENDIF
 EN
 REM ----------------------------------------------------------------------------
 #StopD
+ae[3]=1
 STD
 MG "Motor D (ALAR) STOP"
+ae[3]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis E - FSP-X
 REM ----------------------------------------------------------------------------
 #HomeE
+ae[4]=1
 MG "Home Axis E (FSP-X) starting"
 SHE
 IF (_LRE=0); ' If already on the limit switch'
@@ -679,9 +724,11 @@ MG "Setting here as 0"
 DPE=0
 FLE=195000; 'Setting a soft limit to protect the stage
 MG "Motor E (FSP-X) homed",_TDE," OK",{^22}{^10},":"
+ae[4]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveE
+ae[4]=1
 SPE=speed[4]
 ACE=accel[4]
 DCE=decel[4]
@@ -697,6 +744,7 @@ etime4=TIME
 dtime4=etime4-stime4
 tcon=1000000/_TM
 MG "Motor E (FSP-X) MOVE to ",_TDE," in ",dtime4/tcon," sec"
+ae[4]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackE
@@ -704,13 +752,16 @@ MG "Motor E (FSP-X) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopE
+ae[4]=1
 STE
 MG "Motor E (FSP-X) STOP"
+ae[4]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis F - FSP-Y
 REM ----------------------------------------------------------------------------
 #HomeF
+ae[5]=1
 REM HVF=hspd[5]
 MG "Home Axis F (FSP-Y) starting"
 SHF
@@ -744,9 +795,11 @@ MG "Setting here as 0"
 DPF=0
 FLF=195000; 'Setting a soft limit to protect the stage
 MG "Motor F (FSP-Y) homed",_TDF," OK",{^22}{^10},":"
+ae[5]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveF
+ae[5]=1
 SPF=speed[5]
 ACF=accel[5]
 DCF=decel[5]
@@ -762,6 +815,7 @@ etime5=TIME
 dtime5=etime5-stime5
 tcon=1000000/_TM
 MG "Motor F (FSP-Y) MOVE to ",_TDF," in ",dtime5/tcon," sec"
+ae[5]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackF
@@ -769,13 +823,16 @@ MG "Motor F (FSP-Y) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopF
+ae[5]=1
 STF
 MG "Motor F (FSP-Y) STOP"
+ae[5]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis G - FSP-Z
 REM ----------------------------------------------------------------------------
 #HomeG
+ae[6]=1
 REM HVG=hspd[6]
 MG "Home Axis G (FSP-Z) starting"
 SHG
@@ -809,9 +866,11 @@ MG "Setting here as 0"
 DPG=0
 FLG=195000; 'Setting a soft limit to protect the stage
 MG "Motor G (FSP-Z) homed",_TDG," OK",{^22}{^10},":"
+ae[6]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveG
+ae[6]=1
 SPG=speed[6]
 ACG=accel[6]
 DCG=decel[6]
@@ -827,6 +886,7 @@ etime6=TIME
 dtime6=etime6-stime6
 tcon=1000000/_TM
 MG "Motor G (FSP-Z) MOVE to ",_TDG," in ",dtime6/tcon," sec"
+ae[6]=0
 EN
 REM ----------------------------------------------------------------------------
 #TrackG
@@ -834,6 +894,8 @@ MG "Motor G (FSP-Z) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopG
+ae[6]=1
 STG
 MG "Motor G (FSP-Z) STOP"
+ae[6]=0
 EN

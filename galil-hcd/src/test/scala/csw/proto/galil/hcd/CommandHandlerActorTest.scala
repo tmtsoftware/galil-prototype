@@ -397,15 +397,15 @@ class CommandHandlerActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     CommandHandlerActor.isImmediate("configLinearAxis") shouldBe true
     CommandHandlerActor.isImmediate("setBit") shouldBe true
     CommandHandlerActor.isImmediate("setAO") shouldBe true
+    CommandHandlerActor.isImmediate("faultReset") shouldBe true
 
-    // Long-running commands (not yet implemented)
+    // Long-running commands
     CommandHandlerActor.isImmediate("homeAxis") shouldBe false
     CommandHandlerActor.isImmediate("positionAxis") shouldBe false
     CommandHandlerActor.isImmediate("offsetAxis") shouldBe false
     CommandHandlerActor.isImmediate("selectWheel") shouldBe false
     CommandHandlerActor.isImmediate("trackAxis") shouldBe false
     CommandHandlerActor.isImmediate("stopAxis") shouldBe false
-    CommandHandlerActor.isImmediate("faultReset") shouldBe false
 
     info("All command classifications verified")
   }

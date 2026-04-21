@@ -127,8 +127,24 @@ object InternalStateActor:
    * activeThread when UpdateThreadStatus reports the thread has stopped.
    * This replaces the former UpdateAxisCmdState(activeThread=N) approach and
    * eliminates any hardcoded axis-index-to-thread-number mapping.
+   *
+   * IS also forwards a RegisterAxisThread to ControllerStatusActor (if known)
+   * so CS can interpret per-axis ae[] reads correctly.
    */
   case class RegisterThread(thread: Int, axis: Axis) extends Command
+
+  /**
+   * Wire ControllerStatusActor reference into IS.
+   *
+   * Called once from GalilHcd.initialize() after CS is spawned. Without it,
+   * IS will still function but won't forward thread register/clear events to
+   * CS — which means CS's axis→thread map stays empty and its ae[] decision
+   * logic cannot attribute program errors to specific axes. Sent as a normal
+   * message rather than baked into the constructor because IS is spawned at
+   * HCD construction (before config is loaded), while CS is created later in
+   * initialize().
+   */
+  case class SetStatusActor(statusActor: ActorRef[ControllerStatusActor.Command]) extends Command
 
   /**
    * Report current hardware thread status bitmask (_NO register value).
@@ -261,6 +277,12 @@ class InternalStateActor(
   // detects the thread has stopped. No hardcoded axis↔thread mapping.
   private var threadRegistry: Map[Int, Axis] = Map.empty
   private var lastThreadStatusByte: Int = 0
+
+  // ControllerStatusActor reference, wired in via SetStatusActor after CS is
+  // spawned. None until then; thread register/clear events are not forwarded
+  // until CS is wired. (CS still functions without these — its axis→thread
+  // map stays empty, disabling the per-axis program-error attribution path.)
+  private var statusActor: Option[ActorRef[ControllerStatusActor.Command]] = None
   
   private val log = loggerFactory.getLogger(context)
   
@@ -318,6 +340,11 @@ class InternalStateActor(
 
       case UpdateThreadStatus(threadStatusByte) =>
         handleUpdateThreadStatus(threadStatusByte)
+
+      case SetStatusActor(sa) =>
+        log.info(s"SetStatusActor: wiring CS reference for axis-thread forwarding")
+        statusActor = Some(sa)
+        Behaviors.same
 
       case ReportConnectionStatus(connection, status) =>
         // Update the specific connection field.
@@ -476,10 +503,16 @@ class InternalStateActor(
    * Register a thread as executing a command on behalf of an axis.
    * Sets activeThread on the axis CmdState to the thread number and stores
    * the thread→axis mapping for UpdateThreadStatus to resolve completions.
+   *
+   * Also forwards a RegisterAxisThread to ControllerStatusActor (if wired)
+   * so CS can interpret per-axis ae[] reads on its scan cycle.
    */
   private def handleRegisterThread(thread: Int, axis: Axis): Behavior[Command] =
     log.info(s"RegisterThread: thread=$thread → axis=$axis")
     threadRegistry = threadRegistry + (thread -> axis)
+
+    // Forward to CS so it can correlate ae[axis]==1 with thread-just-cleared events.
+    statusActor.foreach(_ ! ControllerStatusActor.RegisterAxisThread(axis, thread))
 
     // Set activeThread on the axis CmdState immediately so the watcher's
     // initial snapshot reflects the running thread. This prevents premature
@@ -502,6 +535,15 @@ class InternalStateActor(
    * For each registered (thread→axis): if the thread bit is now clear, the
    * thread has finished — set activeThread=0 on the owning axis, remove from
    * registry, and fire CmdStateChanged so the watcher can evaluate its mask.
+   *
+   * Also forwards a ClearAxisThread to ControllerStatusActor (if wired) so
+   * CS can prune its axis→thread map. Sent after CS has already done its
+   * decideAxisAndControllerErrors pass for this scan (CS sends UpdateThreadStatus
+   * last in handleQRResponse), so ordering is: CS reads ae+QR → CS evaluates and
+   * pushes axisErrorMsg → CS sends UpdateThreadStatus → IS clears activeThread
+   * AND tells CS to drop the axis-thread mapping. Watcher sees axisErrorMsg
+   * first (mailbox order from IS), then activeThread=0; mask check fails
+   * correctly even on the same scan.
    */
   private def handleUpdateThreadStatus(threadStatusByte: Int): Behavior[Command] =
     // Find threads that were registered and are now inactive
@@ -513,6 +555,9 @@ class InternalStateActor(
     completed.foreach { (thread, axis) =>
       log.info(s"Thread $thread completed → axis=$axis activeThread→0")
       threadRegistry = threadRegistry - thread
+
+      // Forward to CS so it drops the axis-thread mapping.
+      statusActor.foreach(_ ! ControllerStatusActor.ClearAxisThread(axis))
 
       val oldCmdState = currentState.getCmdState(axis)
       currentState = currentState.updateCmdState(axis, Map("activeThread" -> 0))

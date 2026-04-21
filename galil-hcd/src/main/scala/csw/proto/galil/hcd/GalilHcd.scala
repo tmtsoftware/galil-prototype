@@ -339,21 +339,38 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     //   action rate:  any axis homing/moving/tracking
     val standbyRate = hcdConfig.controller.standbyPollingRateHz
     val actionRate = hcdConfig.controller.actionPollingRateHz
-    
+
+    // Build the set of configured axes (per hcdConfig.activeAxes flags) for CS
+    // to scope its per-scan ae[] reads. CS uses this set to issue
+    // "MG ae[<idx1>],ae[<idx2>],..." for exactly the axes that exist on the
+    // controller, ignoring any unused axis slots.
+    val configuredAxesSet: Set[Axis] =
+      hcdConfig.activeAxes.zipWithIndex.collect {
+        case (true, idx) if idx < Axis.values.length => Axis.values(idx)
+      }.toSet
+
     statusMonitor = ctx.spawn(
       ControllerStatusActor.apply(
         galilConfig,
         internalStateActor,
         loggerFactory,
         commandActor = controllerCommandActor,
+        configuredAxes = configuredAxesSet,
         standbyPollingRateHz = standbyRate,
         actionPollingRateHz = actionRate
       ),
       "ControllerStatusActor"
     )
     statusMonitor ! ControllerStatusActor.SetPolling(enabled = true)
-    log.info(s"ControllerStatusActor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz")
-    
+    log.info(s"ControllerStatusActor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz, " +
+      s"configured axes: ${configuredAxesSet.toSeq.sortBy(_.index).mkString(",")}")
+
+    // Wire IS → CS so IS can forward RegisterAxisThread / ClearAxisThread
+    // events. Must happen after CS is spawned (CS doesn't exist when IS is
+    // constructed at HCD startup). Without this, CS's axis→thread map stays
+    // empty and per-axis program-error attribution from ae[] is disabled.
+    internalStateActor ! InternalStateActor.SetStatusActor(statusMonitor)
+
     // Store configured polling rates in IS
     internalStateActor ! InternalStateActor.UpdateHcdState(
       Map(

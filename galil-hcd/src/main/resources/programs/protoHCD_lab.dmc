@@ -186,6 +186,7 @@ REM ----------------------------------------------------------------------------
 REM Axis A - Stepper Motor setup
 REM continuously rotating with no limits or home?
 #SetupA
+ae[0]=1
 MTA=2.0;     'Stepper motor with active low step pulses
 REM LCA=2;   'Waits for 0 samples after a move is completed, then provides 0% current
 LDA=3;       'Both limit switches disabled
@@ -196,12 +197,14 @@ cpr[0]=400; 'counts in one 360 degree rotation
 STA;         'SAFETY: Stop Axis A
 MOA;         'SAFETY: Stop Motor A
 MG "Axis A setup done"
+ae[0]=0
 EN
 REM Axis A done
 REM ----------------------------------------------------------------------------
 REM Axis B - Stepper Motor setup
 REM continuously rotating with no limits or home
 #SetupB
+ae[1]=1
 MTB=2.0;    'Stepper motor with active low step pulses
 REM LCB=2;  'Waits for 0 samples after a move is completed, then provides 0% current
 LDB=3;      'Both limit switches disabled
@@ -212,133 +215,152 @@ cpr[1]=400; 'counts in one 360 degree rotation
 STB;        'SAFETY: Stop Axis F
 MOB;        'SAFETY: Stop Motor F
 MG "Axis B setup done"
+ae[1]=0
 EN
 REM Axis B done
 '
 #HomeA
-  HVA=hspd[0]
-  SHA
-  IF (mdelay[0]>0)
-    WT mdelay[0]
-  ENDIF
-  DPA=0
-  MG "Motor A Homed",_TDA," OK",{^13}{^10},":"
+ae[0]=1
+HVA=hspd[0]
+SHA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+DPA=0
+MG "Motor A Homed",_TDA," OK",{^13}{^10},":"
+ae[0]=0
 EN
 '
 #HomeB
-  HVB=hspd[1]
-  SHB
-  IF (mdelay[1]>0)
-    WT mdelay[1]
-  ENDIF
-  DPB=0
-  MG "Motor B Homed",_TDB," OK",{^13}{^10},":"
+ae[1]=1
+HVB=hspd[1]
+SHB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+DPB=0
+MG "Motor B Homed",_TDB," OK",{^13}{^10},":"
+ae[1]=0
 EN
 '
 #MoveA
-  SPA=speed[0]
-  ACA=accel[0]
-  DCA=decel[0]
-  SHA
-  PAA=dmd[0]
-  stime0=TIME
-  BGA
-  MCA
-  IF (mdelay[0]>0)
-    WT mdelay[0]
-  ENDIF
-  etime0=TIME
-  dtime0=etime0-stime0
-  tcon=1000000/_TM
-  MG "Motor A MOVE to ",_TDA," in ",dtime0/tcon," sec"
+ae[0]=1
+SPA=speed[0]
+ACA=accel[0]
+DCA=decel[0]
+SHA
+PAA=dmd[0]
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+MG "Motor A MOVE to ",_TDA," in ",dtime0/tcon," sec"
+ae[0]=0
 EN
 '
 #MoveB
-  SPB=speed[1]
-  ACB=accel[1]
-  DCB=decel[1]
-  SHB
-  PAB=dmd[1]
-  stime1=TIME
-  BGB
-  MCB
-  IF (mdelay[1]>0)
-    WT mdelay[1]
-  ENDIF
-  etime1=TIME
-  dtime1=etime1-stime1
-  tcon=1000000/_TM
-  MG "Motor B MOVE to ",_TDB," in ",dtime1/tcon," sec"
+ae[1]=1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=dmd[1]
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B MOVE to ",_TDB," in ",dtime1/tcon," sec"
+ae[1]=0
 EN
 '
 #SelectA
+ae[0]=1
 ' Move rotational device A to one of 8 angular positions (like a filter wheel)
 ' each position is 45 degrees away from the next.
 ' dmd should be an integer between 0 and 7 (though it will wrap fine)
-  SPB=speed[0]
-  ACB=accel[0]
-  DCB=decel[0]
-  SHA
-  PAA=dmd[0]*(cpr[0]/8)
-  stime0=TIME
-  BGA
-  MCA
-    IF (mdelay[0]>0)
-    WT mdelay[0]
-  ENDIF
-  etime0=TIME
-  dtime0=etime0-stime0
-  tcon=1000000/_TM
-  MG "Motor A select #", dmd[0]," move to ",_TDA," in ", dtime0/tcon," sec"
+SPB=speed[0]
+ACB=accel[0]
+DCB=decel[0]
+SHA
+PAA=dmd[0]*(cpr[0]/8)
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+MG "Motor A select #", dmd[0]," move to ",_TDA," in ", dtime0/tcon," sec"
+ae[0]=0
 EN
 '
 #SelectB
+ae[1]=1
 ' Move rotational device B to one of 8 angular positions (like a filter wheel)
 ' each position is 45 degrees away from the next.
 ' dmd should be an integer between 0 and 7 (though it will wrap fine)
-  SPB=speed[1]
-  ACB=accel[1]
-  DCB=decel[1]
-  SHB
-  PAB=dmd[1]*(cpr[1]/8)
-  stime1=TIME
-  BGB
-  MCB
-    IF (mdelay[1]>0)
-    WT mdelay[1]
-  ENDIF
-  etime1=TIME
-  dtime1=etime1-stime1
-  tcon=1000000/_TM
-  MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=dmd[1]*(cpr[1]/8)
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
+ae[1]=0
 EN
 
 #TrackA
+ae[0]=1
 ' A will track a demand consisting of a rotational target and a rot velocity.
 ' initial thoughts are to JG at the expected velocity and use IP to adjust the
 '  absolute position as needed.
-  JGA=Atarget[1]
-  MG "Motor A TRACK  from",_TDA, "  to pos ", Atarget[0], " velo ", Atarget[1]
-  BGA
-  MG "Motor A TRACK  IP adj by  ", Atarget[0]-_TDA
-  IPA=Atarget[0]-_TDA
-  WT 200
-  MG "Motor A TRACK delta rem: ", Atarget[0]-_TDA
+JGA=Atarget[1]
+MG "Motor A TRACK  from",_TDA, "  to pos ", Atarget[0], " velo ", Atarget[1]
+BGA
+MG "Motor A TRACK  IP adj by  ", Atarget[0]-_TDA
+IPA=Atarget[0]-_TDA
+WT 200
+MG "Motor A TRACK delta rem: ", Atarget[0]-_TDA
+ae[0]=0
 EN
 '
 #StopA
 ' a command to stop the motor
-  STA
-  MG "Motor A STOP"
+ae[0]=1
+STA
+MG "Motor A STOP"
+ae[0]=0
 EN
 '
 #TrackB
 ' just a stub
-  MG "Motor B TRACK not supported"
+MG "Motor B TRACK not supported"
 EN
 '
 #StopB
 ' a command to stop the motor
-  STB
-  MG "Motor B STOP"
+ae[1]=1
+STB
+MG "Motor B STOP"
+ae[1]=0
 EN
