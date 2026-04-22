@@ -169,6 +169,28 @@ object InternalStateActor:
     connection: String,
     status: ConnectionStatus
   ) extends Command
+
+  /**
+   * Transition the HCD into Faulted state with a single atomic update.
+   *
+   * Consolidates the bookkeeping that must happen on every Faulted entry:
+   *   - HcdState: state=Faulted, controllerErrorMsg=reason
+   *   - Per-axis AxisState: any axis currently in Homing → Lost (position unknown);
+   *     any axis in Moving or Tracking → Error (interrupted mid-motion)
+   *   - Per-axis AxisCmdState: clearActiveCommand=true on axes that had an active command
+   *
+   * Callers:
+   *   - ControllerStatusActor.decideAxisAndControllerErrors when a controller
+   *     error cannot be attributed to a single axis (0 or 2+ candidates).
+   *   - InternalStateActor.ReportConnectionStatus(Disconnected) handler — self-message
+   *     after the connection field is updated.
+   *   - CommandHandlerActor.handleFaultReset when recovery fails.
+   *
+   * Idempotent: if HcdState is already Faulted, the message still re-applies axis
+   * state transitions (harmless) and the reason text (which may be updated). This
+   * simplifies callers — no need to check current state before sending.
+   */
+  case class EnterFaulted(reason: String) extends Command
   
   // ========================================
   // Responses
@@ -347,26 +369,73 @@ class InternalStateActor(
         Behaviors.same
 
       case ReportConnectionStatus(connection, status) =>
-        // Update the specific connection field.
-        // If either command or status connection is lost, also transition to Faulted
-        // so the HCD state machine reflects non-operational status and commands are
-        // rejected. The fault message names which connection was lost so operators
-        // know what to investigate. Console connection loss does not fault the HCD
-        // (console is excluded from isOperational).
-        val updates: Map[String, Any] = status match
-          case ConnectionStatus.Disconnected if connection != "consoleConnection" =>
-            val lostName = connection match
-              case "commandConnection" => "Command"
-              case "statusConnection"  => "Status"
-              case other               => other
-            Map(
-              connection           -> status,
-              "state"              -> HcdStateEnum.Faulted,
-              "controllerErrorMsg" -> s"Connection lost: $lostName TCP connection disconnected"
-            )
-          case _ =>
-            Map(connection -> status)
-        handleUpdateHcdState(updates, context.system.ignoreRef)
+        // Update the specific connection field. If a command or status
+        // connection is lost, also transition to Faulted via EnterFaulted
+        // (which additionally handles per-axis state transitions).
+        // Console connection loss does not fault the HCD (console is excluded
+        // from isOperational).
+        handleUpdateHcdState(Map(connection -> status), context.system.ignoreRef)
+        if status == ConnectionStatus.Disconnected && connection != "consoleConnection" then
+          val lostName = connection match
+            case "commandConnection" => "Command"
+            case "statusConnection"  => "Status"
+            case other               => other
+          context.self ! EnterFaulted(s"Connection lost: $lostName TCP connection disconnected")
+        Behaviors.same
+
+      case EnterFaulted(reason) =>
+        handleEnterFaulted(reason)
+        Behaviors.same
+
+  /**
+   * Transition the HCD into Faulted state, applying per-axis state transitions
+   * for any axes that were in motion-related states.
+   *
+   * State transitions per SDD Figure 4-2 (parallel to stopCompletionState):
+   *   Homing   → Lost    (position unknown — incomplete homing)
+   *   Moving   → Error   (interrupted mid-motion; was homed, so position known)
+   *   Tracking → Error   (interrupted mid-track)
+   *   Idle, Lost, Error → unchanged
+   *
+   * Also clears activeCommand on any axis that had one, so HMI and subscribers
+   * see that no command is in flight. The CommandWatcher's HcdStateUpdate path
+   * handles CRM notification separately (Error to the command caller).
+   */
+  private def handleEnterFaulted(reason: String): Unit =
+    log.warn(s"EnterFaulted: $reason")
+
+    // HCD-level update
+    val hcdUpdates: Map[String, Any] = Map(
+      "state"              -> HcdStateEnum.Faulted,
+      "controllerErrorMsg" -> reason
+    )
+    handleUpdateHcdState(hcdUpdates, context.system.ignoreRef)
+
+    // Per-axis transitions: iterate configured axes with an active motion state.
+    currentState.axes.foreach { (axis, axisState) =>
+      val newStateOpt: Option[AxisStateEnum] = axisState.axisState match
+        case AxisStateEnum.Homing   => Some(AxisStateEnum.Lost)
+        case AxisStateEnum.Moving   => Some(AxisStateEnum.Error)
+        case AxisStateEnum.Tracking => Some(AxisStateEnum.Error)
+        case _                      => None
+
+      newStateOpt.foreach { newState =>
+        log.info(s"EnterFaulted: axis $axis ${axisState.axisState} → $newState")
+        handleUpdateAxisState(axis,
+          Map("axisState" -> newState),
+          context.system.ignoreRef
+        )
+      }
+
+      // Clear activeCommand if set — regardless of prior axisState.
+      currentState.getCmdState(axis).foreach { cmdState =>
+        if cmdState.activeCommand.isDefined then
+          handleUpdateAxisCmdState(axis,
+            Map("clearActiveCommand" -> true),
+            context.system.ignoreRef
+          )
+      }
+    }
 
   /**
    * Update HCD-level state and notify operational state subscribers.

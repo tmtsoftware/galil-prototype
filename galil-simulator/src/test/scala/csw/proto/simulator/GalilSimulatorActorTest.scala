@@ -56,10 +56,10 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
   // 1. Identity and basic command parsing
   // ==========================================================================
 
-  test("ID should return DMC50040 firmware identification") {
+  test("ID should return DMC50080 firmware identification") {
     val sim = spawnSimulator()
     val response = sendText(sim, "ID")
-    assert(response.contains("DMC50040"), s"ID response should contain DMC50040: $response")
+    assert(response.contains("DMC50080"), s"ID response should contain DMC50080: $response")
     assert(response.contains("Rev 1.2sim"), s"ID response should identify as simulator: $response")
   }
 

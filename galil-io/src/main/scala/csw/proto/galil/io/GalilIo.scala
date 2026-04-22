@@ -78,8 +78,18 @@ abstract class GalilIo {
    *
    * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
    * @return list of (command, reply) from the controller (one pair for each ";" separated command)
+   * @throws IllegalArgumentException if cmd exceeds the controller's per-line command buffer (80 chars)
    */
   def send(cmd: String): List[(String, ByteString)] = {
+    // Galil DMC controllers parse one command line at a time, terminated by \r\n.
+    // The line buffer is 80 characters (includes any compound `;`-separated content).
+    // Sending an over-length line risks truncation or rejection at the controller,
+    // with hard-to-diagnose downstream symptoms. Catch it at the boundary.
+    // (If a future firmware/model changes this, update the constant below.)
+    if (cmd.length > GalilIo.maxCommandLineLength) {
+      throw new IllegalArgumentException(
+        s"Galil command line exceeds ${GalilIo.maxCommandLineLength} chars (${cmd.length}): '$cmd'")
+    }
     val cmds    = cmd.split(';')
     val sendBuf = s"$cmd\r\n".getBytes()
     write(sendBuf)
@@ -274,6 +284,41 @@ object GalilIo {
   // See http://www.galilmc.com/news/software/using-socket-tcpip-or-udp-communication-galil-controllers
   //  val bufSize: Int = 450
   val bufSize: Int = 406
+
+  // Maximum length of a single command line (one \r\n-terminated string).
+  // Per Galil DMC documentation the parser line buffer is 80 characters; this
+  // applies to compound `;`-separated lines as a whole, not per sub-command.
+  // Update if a future controller model documents a different limit.
+  val maxCommandLineLength: Int = 80
+
+  /**
+   * Pack sub-commands into chunks that each fit within maxCommandLineLength
+   * when joined with ';'. Returns a sequence of compound command strings
+   * ready for individual `send()` calls.
+   *
+   * Greedy packing: each chunk is grown until adding the next sub-command
+   * would exceed the line limit. A sub-command longer than the limit by
+   * itself is returned as a single-element chunk (which `send` will then
+   * reject with IllegalArgumentException — letting the caller see exactly
+   * which sub-command is over-length).
+   *
+   * Empty input → empty output.
+   */
+  def chunkCompound(subCommands: Seq[String]): Seq[String] = {
+    val chunks  = scala.collection.mutable.ListBuffer[String]()
+    val current = new StringBuilder
+    subCommands.foreach { cmd =>
+      val addedLen = if (current.isEmpty) cmd.length else current.length + 1 + cmd.length
+      if (current.nonEmpty && addedLen > maxCommandLineLength) {
+        chunks += current.toString
+        current.clear()
+      }
+      if (current.nonEmpty) current.append(';')
+      current.append(cmd)
+    }
+    if (current.nonEmpty) chunks += current.toString
+    chunks.toSeq
+  }
 }
 
 /**

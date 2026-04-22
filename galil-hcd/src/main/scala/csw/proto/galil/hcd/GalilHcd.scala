@@ -870,25 +870,39 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             }
           }
 
-          val cmdString = commands.mkString(";")
-          log.debug(s"Axis $axisName motion config write: $cmdString")
+          // Chunk to respect the controller's 80-char per-line buffer.
+          // The full 7-param compound exceeds 80 chars even with modest values
+          // (e.g. ~102 chars with default values), so chunking is required.
+          val chunks = csw.proto.galil.io.GalilIo.chunkCompound(commands.toSeq)
+          log.debug(s"Axis $axisName motion config write: ${chunks.size} chunk(s): ${chunks.mkString(" | ")}")
 
-          try {
-            val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
-              ref => GalilCommandMessage.SendCommand(cmdString, ref)
-            )
-            val result = Await.result(future, 2.seconds)
-            result.error match {
-              case Some(err) =>
-                log.error(s"Axis $axisName motion config write failed: $err")
-              case None =>
-                log.info(s"Axis $axisName motion config written: " +
-                  s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}, " +
-                  s"decel=${axisConfig.deceleration}, cpr=${axisConfig.countsPerRevolution}")
+          var anyFailed = false
+          val it = chunks.iterator
+          while (it.hasNext && !anyFailed) {
+            val cmdString = it.next()
+            try {
+              val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+                ref => GalilCommandMessage.SendCommand(cmdString, ref)
+              )
+              val result = Await.result(future, 2.seconds)
+              result.error match {
+                case Some(err) =>
+                  log.error(s"Axis $axisName motion config write failed on chunk '$cmdString': $err")
+                  anyFailed = true
+                case None =>
+                  log.debug(s"Axis $axisName chunk OK: $cmdString")
+              }
+            } catch {
+              case ex: Exception =>
+                log.error(s"Axis $axisName motion config write exception on chunk '$cmdString': ${ex.getMessage}")
+                anyFailed = true
             }
-          } catch {
-            case ex: Exception =>
-              log.error(s"Axis $axisName motion config write exception: ${ex.getMessage}")
+          }
+          if (!anyFailed) {
+            log.info(s"Axis $axisName motion config written: " +
+              s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}, " +
+              s"decel=${axisConfig.deceleration}, cpr=${axisConfig.countsPerRevolution} " +
+              s"(${chunks.size} chunk(s))")
           }
       }
     }

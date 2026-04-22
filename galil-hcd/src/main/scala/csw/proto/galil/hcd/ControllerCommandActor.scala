@@ -321,12 +321,27 @@ private[hcd] object ControllerCommandActor {
                           error = Some(errMsg))
 
                       case None =>
-                        // Step 3: Send XQ command
-                        val xqCmd = s"XQ #$label,$thread"
-                        log.info(s"ExecuteProgram: $xqCmd")
+                        // Step 3: Send XQ + per-thread _XQ query as ONE compound command.
+                        //
+                        // Why compound: with two separate sends, the controller may have
+                        // executed and finished the embedded program in the brief gap
+                        // between XQ accept and our follow-up MG query, especially for
+                        // very short programs like #StopX. The compound runs the MG
+                        // immediately after XQ accept (same line buffer), giving an
+                        // atomic "did the thread really start?" answer.
+                        //
+                        // Why _XQ<n> (not _NO): empirically, on this controller firmware,
+                        // _NO can show stale "thread active" state for many seconds when
+                        // multiple threads are running and one CMDERRs. _XQ<n> is the
+                        // authoritative per-thread status: a non-(-1) line number means
+                        // the thread is genuinely executing.
+                        val xqCmd = s"XQ #$label,$thread;MG _XQ$thread"
+                        log.debug(s"ExecuteProgram: sending $xqCmd")
                         val xqResponses = galilIo.send(xqCmd)
 
-                        // Check for XQ rejection (? response)
+                        // Compound returns 2 paired responses. The XQ part responds with
+                        // ":" (success) or "?" (rejection). The MG part responds with the
+                        // line number or "?" if the prior XQ failed (compound aborts).
                         val xqError = xqResponses.find { case (_, bs) =>
                           bs.utf8String.trim.startsWith("?")
                         }
@@ -335,15 +350,28 @@ private[hcd] object ControllerCommandActor {
                             log.warn(s"ExecuteProgram: $xqCmd rejected: ${bs.utf8String.trim}")
                             replyTo ! GalilCommandMessage.ExecuteProgramResult(
                               thread = thread, threadWasActive = false,
-                              error = Some(s"$xqCmd rejected: ${bs.utf8String.trim}"))
+                              error = Some(s"XQ #$label,$thread rejected: ${bs.utf8String.trim}"))
 
                           case None =>
-                            // Step 4: Confirm thread started (queries MG _NO, updates IS)
-                            val threadStatus = queryThreadStatus()
-                            val threadBit = 1 << thread
-                            val threadActive = (threadStatus & threadBit) != 0
-                            log.info(s"ExecuteProgram: $xqCmd — _NO=0x${threadStatus.toHexString}, " +
-                              s"thread $thread ${if threadActive then "ACTIVE" else "already finished"}")
+                            // Step 4: parse the second response (MG _XQ<n> result)
+                            // to determine whether the thread is actually running.
+                            // -1 means the program completed (or never ran) before the
+                            // compound's MG executed — unusual for non-trivial programs.
+                            val mgResponse = xqResponses(1)._2.utf8String.trim
+                            val xqLine = try mgResponse.toDouble.toInt catch {
+                              case _: NumberFormatException =>
+                                log.warn(s"ExecuteProgram: MG _XQ$thread returned unexpected value: '$mgResponse'")
+                                -1
+                            }
+                            val threadActive = xqLine >= 0
+
+                            // No threadStatus push to IS here. CS's per-scan _XQ-derived
+                            // synthesized threadStatus byte is the single source of truth
+                            // (since _NO is empirically unreliable post-CMDERR). The next
+                            // QR scan in CS reports accurate state within ~100ms.
+
+                            log.info(s"ExecuteProgram: #$label on thread $thread — " +
+                              s"_XQ$thread=$xqLine, ${if threadActive then "ACTIVE" else "already finished"}")
 
                             replyTo ! GalilCommandMessage.ExecuteProgramResult(
                               thread = thread, threadWasActive = threadActive, error = None)

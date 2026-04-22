@@ -27,6 +27,55 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
     override def close(): Unit = ()
   }
+
+  /**
+   * Test IO stub that simulates `MG _XQ<n>` and `MG ae[i]` responses based on
+   * a mutable set of "live threads" the test controls. Used by tests that
+   * inject QRResponse and need CS's per-scan _XQ query to return sensible
+   * values matching the test scenario.
+   *
+   * Usage:
+   *   val liveThreads = scala.collection.mutable.Set[Int](1)  // thread 1 active
+   *   val io = stubIoWithLiveThreads(liveThreads)
+   *   ... send QRResponse ...
+   *   liveThreads -= 1  // simulate thread completion
+   *   ... send another QRResponse ...
+   *
+   * Other MG queries (and any non-MG send) return ":" like noOpIo.
+   */
+  private def stubIoWithLiveThreads(liveThreads: scala.collection.mutable.Set[Int]): csw.proto.galil.io.GalilIo =
+    new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      private var pendingResponse: ByteString = ByteString(":")
+
+      override protected def write(sendBuf: Array[Byte]): Unit = {
+        val cmd = new String(sendBuf).trim
+        // Recognize compound MG _XQ<n>,_XQ<m>,... — return space-separated
+        // 1.0000 (running) / -1.0000 (stopped) per liveThreads.
+        if (cmd.startsWith("MG _XQ")) {
+          val args = cmd.drop(3).split(',').map(_.trim)
+          val values = args.map { arg =>
+            if (arg.startsWith("_XQ") && arg.length > 3)
+              scala.util.Try(arg.drop(3).toInt).toOption match
+                case Some(n) => if (liveThreads.contains(n)) "1.0000" else "-1.0000"
+                case None    => "-1.0000"
+            else "0.0000"
+          }
+          pendingResponse = ByteString(values.mkString(" ") + "\r\n:")
+        } else if (cmd.startsWith("MG ae[")) {
+          // Return 0.0000 for each ae[] arg (the unit tests don't exercise
+          // attribution paths that depend on ae values; they verify thread
+          // bookkeeping. If a test needs richer ae behavior, extend this stub).
+          val args = cmd.drop(3).split(',').map(_.trim)
+          pendingResponse = ByteString(Seq.fill(args.length)("0.0000").mkString(" ") + "\r\n:")
+        } else {
+          pendingResponse = ByteString(":")
+        }
+      }
+      override protected def read(): ByteString = pendingResponse
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
   
   override def afterAll(): Unit =
     testKit.shutdownTestKit()
@@ -329,13 +378,20 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
+    // Stub IO with thread 1 reporting as alive via _XQ1.
+    val liveThreads = scala.collection.mutable.Set[Int](1)
     val statusMonitor = testKit.spawn(
-      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    // Wire IS→CS forwarding so RegisterThread propagates to CS's axisThreads.
+    internalState ! InternalStateActor.SetStatusActor(statusMonitor)
+    Thread.sleep(20)
     // Register axis A on thread 1 (as CommandHandlerActor does after XQ #HomeA,1)
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)
-    // QR reports thread 1 active (bit 1 = 0x02)
+    // QR reports thread 1 active (bit 1 = 0x02). Synthesized byte from _XQ
+    // will also have bit 1 set since liveThreads contains 1.
     val dataRecord = createExtendedDataRecord(threadStatus = 0x02.toByte)
     statusMonitor ! ControllerStatusActor.QRResponse(dataRecord)
     Thread.sleep(100)
@@ -351,9 +407,13 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
+    val liveThreads = scala.collection.mutable.Set[Int](1, 2)
     val statusMonitor = testKit.spawn(
-      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    internalState ! InternalStateActor.SetStatusActor(statusMonitor)
+    Thread.sleep(20)
     // Register A on thread 1, B on thread 2 (as CommandHandlerActor does after XQ)
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     internalState ! InternalStateActor.RegisterThread(2, Axis.B)
@@ -374,9 +434,13 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
+    val liveThreads = scala.collection.mutable.Set[Int](1)
     val statusMonitor = testKit.spawn(
-      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    internalState ! InternalStateActor.SetStatusActor(statusMonitor)
+    Thread.sleep(20)
     // Register axis A on thread 1, then simulate QR with thread active
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)
@@ -386,7 +450,10 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val probeA1 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA1.ref)
     probeA1.receiveMessage().get.activeThread should be(1)
-    // Now thread 1 stops — registry clears it and sets activeThread=0
+    // Now thread 1 stops — registry clears it and sets activeThread=0.
+    // Update both the QR byte (controller's view) AND liveThreads (so _XQ
+    // returns -1 for thread 1). The synthesized byte will be 0.
+    liveThreads -= 1
     val dr2 = createExtendedDataRecord(threadStatus = 0x00.toByte)
     statusMonitor ! ControllerStatusActor.QRResponse(dr2)
     Thread.sleep(100)
@@ -399,9 +466,13 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A)
     ))
+    val liveThreads = scala.collection.mutable.Set[Int](1)
     val statusMonitor = testKit.spawn(
-      ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
+    internalState ! InternalStateActor.SetStatusActor(statusMonitor)
+    Thread.sleep(20)
     // Register axis A on thread 1 before sending QR data
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)

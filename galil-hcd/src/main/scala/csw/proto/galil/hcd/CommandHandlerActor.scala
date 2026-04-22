@@ -226,19 +226,31 @@ object CommandHandlerActor {
       stateUpdates("inPositionThreshold") = param.head.toDouble
     }
 
-    // Send compound command to controller if there are any Galil commands
+    // Send compound command(s) to controller if there are any Galil commands.
     // GalilIo.send() handles splitting compound responses correctly, even when
     // multiple ":" arrive in a single TCP packet (e.g. for assignment commands).
+    //
+    // Chunking via GalilIo.chunkCompound respects the controller's per-line
+    // buffer (80 chars). With max-int numeric values, all five motor params
+    // would exceed 80 chars; the helper packs sub-commands greedily and we
+    // send each chunk separately.
     if (commands.nonEmpty) {
-      val cmdString = commands.mkString(";")
-      log.info(s"configAxis $axis: sending $cmdString")
-      sendToController(ciActor, cmdString, log, askTimeout, askScheduler) match {
-        case Success(_) =>
-          log.info(s"configAxis $axis: controller updated")
-        case Failure(ex) =>
-          crm.updateCommand(Error(runId, s"configAxis $axis failed: ${ex.getMessage}"))
-          return
+      val chunks = csw.proto.galil.io.GalilIo.chunkCompound(commands.toSeq)
+      var failed = false
+      val it = chunks.iterator
+      while (it.hasNext && !failed) {
+        val cmdString = it.next()
+        log.info(s"configAxis $axis: sending $cmdString")
+        sendToController(ciActor, cmdString, log, askTimeout, askScheduler) match {
+          case Success(_) =>
+            log.debug(s"configAxis $axis: chunk OK")
+          case Failure(ex) =>
+            crm.updateCommand(Error(runId, s"configAxis $axis failed: ${ex.getMessage}"))
+            failed = true
+        }
       }
+      if (failed) return
+      log.info(s"configAxis $axis: controller updated (${chunks.size} chunk(s))")
     }
 
     // Update InternalState with all configured parameters
@@ -801,10 +813,11 @@ object CommandHandlerActor {
         // be declared complete without confirmation from at least one full scan.)
         val thread = execResult.thread
         if execResult.threadWasActive then
-          log.info(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
+          log.debug(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
         else
-          log.info(s"$commandName $axis: thread $thread already cleared in MG _NO " +
-            s"(completed faster than _NO query); registering and spawning watcher to await next scan")
+          log.warn(s"$commandName $axis: thread $thread reported _XQ=-1 immediately after XQ " +
+            s"(program may have completed instantly or never reached a meaningful line); " +
+            s"registering and spawning watcher to await next scan")
         internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
           loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
@@ -1709,19 +1722,17 @@ object CommandHandlerActor {
           log.info("faultReset None: all connections recovered — HCD Ready")
           crm.updateCommand(Completed(runId))
         else
-          // One or both still down — build a clear error message and stay Faulted
+          // One or both still down — build a clear error message and stay Faulted.
+          // Use EnterFaulted so per-axis state transitions (Homing→Lost,
+          // Moving/Tracking→Error) are re-applied consistently with other
+          // fault-entry paths. No SafeAllMotors attempt here — at least one
+          // connection is known bad, so sending ST;MO would IOException.
           val failures = Seq(
             if !cmdOk then Some(s"Command: ${cmdResult.error.getOrElse("failed")}") else None,
             if !stsOk then Some(s"Status: ${stsResult.error.getOrElse("failed")}") else None
           ).flatten.mkString("; ")
           val errorMsg = s"Connection recovery failed — $failures"
-          internalStateActor ! InternalStateActor.UpdateHcdState(
-            Map(
-              "state"              -> HcdStateEnum.Faulted,
-              "controllerErrorMsg" -> errorMsg
-            ),
-            stateUpdateAdapter
-          )
+          internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
           log.error(s"faultReset None: $errorMsg")
           crm.updateCommand(Error(runId, errorMsg))
 

@@ -414,6 +414,33 @@ object GalilSimulatorActor {
     val newThreadStatus = state.threadStatus | (1 << thread)
     var newState = state.copy(threadStatus = newThreadStatus)
 
+    // Set ae[idx]=1 at program entry for axis-affecting labels (mirrors the
+    // embedded code convention: each #MoveX/#HomeX/#StopX/#SetupX/#TrackX/
+    // #SelectX program writes ae[idx]=1 at entry and clears it on success).
+    // ae[idx] is cleared back to 0 in completeThread (or in advanceMotion for
+    // motion-arrival completions) when the corresponding thread terminates.
+    // The HCD's per-axis attribution logic in ControllerStatusActor relies
+    // on this signal.
+    //
+    // _threadAxis[N]=axisIdx is a thread→axis map kept distinct from
+    // _axisThread[idx]=thread (which is owned by the existing motion logic
+    // for Move/Select). Keeping them separate avoids overwriting Move's
+    // _axisThread when a later Stop is XQ'd on the same axis.
+    val axisAffecting: Option[Char] =
+      if (label.startsWith("Move") || label.startsWith("Home") ||
+          label.startsWith("Stop") || label.startsWith("Setup") ||
+          label.startsWith("Track") || label.startsWith("Select"))
+        Some(label.last)
+      else None
+    axisAffecting.foreach { axis =>
+      val idx = axis - 'A'
+      newState = newState.copy(
+        embeddedVars = newState.embeddedVars
+          + (s"ae[$idx]" -> 1.0)
+          + (s"_threadAxis[$thread]" -> idx.toDouble)
+      )
+    }
+
     label match {
       case "Init" =>
         newState = initializeEmbeddedVars(newState)
@@ -499,6 +526,8 @@ object GalilSimulatorActor {
         // Clear the thread that was driving motion on this axis (if any).
         // Without this, the move thread leaks forever since advanceMotion
         // will never reach the target to clear it naturally.
+        // Also clear ae[idx]=0 (forcibly-terminated, no success path) and
+        // remove _threadAxis[mt] for the same reason as in handleMO.
         val moveThreadKey = s"_axisThread[$idx]"
         newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
           val mt = moveThreadNum.toInt
@@ -506,7 +535,10 @@ object GalilSimulatorActor {
           val clearedStatus = newState.threadStatus & ~(1 << mt)
           newState = newState.copy(
             threadStatus = clearedStatus,
-            embeddedVars = newState.embeddedVars - moveThreadKey
+            embeddedVars = newState.embeddedVars
+              - moveThreadKey
+              - s"_threadAxis[$mt]"
+              + (s"ae[$idx]" -> 0.0)
           )
         }
         scheduleThreadComplete(timer, thread, 50.millis)
@@ -561,7 +593,26 @@ object GalilSimulatorActor {
     val threadStr = cmdString.drop(2).trim
     val thread = if (threadStr.nonEmpty) threadStr.toInt else 0
     val newThreadStatus = state.threadStatus & ~(1 << thread)
-    (formatReply(None), state.copy(threadStatus = newThreadStatus))
+
+    // HX is a forcible halt — the embedded program never reaches its success
+    // path. Clear the associated axis's ae[idx] (mirrors the embedded
+    // convention of "ae cleared on success only" — a halted program leaves
+    // ae=1 on real hardware, but the HCD's checkAndInterrupt path follows up
+    // with state changes that recover from this anyway, so it's reasonable
+    // to clear here for cleaner simulator state).
+    val threadAxisKey = s"_threadAxis[$thread]"
+    val updatedVars = state.embeddedVars.get(threadAxisKey) match {
+      case Some(idxDouble) =>
+        val idx = idxDouble.toInt
+        state.embeddedVars - threadAxisKey + (s"ae[$idx]" -> 0.0)
+      case None =>
+        state.embeddedVars
+    }
+
+    (formatReply(None), state.copy(
+      threadStatus = newThreadStatus,
+      embeddedVars = updatedVars
+    ))
   }
 
   // ========================================
@@ -581,9 +632,49 @@ object GalilSimulatorActor {
   private def handleMG(state: SimState, cmdString: String): String = {
     val args = cmdString.drop(3).trim
 
-    args match {
+    // Compound: "MG arg1,arg2,arg3" returns space-separated values on one line.
+    // Each arg goes through resolveMgArg independently. If a single arg contains
+    // no comma, this still works — split returns a singleton sequence.
+    if (args.contains(',')) {
+      args.split(',').map(_.trim).map(arg => resolveMgArg(state, arg)).mkString(" ")
+    } else {
+      resolveMgArg(state, args)
+    }
+  }
+
+  /**
+   * Resolve a single MG sub-argument (not containing commas) to its formatted value.
+   *
+   * Supported patterns:
+   *   _NO         → thread bitmask
+   *   _XQ<n>      → per-thread state (1.0 if running, -1.0 if stopped)
+   *   _TDx        → axis x step position
+   *   _TPx        → axis x step position
+   *   TIME        → system time counter
+   *   _TM         → sample period (constant 1000.0)
+   *   @AN[n]      → analog input (simulated 2.5V)
+   *   ae[i], speed[i], etc. → embedded array variable
+   *   <scalar>    → embedded scalar variable
+   */
+  private def resolveMgArg(state: SimState, arg: String): String = {
+    arg match {
       case "_NO" =>
         f"${state.threadStatus.toDouble}%.4f"
+
+      case s if s.startsWith("_XQ") && s.length > 3 =>
+        // _XQ<n>: per-thread state. Real controller returns the line number
+        // currently executing, or -1 if the thread is stopped. The HCD only
+        // distinguishes "running" (>=0) from "stopped" (-1), so 1.0 is a fine
+        // placeholder for "running" — we don't simulate per-line position.
+        val threadStr = s.drop(3)
+        scala.util.Try(threadStr.toInt).toOption match {
+          case Some(thread) if thread >= 0 && thread <= 7 =>
+            val active = (state.threadStatus & (1 << thread)) != 0
+            if (active) "1.0000" else "-1.0000"
+          case _ =>
+            println(s"[SIM] MG: malformed _XQ query '$s'")
+            "-1.0000"
+        }
 
       case s if s.startsWith("_TD") =>
         val axis = s.last
@@ -600,11 +691,8 @@ object GalilSimulatorActor {
         "1000.0000"
 
       case s if s.startsWith("@AN") =>
-        // Single or compound: "@AN[1]" or "@AN[1],@AN[2],...,@AN[8]"
-        // Hardware returns space-separated values on one line: "2.5000 2.5000 ..."
-        val count = s.split(',').count(_.trim.startsWith("@AN"))
-        if (count <= 1) "2.5000"
-        else Seq.fill(count)("2.5000").mkString(" ")
+        // Single channel (compound is now handled by the top-level split in handleMG)
+        "2.5000"
 
       case s if s.contains('[') =>
         val value = state.embeddedVars.getOrElse(s, 0.0)
@@ -646,9 +734,17 @@ object GalilSimulatorActor {
     newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
       val mt = moveThreadNum.toInt
       val clearedStatus = newState.threadStatus & ~(1 << mt)
+      // Also clear ae[idx] — the leaked motion thread is being terminated
+      // by MO; the embedded program never reaches its success path so we
+      // mirror that by clearing ae here. Also remove _threadAxis[mt] so
+      // it doesn't leak (completeThread won't run for this forcibly-killed
+      // thread).
       newState = newState.copy(
         threadStatus = clearedStatus,
-        embeddedVars = newState.embeddedVars - moveThreadKey
+        embeddedVars = newState.embeddedVars
+          - moveThreadKey
+          - s"_threadAxis[$mt]"
+          + (s"ae[$idx]" -> 0.0)
       )
     }
     (formatReply(None), newState)
@@ -942,7 +1038,13 @@ object GalilSimulatorActor {
             stopCode = 1
           )
           newState = newState.copy(axes = newState.axes + (axisChar -> newAx))
-          newState = newState.copy(embeddedVars = newState.embeddedVars - threadKey)
+          // Clear ae[idx]=0 here (success path) and remove _axisThread.
+          // Both happen here rather than in completeThread because advanceMotion
+          // removes _axisThread before completeThread runs, so the reverse
+          // lookup in completeThread would otherwise miss this case.
+          newState = newState.copy(embeddedVars =
+            newState.embeddedVars - threadKey + (s"ae[$idx]" -> 0.0)
+          )
 
           // Schedule thread completion — simulates MC + EN + optional mdelay
           maybeThread.foreach { thread =>
@@ -982,7 +1084,24 @@ object GalilSimulatorActor {
   ): Behavior[GalilSimulatorCommand] = {
     val newThreadStatus = state.threadStatus & ~(1 << thread)
     println(s"[SIM] Thread $thread completed (_NO: 0x${state.threadStatus.toHexString} → 0x${newThreadStatus.toHexString})")
-    simulate(timer, state.copy(threadStatus = newThreadStatus))
+
+    // Direct lookup: _threadAxis[N] tells us which axis this thread was
+    // associated with (set in handleXQ for axis-affecting labels). Clear
+    // ae[idx] back to 0 to mirror the embedded program success path, and
+    // remove the now-stale _threadAxis entry.
+    val threadAxisKey = s"_threadAxis[$thread]"
+    val updatedVars = state.embeddedVars.get(threadAxisKey) match {
+      case Some(idxDouble) =>
+        val idx = idxDouble.toInt
+        state.embeddedVars - threadAxisKey + (s"ae[$idx]" -> 0.0)
+      case None =>
+        state.embeddedVars
+    }
+
+    simulate(timer, state.copy(
+      threadStatus = newThreadStatus,
+      embeddedVars = updatedVars
+    ))
   }
 
   // ========================================
