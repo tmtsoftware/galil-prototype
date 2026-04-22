@@ -1,8 +1,9 @@
 # GalilMotion HCD
 
 The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500x0
-motion controllers. It manages embedded program execution, state monitoring, and
-CSW event publishing for axes configured as either linear or rotating mechanisms.
+motion controllers. It manages embedded program execution, state monitoring, error
+detection, fault recovery, and CSW event publishing for axes configured as either
+linear or rotating mechanisms.
 
 See the [CSW documentation](https://tmtsoftware.github.io/csw/6.0.0/) for how HCDs
 are defined and used in the TMT software architecture.
@@ -11,31 +12,41 @@ are defined and used in the TMT software architecture.
 
 The HCD uses two layers of configuration:
 
-1. **CSW container config** (`GalilHcd.conf`) — Component registration and program file paths.
-   This is the file passed to `ContainerCmd` with `--local`.
+1. **CSW container config** (`GalilHcd.conf` / `GalilHcdSim.conf`) — Component
+   registration. This is the file passed to `ContainerCmd` with `--local`. It is the
+   sole authoritative source of the CSW prefix and component identity.
 
-2. **HCD application config** (`GalilHcdConfig*.conf`) — Controller connection, axis setup,
-   polling rates, and simulation mode. Selected via system property.
+2. **HCD application config** (`GalilHcdConfig*.conf`) — Controller connection, axis
+   setup, polling rates, and simulation mode. Selected via the `-Dgalil.config.path=`
+   system property.
 
 ### Config Files (in `src/main/resources/`)
 
 | File | Purpose |
 |------|---------|
-| `GalilHcd.conf` | CSW container config (hardware component registration) |
-| `GalilHcdSim.conf` | CSW container config (simulator — different prefix to avoid Location Service conflicts) |
+| `GalilHcd.conf` | CSW container config (hardware component registration: `aps.ICS.HCD.GalilMotion.1`) |
+| `GalilHcdSim.conf` | CSW container config (simulator — distinct prefix `aps.ICS.HCD.GalilMotion.Sim` to avoid Location Service conflicts) |
 | `GalilHcdConfig.conf` | Default HCD config (simulator mode) |
-| `GalilHcdConfig-Simulator.conf` | Simulator at 127.0.0.1:8888 |
-| `GalilHcdConfig-Hardware.conf` | Hardware controller at 192.168.86.41:23 |
+| `GalilHcdConfig-Simulator.conf` | Simulator at 127.0.0.1:8888 (lab axis layout) |
+| `GalilHcdConfig-Hardware.conf` | Lab DMC-500x0 (DMC-50040, 4 axes) at 192.168.86.41:23 |
+| `GalilHcdConfig-STB.conf` | STB DMC-4080 (8 channels, 7 active axes A-G) at 192.168.42.100:23 |
+| `GalilHcdConfig-STBsim.conf` | Simulator at 127.0.0.1:8888 with the STB axis layout (7 active axes) |
 
 ### Selecting a Configuration
 
 Set the system property `-Dgalil.config.path` to choose which HCD config to load:
 
 ```bash
-# Use hardware config
+# Use lab hardware (DMC-500x0)
 -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 
-# Use simulator config (or just use the default)
+# Use STB hardware (DMC-4080, 7 active axes)
+-Dgalil.config.path=GalilHcdConfig-STB.conf
+
+# Use simulator with STB axis layout
+-Dgalil.config.path=GalilHcdConfig-STBsim.conf
+
+# Use simulator with lab axis layout (or just use the default)
 -Dgalil.config.path=GalilHcdConfig-Simulator.conf
 ```
 
@@ -47,7 +58,7 @@ If the property is not set, the HCD loads `GalilHcdConfig.conf` (the default, si
 controller {
   host = [192, 168, 86, 41]     # IP as integer array
   port = 23                      # TCP port
-  id = 1                         # Controller instance ID (affects HMI port: 9090 + id)
+  id = 1                         # Controller instance ID (affects HMI port: 9090 + id for hardware)
   embeddedProgram = "protoHCD_lab.dmc"
   standbyPollingRateHz = 1.0     # QR rate when all axes idle
   actionPollingRateHz = 10.0     # QR rate when any axis active
@@ -109,6 +120,9 @@ exact integer slot arithmetic.
 - **configRotatingAxis** — Configure axis as rotating with approach algorithm.
 - **setBit** — Set or clear a digital output bit. Parameters: `address` (int, 1-based per
   Galil convention), `value` (int: 1=set, 0=clear). Sends `SB n` or `CB n` to controller.
+- **setAO** — Set an analog output channel. Parameters: `address` (int), `value` (float).
+- **faultReset** — Recover from a Faulted HCD state. Parameter: `severity` (Choice of
+  `None`, `Init`, `Minor`, `Major`). See [Fault Recovery](#fault-recovery) below for behavior.
 
 ### Long-Running Commands
 
@@ -117,13 +131,18 @@ exact integer slot arithmetic.
 | **positionAxis** | Move to absolute count position | Idle, inPosition, thread released |
 | **offsetAxis** | Move by relative distance | Idle, inPosition, thread released |
 | **homeAxis** | Home axis to reference | Idle, not moving, thread released |
-| **stopAxis** | Halt active motion | Idle, not moving, thread released |
+| **stopAxis** | Halt active motion | Idle (or Lost), not moving, thread released |
 | **trackAxis** | Jog-mode tracking | Tracking, thread released (motor continues) |
-| **selectWheel** | Position to discrete slot (0-7) | Idle, not moving, thread released |
+| **selectWheel** | Position to discrete slot (0-7) | Idle, inPosition, thread released |
 | **positionWheel** | Position to angular demand (degrees) | Idle, inPosition, thread released |
 
 Move commands compute physics-based timeouts from the axis motor configuration
 (trapezoidal velocity profile with 2x safety factor, 3-second minimum).
+
+When the HCD is in `Faulted` state, every command except `faultReset` is rejected
+with `Invalid(OtherIssue("HCD Faulted: <msg>"))`. The check is enforced both in CSW
+`validateCommand` and in `HmiServer.handleCommandRequest` (the HMI bypasses CSW
+validation by going directly to `CommandHandlerActor`).
 
 ### Rotating Axis Approach Algorithm
 
@@ -143,27 +162,216 @@ Rotating or if `countsPerRevolution` is not set.
 
 ---
 
+## Axis State Machine
+
+Per SDD Figure 4-2, with the implementation refinements documented in
+`StateModel.AxisStateEnum`:
+
+```
+              ┌────────┐  homeAxis  ┌─────────┐  success     ┌──────┐
+   startup → │  Lost  │ ────────→  │ Homing  │ ────────────→│ Idle │
+              └────────┘             └─────────┘              └──────┘
+                  ↑                       │  fault                │
+                  │                       └────→  Error           │
+                  │                                  ↑            │ motionCmd
+                  │                                  │ fault      ↓
+                  │                              ┌──────┐      ┌────────┐
+                  │           stopAxis (!homed)  │      │      │ Moving │
+                  └──────────────────────────────│Error │      └────────┘
+                                                 │      │           │
+                              stopAxis (homed)   │      │           │ trackAxis
+                                ┌────────────────│      │           ↓
+                                ↓                └──────┘      ┌──────────┐
+                              Idle                              │ Tracking │
+                                                                └──────────┘
+```
+
+A per-axis `homed: Boolean` flag distinguishes Error → Lost from Error → Idle:
+
+- `homed=false` initially, and re-cleared at the start of every `homeAxis` attempt
+- `homed=true` set atomically with `axisState=Idle` when `homeAxis` completes successfully
+- `stopAxis` from `Error` returns to `Idle` if the axis was previously homed, or to
+  `Lost` if the home attempt itself failed
+
+This closes an SDD-diagram oversight: a home failure transitions Homing → Error
+(via `ControllerStatusActor.reportAxisError` when `ae[i] != 0`), and the correct
+recovery state coming out of Error must depend on whether a valid home reference exists.
+
+---
+
 ## Embedded Programs
 
-Program source: `src/main/resources/programs/protoHCD_lab.dmc`
+Program sources: `src/main/resources/programs/` — `protoHCD_lab.dmc` (lab DMC-500x0)
+and `galilHCD_STB.dmc` (STB DMC-4080).
 
 | Label | Purpose |
 |-------|---------|
 | `#Init` | Controller initialization (motor off, create arrays, set defaults) |
-| `#SetupA`-`#SetupH` | Per-axis hardware config (motor type, limits, amplifier) |
+| `#SetupA`-`#SetupH` | Per-axis hardware config (motor type, limits, amplifier, BZ commutation) |
 | `#MoveA`-`#MoveH` | Absolute position move (PA mode) |
 | `#HomeA`-`#HomeH` | Home sequence |
 | `#StopA`-`#StopH` | Controlled stop |
 | `#TrackA`-`#TrackH` | Jog-mode tracking with position/velocity targets |
 | `#SelectA`-`#SelectH` | Discrete 8-position wheel: `PA = dmd[idx] * (cpr[idx] / 8)` |
+| `#POSERR`, `#LIMSWI`, `#MCTIME`, `#CMDERR` | Controller-invoked fault handlers |
 
 **Key embedded arrays:**
 - `cpr[8]` — counts per revolution (integer; written by HCD `writeMotionConfig()`)
 - `dmd[8]` — demand/target (counts for move; slot number 0-7 for select)
 - `speed[]`, `accel[]`, `decel[]`, `hspd[]`, `hoff[]`, `mdelay[]` — motion parameters
+- `ae[8]` — per-axis error code, populated by both motion programs and fault handlers
+  (see [Per-Axis Error Detection](#per-axis-error-detection) below)
 
-Thread 0 is reserved for `#Init`. Threads 1-7 are allocated dynamically from
-the `MG _NO` bitmask for all axis operations.
+### Embedded `ae[]` Convention
+
+Every motion program (`#HomeX`/`#MoveX`/`#SetupX`/`#TrackX`/`#StopX`) sets
+`ae[axis]=1` on entry and clears `ae[axis]=0` only on the success path. Any abort
+(`#CMDERR` killing the thread, or an error handler exiting via `RE`/`RE1`) leaves
+`ae[axis]=1` (program error). The fault handlers also may set ae:
+
+- `#POSERR` → `ae[axis]=2` (position error exceeded limit)
+- `#LIMSWI` → `ae[axis]=3` (limit switch hit during motion)
+- `#MCTIME` → `ae[axis]=4` (motion completion timeout)
+
+`#StopX` programs also touch `ae[axis]=0` for consistency and to clear the error
+latch on operator recovery.
+
+### Thread Management
+
+Thread 0 is reserved for automated subroutines (`#POSERR`, `#LIMSWI` etc). 
+Threads 1-7 are allocated dynamically by the HCD for per-axis motion commands. 
+Allocation reads `MG _NO` to find an unused thread;
+
+**Per-thread state** uses `MG _XQ<n>`, **not** `MG _NO` or the QR `threadStatus`
+byte. Empirical discovery (Session 53): when one thread is mid-motion and another
+thread's program is killed by `#CMDERR`, both `_NO` and the QR byte continue to
+report the dead thread as active for many seconds, until other unrelated controller
+activity settles. Per-thread `_XQ<n>` returns the line number currently executing,
+or `-1` if the thread has stopped, and is reliable. `ControllerStatusActor`
+synthesizes the per-scan thread bitmask from `_XQ<n>` queries each scan, falling
+back to the raw QR byte only when the per-thread query fails (parse error or
+simulator without `_XQ` support).
+
+### Atomic XQ + Thread Confirmation
+
+`ControllerCommandActor.ExecuteProgram` sends `XQ #label,N;MG _XQN` as a single
+compound. The `MG` runs in the same line buffer as `XQ`, before any program execution
+can complete or `#CMDERR`. This eliminates a previous race where a fast-completing or
+fast-failing program ended before a separate `MG _NO` query could observe it.
+
+---
+
+## Error Detection & Fault State Machine
+
+The HCD detects three classes of error and routes them through a uniform fault path.
+
+### Per-Axis Error Detection
+
+Per-axis embedded program errors surface via `ae[]`. Each QR scan,
+`ControllerStatusActor.handleQRResponse` runs the following pipeline:
+
+1. Parse QR → snapshot raw `threadStatus` byte and `errorCode` at one moment.
+2. Read per-thread state via `MG _XQ<n>` for each registered thread (single compound
+   query). Synthesize a `threadStatus` byte from the per-thread results.
+3. Read `MG ae[<idx1>],ae[<idx2>],...` for configured axes (single compound read).
+   **Order matters: QR before `ae` reads** — the reverse order races with successful
+   program endings (the program clears `ae=0` after we read it but before QR shows
+   the thread cleared, giving us a stale `ae=1` to misattribute).
+4. Decide per-axis errors:
+   - `ae[i]=2/3/4` → report per-axis as POSERR/LIMSWI/MCTIME (deduplicated via
+     `lastReportedAxisError` so repeated values don't spam IS).
+   - `errorCode != 0` (controller-level) → fetch `TC 1` (consumes the latch), look
+     for axes with `ae=1` AND thread just cleared this scan. **Exactly 1 candidate** →
+     attribute the controller error to that axis (`axisErrorMsg = "Embedded program
+     error: <TC text>"`, `axisState=Error`). **Multiple candidates** → escalate to
+     HCD-Faulted via `EnterFaulted`. **Zero candidates** → defer one scan, then
+     escalate if still unresolved.
+5. Push HCD-level updates (position, I/O, timing).
+6. Push per-axis QR-derived updates (position, velocity, switches).
+7. Push `UpdateThreadStatus` to IS **last** — clears `activeThread` for completed
+   threads. Order is critical: `axisErrorMsg` / `axisState=Error` must reach IS
+   before `activeThread=0` so the watcher's `CmdStateChanged` notification carries
+   the error and fails the command on its first evaluation.
+
+### Controller-Level Error Detection
+
+Two complementary paths surface controller error latches (`TC` codes):
+
+- **Init-time** (`ControllerCommandActor.sendAndWaitForThread`): after every `XQ` +
+  thread-completion wait (for `#Init`, `#SetupX`, etc.), the HCD calls `TC 1` on the
+  command connection. Nonzero → set `HcdState{state=Faulted, controllerErrorMsg=...}`,
+  log at ERROR, throw — propagating through `initFuture` to fail HCD startup cleanly.
+- **Runtime** (`ControllerStatusActor`): per-axis attribution as described above.
+
+`TC` reads clear the controller error latch.
+
+### Connection Loss Detection
+
+Each TCP-owning actor independently detects and reports its own connection failure
+to `InternalStateActor`. No actor assumes the state of another's connection.
+
+- `ControllerStatusActor` — on any `IOException` (including `SocketTimeoutException`,
+  "Broken pipe"): stops polling, reports `statusConnection → Disconnected`. Then
+  immediately fires a `MG 1` probe to `ControllerCommandActor` to distinguish total
+  controller loss from isolated status-connection failure (logged as the diagnostic
+  `"Command connection probe after status loss — ALSO FAILED: ..."` or `"... — OK"`).
+- `ControllerCommandActor` — on any `IOException` in any handler: logs at ERROR,
+  reports `commandConnection → Disconnected`, returns error to caller.
+- `ControllerConsoleActor` — `connectionLostFlag` gates `consoleConnection →
+  Disconnected` on loss vs. clean shutdown.
+
+`GalilIoTcp.read()` throws `IOException("Connection closed by remote (host:port)")`
+on `-1` from `InputStream.read()`, instead of a confusing `ArrayIndexOutOfBoundsException`.
+
+All three sockets enable `SO_KEEPALIVE` at construction, preventing silent OS-level
+expiry on long-idle connections.
+
+### Faulted State
+
+The `Faulted` HCD state is triggered by any of: a controller error latch, loss of
+the command or status TCP connection, or an embedded program error that cannot be
+cleanly attributed to a single axis. All three feed through
+`InternalStateActor.EnterFaulted(reason)`, which atomically:
+
+- Sets `HcdState.state = Faulted` and `HcdState.controllerErrorMsg = reason`
+- Per-axis transitions: `Homing → Lost`, `Moving/Tracking → Error`
+- Clears any active commands
+
+When CS (rather than CC) detects a controller error, it additionally fires a
+fire-and-forget `ST;MO` compound via `commandActor` to safe all motors and disable
+drives, since the command connection may still be alive.
+
+The `CommandWatcherActor` subscribes to HCD `StateChanged` notifications and fails
+its in-flight command immediately when `Faulted` arrives, with the
+`controllerErrorMsg` as the failure reason.
+
+### Fault Recovery
+
+The `faultReset` command (SDD Section 4.6.4) recovers from `Faulted`. The
+`severity` parameter selects the level of intervention:
+
+| Severity | Behavior |
+|----------|----------|
+| **None** | Test existing sockets; reconnect any that have dropped; clear the controller error latch; transition HCD `Faulted → Ready`. Implemented. |
+| **Init** | Reconnect dropped connections and re-run `#Init` and `#SetupX`. Not yet implemented. |
+| **Minor** | Reset the controller and re-initialize. Not yet implemented. |
+| **Major** | Reload embedded code and re-initialize. Not yet implemented. |
+
+**Reconnection (None severity):** `handleFaultReset` asks the command actor and the
+status actor to `Reconnect`, sequentially. Each actor first verifies its existing
+socket (the connection may have healed on its own — cable blip, OS recovery) by
+sending a benign probe (`MG 0` for command, drained-then-`QR` for status). On verify
+success, no socket close is needed. On verify failure, the actor closes the dead
+socket and opens a fresh `GalilIoTcp`.
+
+**Status post-reconnect housekeeping:** drain any stale buffered data, call `TC 1`
+to read and log the controller's disconnect-time error (typically
+`"123 TCP lost sync or timeout"`), reset the `controllerFaulted` suppression flag,
+and restart the polling timer. `TC 1` is also called during the initial status
+connect (in the constructor) to clear stale errors from a previous session.
+
+The HMI surfaces this with a `[Clear Fault]` button in the `ErrorBanner` whenever
+`hcdState === 'Faulted'`. The button issues `faultReset` with `severity=None`.
 
 ---
 
@@ -177,6 +385,8 @@ The HCD includes an embedded browser-based HMI. No separate web server needed.
 |------|---------|------------|
 | Hardware (id=1) | `http://localhost:9091` | DMC-500x0 at 192.168.86.41:23 |
 | Simulator | `http://localhost:9090` | GalilSimulatorApp at 127.0.0.1:8888 |
+
+Hardware HMI port is `9090 + controller.id`; simulator HMI port is fixed at 9090.
 
 #### With Real Hardware
 
@@ -256,6 +466,10 @@ TCP), `Con` (console TCP, hardware-only, informational). Green = Connected, red 
 (gray for console since it is not required for operation). `isOperational` requires both Cmd
 and Sts to be Connected.
 
+**Error banner:** Visible whenever `hcdState === 'Faulted'`. Shows the controller error
+message and a `[Clear Fault]` button that issues `faultReset` with `severity=None`. Collapses
+to nothing when the HCD is `Ready` and there is no error message.
+
 ### Architecture
 
 The HCD uses three independent TCP connections to the controller (all on the same port —
@@ -264,8 +478,8 @@ are spawned as siblings directly under `GalilHcd` — none is a child of another
 
 | Actor | Connection | Role |
 |-------|-----------|------|
-| `ControllerCommandActor` | command socket | SendCommand, ExecuteProgram, HaltExecution, thread allocation |
-| `ControllerStatusActor` | status socket | QR polling, analog input queries |
+| `ControllerCommandActor` | command socket | SendCommand, ExecuteProgram, HaltExecution, init-time `TC 1`, thread allocation |
+| `ControllerStatusActor` | status socket | QR polling, per-thread `MG _XQ<n>`, `MG ae[]` reads, AI polling, runtime `TC 1` |
 | `ControllerConsoleActor` | console socket | Unsolicited MG output via `CF I` (hardware only) |
 
 Each actor reports its connection status to `InternalStateActor` on startup via
@@ -274,8 +488,22 @@ connections are `Connected` (console is informational and does not affect readin
 
 This means QR/AI polls never contend with command traffic at either the socket or actor-mailbox level.
 
+The internal actors that orchestrate the above:
+
+- **InternalStateActor** — central state repository with two notification channels:
+  `StateChanged` (HCD + AxisState) and `CmdStateChanged` (AxisCmdState only — used by
+  CommandWatchers). Owns the `EnterFaulted` transition logic.
+- **CommandHandlerActor** — dispatches CSW commands; spawns one `CommandWatcherActor`
+  per long-running command.
+- **CommandWatcherActor** — subscribes to `CmdStateChanged` for its axis and
+  `StateChanged` for the HCD; reports completion / failure / timeout to the CRM.
+- **CurrentStatePublisherActor** — publishes CSW CurrentState events for HCD and
+  per-axis updates.
+
+The browser-side HMI infrastructure:
+
 - **HmiServer** (Pekko HTTP) — WebSocket `/ws/state`, REST `POST /api/command`, `GET/POST /api/loglevel`
-- **HmiJsonProtocol** — Serializes HcdState to JSON
+- **HmiJsonProtocol** — Serializes `HcdState` to JSON
 - **HmiLogAppender** — Routes all CSW log output (including Galil MG console) to WebSocket
 - **index.html** — Single-file React SPA, vanilla `createElement`, no build step
 
@@ -294,13 +522,13 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusAct
 | Suite | Tests | Coverage |
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
-| InternalStateActorTest | 54 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus |
-| ControllerStatusActorTest | 15 | QR polling, adaptive rate, analog input polling |
-| CommandHandlerActorTest | 17 | Immediate commands, validation |
+| InternalStateActorTest | 54 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, EnterFaulted |
+| ControllerStatusActorTest | 15 | QR polling, adaptive rate, analog input polling, `_XQ`/`ae[]` decoding |
+| CommandHandlerActorTest | 16 | Immediate commands, validation, faultReset gating |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
 | LongRunningCommandTest | 29 | Motion command handlers |
 | RotatingMechanismTest | 26 | Approach algorithm, positionWheel, offsetAxis, no-cpr fallback |
-| AxisStateValidationTest | 14 | State machine rules, interruption mechanics |
+| AxisStateValidationTest | 14 | State machine rules, interruption mechanics, `stopCompletionState(homed)` |
 | IOTest | 17 | DIO bit extraction, setBit/clearBit dispatch, analog input polling |
 
 ### Controller/Simulator-Dependent Tests (no CSW services)
@@ -316,7 +544,7 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator
 `HcdIntegrationTest` uses `FrameworkTestKit` — **CSW services must not be running.**
 
 ```bash
-# Against hardware:
+# Against lab hardware:
 sbt -Dgalil.config.path=GalilHcdConfig-Hardware.conf \
     "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~50s
 
@@ -339,7 +567,7 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | GalilHcdConfigTest | 9 | None |
 | InternalStateActorTest | 54 | None |
 | ControllerStatusActorTest | 15 | None |
-| CommandHandlerActorTest | 17 | None |
+| CommandHandlerActorTest | 16 | None |
 | CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
 | RotatingMechanismTest | 26 | None |
@@ -349,4 +577,4 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
 | HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
 | GalilSimulatorActorTest | 73 | None |
-| **Total** | **307** | |
+| **Total** | **306** | |

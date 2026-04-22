@@ -157,6 +157,10 @@ object CommandWatcherActor:
    * @param internalStateActor IS actor to subscribe to
    * @param commandResponseManager CRM for final status reporting
    * @param completionAxisState AxisState to transition to on success (default: Idle; trackAxis uses Tracking)
+   * @param onSuccessAxisUpdates Additional AxisState field updates to apply together with
+   *   axisState on success. Merged into the same UpdateAxisState message so the transition
+   *   is atomic from an IS subscriber's perspective. Example: homeAxis passes Map("homed" -> true)
+   *   so a successful home sets axisState=Idle and homed=true in one update.
    * @param resultReporter Optional callback for test observability; receives (runId, isSuccess, message)
    */
   case class WatchConfig(
@@ -168,6 +172,7 @@ object CommandWatcherActor:
     internalStateActor: ActorRef[InternalStateActor.Command],
     commandResponseManager: CommandResponseManager,
     completionAxisState: AxisStateEnum = AxisStateEnum.Idle,
+    onSuccessAxisUpdates: Map[String, Any] = Map.empty,
     activeThread: Int = 0,
     resultReporter: Option[(Id, Boolean, String) => Unit] = None,
     loggerFactory: LoggerFactory = null
@@ -289,10 +294,12 @@ object CommandWatcherActor:
           else if config.mask.isSatisfied(cmdState) then
             log.info(s"Watch ${config.commandName}/${config.axis}: COMPLETE " +
               s"(thread=${cmdState.activeThread} inPos=${cmdState.inPosition} moving=${cmdState.moving})")
-            // Transition axisState to configured completion state (Idle for most, Tracking for trackAxis)
+            // Transition axisState to configured completion state (Idle for most, Tracking for trackAxis),
+            // plus any command-specific axis updates (e.g. homeAxis sets homed=true).
+            // Merge into one message so subscribers see an atomic transition.
             config.internalStateActor ! InternalStateActor.UpdateAxisState(
               config.axis,
-              Map("axisState" -> config.completionAxisState),
+              Map("axisState" -> config.completionAxisState) ++ config.onSuccessAxisUpdates,
               ctx.system.ignoreRef
             )
             // Clear activeCommand in IS actor

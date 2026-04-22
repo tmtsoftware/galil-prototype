@@ -322,9 +322,11 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
 
   test("stopAxis completion state depends on prior state (SDD Figure 4-2)") {
     import AxisStateEnum._
-    Homing.stopCompletionState shouldBe Lost      // interrupted home = not homed
-    Moving.stopCompletionState shouldBe Idle       // interrupted move = still homed
-    Tracking.stopCompletionState shouldBe Idle     // stopped tracking = idle
+    Homing.stopCompletionState(homed = false) shouldBe Lost   // interrupted home = not homed
+    Moving.stopCompletionState(homed = true)  shouldBe Idle   // interrupted move = still homed
+    Tracking.stopCompletionState(homed = true) shouldBe Idle  // stopped tracking = idle
+    Error.stopCompletionState(homed = false)  shouldBe Lost   // failed home latched Error = not homed
+    Error.stopCompletionState(homed = true)   shouldBe Idle   // fault on homed axis = still homed
   }
 
   test("validateCommand rejection message should include state and command") {

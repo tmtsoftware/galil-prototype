@@ -776,7 +776,8 @@ object CommandHandlerActor {
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
     loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout,
-    preCommands: Option[String] = None
+    preCommands: Option[String] = None,
+    onSuccessAxisUpdates: Map[String, Any] = Map.empty
   ): Unit = {
     // Step 1: Pre-escalate polling rate so StatusMonitor is at action rate
     // before the program starts. This ensures IS updates flow quickly.
@@ -820,7 +821,8 @@ object CommandHandlerActor {
             s"registering and spawning watcher to await next scan")
         internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
-          loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState)
+          loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState,
+          onSuccessAxisUpdates = onSuccessAxisUpdates)
     }
   }
 
@@ -1018,9 +1020,12 @@ object CommandHandlerActor {
       Map("activeCommand" -> ActiveCommand.Home, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // 2. Transition to Homing
+    // 2. Transition to Homing and clear the homed flag.
+    // Clearing homed here means a failed home (Homing → Error via ae[], or timeout,
+    // or stopAxis from Homing) will correctly report the axis as not-homed.
+    // On success, the CommandWatcher will set homed=true atomically with axisState=Idle.
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
-      Map("axisState" -> AxisStateEnum.Homing),
+      Map("axisState" -> AxisStateEnum.Homing, "homed" -> false),
       ctx.system.ignoreRef)
 
     // 3. Execute embedded program with thread confirmation + watcher
@@ -1039,7 +1044,8 @@ object CommandHandlerActor {
       askTimeout = askTimeout,
       askScheduler = askScheduler,
       ctx = ctx,
-      loggerFactory = loggerFactory
+      loggerFactory = loggerFactory,
+      onSuccessAxisUpdates = Map("homed" -> true)
     )
   }
 
@@ -1064,10 +1070,13 @@ object CommandHandlerActor {
    *   4. Spawn CommandWatcher with stopAxis mask
    *
    * Valid from any axis state (Lost, Idle, Homing, Moving, Tracking, Error).
-   * Completion state depends on prior state:
-   *   Lost/Idle/Error → Idle  (no change to homed status)
+   * Completion state depends on prior state and whether the axis has a valid home reference:
+   *   Lost            → Lost  (no change to homed status)
+   *   Idle            → Idle
    *   Homing          → Lost  (homing interrupted; position unknown)
    *   Moving/Tracking → Idle  (was homed; position known)
+   *   Error (homed)   → Idle  (fault hit a homed axis; stop clears the fault)
+   *   Error (!homed)  → Lost  (home attempt itself failed; position unknown)
    */
   private def handleStopAxis(
     setup: Setup,
@@ -1095,14 +1104,17 @@ object CommandHandlerActor {
     then return
 
     // Query axisState to determine: (a) whether interruption is needed, (b) completion state.
+    // The completion state depends on both the current axisState and the homed flag —
+    // e.g. Error → Lost if the last home failed, Error → Idle if the axis was homed before the fault.
     val (completionState, currentAxisState) = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
         ref => InternalStateActor.GetAxisState(axis, ref)
       )(askTimeout, askScheduler)
       val axisStateOpt = Await.result(future, askTimeout.duration)
-      val target = axisStateOpt.map(_.axisState.stopCompletionState).getOrElse(AxisStateEnum.Idle)
+      val homed = axisStateOpt.exists(_.homed)
+      val target = axisStateOpt.map(_.axisState.stopCompletionState(homed)).getOrElse(AxisStateEnum.Idle)
       val current = axisStateOpt.map(_.axisState).getOrElse(AxisStateEnum.Idle)
-      log.info(s"stopAxis $axis: current state=$current, completion→$target")
+      log.info(s"stopAxis $axis: current state=$current, homed=$homed, completion→$target")
       (target, current)
     }.getOrElse((AxisStateEnum.Idle, AxisStateEnum.Idle))
 
@@ -1615,7 +1627,8 @@ object CommandHandlerActor {
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
     loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout,
-    completionAxisState: AxisStateEnum = AxisStateEnum.Idle
+    completionAxisState: AxisStateEnum = AxisStateEnum.Idle,
+    onSuccessAxisUpdates: Map[String, Any] = Map.empty
   ): Unit = {
     val config = CommandWatcherActor.WatchConfig(
       runId = runId,
@@ -1626,7 +1639,8 @@ object CommandHandlerActor {
       internalStateActor = internalStateActor,
       commandResponseManager = crm,
       loggerFactory = loggerFactory,
-      completionAxisState = completionAxisState
+      completionAxisState = completionAxisState,
+      onSuccessAxisUpdates = onSuccessAxisUpdates
     )
     val watcherName = s"watcher-${commandName}-${axis}-${runId.id.take(8)}"
     ctx.spawn(CommandWatcherActor(config), watcherName)

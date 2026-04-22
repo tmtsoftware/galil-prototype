@@ -42,14 +42,23 @@ enum ConnectionStatus:
  * Published in CurrentStateAxis[A-H].axisState.
  * Transitions are command-lifecycle driven.
  *
- * State machine (Figure 4-2):
+ * State machine (Figure 4-2 — implementation refinement):
  *   startup → Lost
  *   Lost:     homeAxis → Homing
- *   Homing:   success → Idle,  stopAxis → Lost,  fault → Error
+ *   Homing:   success → Idle,  stopAxis → Lost,  fault → Error (or Lost via EnterFaulted)
  *   Idle:     homeAxis → Homing,  motionCmd → Moving,  trackAxis → Tracking
  *   Moving:   success → Idle,  stopAxis → Idle,  fault → Error
  *   Tracking: stopAxis → Idle,  trackAxis → Tracking,  fault → Error
  *   Error:    homeAxis → Homing
+ *             stopAxis → Lost  if the axis was never successfully homed (or last home failed)
+ *                      → Idle  if the axis had a valid home before entering Error
+ *
+ * Error → Lost/Idle disambiguation uses the per-axis `homed` flag on AxisState.
+ * This closes an SDD-diagram oversight: a home that fails transitions Homing → Error
+ * (via ControllerStatusActor.reportAxisError when ae[i]>0), but the diagram's direct
+ * Homing → Lost arrow implied home failures skip Error entirely. With Error as the
+ * latch for any fault, the correct recovery state coming out of Error depends on
+ * whether a valid home exists — which `homed` records.
  */
 enum AxisStateEnum:
   case Lost, Homing, Idle, Moving, Tracking, Error
@@ -97,21 +106,27 @@ enum AxisStateEnum:
 
   /**
    * Determine the axis state after a stopAxis command completes,
-   * based on the state the axis was in when stop was issued.
+   * based on the state the axis was in when stop was issued and whether
+   * it has a valid home reference.
    *
-   * Per SDD Figure 4-2:
-   *   Lost     → stopAxis → Lost     (still not homed; stop is safe but changes nothing)
-   *   Homing   → stopAxis → Lost     (homing interrupted; axis position unknown)
-   *   Moving   → stopAxis → Idle     (was homed; position is known)
-   *   Tracking → stopAxis → Idle     (was homed; position is known)
-   *   Error    → stopAxis → Idle     (stop clears the fault condition)
-   *   Idle     → stopAxis → Idle     (no-op; already stopped)
+   * Per SDD Figure 4-2 (refined — see AxisStateEnum scaladoc):
+   *   Lost     → stopAxis → Lost                 (still not homed; stop is safe but changes nothing)
+   *   Homing   → stopAxis → Lost                 (homing interrupted; axis position unknown)
+   *   Moving   → stopAxis → Idle                 (was homed; position is known)
+   *   Tracking → stopAxis → Idle                 (was homed; position is known)
+   *   Error    → stopAxis → Idle  if homed       (fault hit a previously-homed axis; stop clears the fault)
+   *                      → Lost  if not homed    (the home attempt itself failed; axis position unknown)
+   *   Idle     → stopAxis → Idle                 (no-op; already stopped)
+   *
+   * @param homed true iff the axis has a valid home reference (last homeAxis succeeded
+   *              and no subsequent home attempt has been started that hasn't yet succeeded).
    */
-  def stopCompletionState: AxisStateEnum =
+  def stopCompletionState(homed: Boolean): AxisStateEnum =
     this match
-      case Lost    => Lost   // stopAxis on Lost axis — remains Lost; only homeAxis escapes
-      case Homing  => Lost   // homing interrupted — axis position unknown
-      case _       => Idle   // Moving, Tracking, Error, Idle → all transition to Idle
+      case Lost    => Lost                         // stopAxis on Lost axis — remains Lost; only homeAxis escapes
+      case Homing  => Lost                         // homing interrupted — axis position unknown
+      case Error   => if homed then Idle else Lost // disambiguate by home status
+      case _       => Idle                         // Moving, Tracking, Idle → all transition to Idle
 
 enum MechanismType:
   case Linear, Rotating
@@ -154,6 +169,9 @@ object Axis:
  * 
  * @param axisState Current operational state (command-lifecycle driven)
  * @param axisError Error message if in error state
+ * @param homed True iff the axis has a valid home reference. Cleared at the start of every
+ *   homeAxis attempt, set to true only on homeAxis success. Used by stopCompletionState to
+ *   disambiguate Error → Lost vs Error → Idle. Internal HCD flag — not published in CurrentStateAxis.
  * @param position Raw accumulated motor position in encoder counts, as reported directly by the
  *   DMC-500x0. For rotating axes this value accumulates across revolutions (e.g. 800 after two
  *   full revolutions of a 400-count axis). Used unchanged for all internal math: inPosition,
@@ -196,6 +214,13 @@ object Axis:
 case class AxisState(
   axisState: AxisStateEnum = AxisStateEnum.Lost,
   axisError: String = "",
+  /** True iff the axis has a valid home reference. Cleared to false at the start of
+    * every homeAxis attempt; set to true only when homeAxis completes successfully.
+    * Used by stopCompletionState to disambiguate Error → Lost vs Error → Idle: a home
+    * failure latches Error with homed=false, and stopAxis out of Error must then go
+    * to Lost (not Idle) because the axis position is unknown. Internal HCD flag — not
+    * published in CurrentStateAxis. */
+  homed: Boolean = false,
   position: Double = 0.0,
   velocity: Double = 0.0,
   positionError: Double = 0.0,
@@ -285,6 +310,7 @@ case class AxisState(
     updates.foreach {
       case ("axisState", v: AxisStateEnum) => updated = updated.copy(axisState = v)
       case ("axisError", v: String) => updated = updated.copy(axisError = v)
+      case ("homed", v: Boolean) => updated = updated.copy(homed = v)
       case ("position", v: Double) => updated = updated.copy(position = v)
       case ("velocity", v: Double) => updated = updated.copy(velocity = v)
       case ("positionError", v: Double) => updated = updated.copy(positionError = v)

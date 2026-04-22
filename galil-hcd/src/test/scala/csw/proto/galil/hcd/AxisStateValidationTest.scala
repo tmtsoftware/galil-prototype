@@ -299,15 +299,24 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
   }
 
   test("stopCompletionState: per SDD Figure 4-2 transition table") {
-    // Lost: stopAxis allowed (safety command) but axis remains Lost — only homeAxis escapes
-    AxisStateEnum.Lost.stopCompletionState     shouldBe AxisStateEnum.Lost
-    // Homing interrupted: position unknown, axis not homed → Lost
-    AxisStateEnum.Homing.stopCompletionState   shouldBe AxisStateEnum.Lost
+    // Lost: stopAxis allowed (safety command) but axis remains Lost — only homeAxis escapes.
+    // The homed flag is ignored here because a Lost axis is by definition not homed.
+    AxisStateEnum.Lost.stopCompletionState(homed = false)  shouldBe AxisStateEnum.Lost
+    AxisStateEnum.Lost.stopCompletionState(homed = true)   shouldBe AxisStateEnum.Lost
+    // Homing interrupted: position unknown, axis not homed → Lost.
+    // Even if the axis had a prior valid home, starting a new home clears homed,
+    // so by the time we see Homing in stopAxis we always end up at Lost.
+    AxisStateEnum.Homing.stopCompletionState(homed = false) shouldBe AxisStateEnum.Lost
+    AxisStateEnum.Homing.stopCompletionState(homed = true)  shouldBe AxisStateEnum.Lost
     // Moving/Tracking: axis was homed, position is known → Idle
-    AxisStateEnum.Moving.stopCompletionState   shouldBe AxisStateEnum.Idle
-    AxisStateEnum.Tracking.stopCompletionState shouldBe AxisStateEnum.Idle
-    // Error: stop clears the fault condition → Idle
-    AxisStateEnum.Error.stopCompletionState    shouldBe AxisStateEnum.Idle
+    AxisStateEnum.Moving.stopCompletionState(homed = true)   shouldBe AxisStateEnum.Idle
+    AxisStateEnum.Tracking.stopCompletionState(homed = true) shouldBe AxisStateEnum.Idle
+    // Error: disambiguates by homed flag.
+    //   homed=true  → axis was homed before the fault; stop clears fault → Idle
+    //   homed=false → home attempt itself failed; position unknown → Lost
+    AxisStateEnum.Error.stopCompletionState(homed = true)  shouldBe AxisStateEnum.Idle
+    AxisStateEnum.Error.stopCompletionState(homed = false) shouldBe AxisStateEnum.Lost
     // Idle: no-op → remains Idle
-    AxisStateEnum.Idle.stopCompletionState     shouldBe AxisStateEnum.Idle
+    AxisStateEnum.Idle.stopCompletionState(homed = true)  shouldBe AxisStateEnum.Idle
+    AxisStateEnum.Idle.stopCompletionState(homed = false) shouldBe AxisStateEnum.Idle
   }
