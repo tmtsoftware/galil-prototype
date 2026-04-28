@@ -489,21 +489,26 @@ object CommandHandlerActor {
    * Sequence:
    *   1. Query IS CmdState for activeThread
    *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills the thread)
-   *   3. If sendST: send ST to stop motor motion
-   *   4. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
-   *   5. 10ms delay for watcher to observe the flag
-   *   6. Clear commandHalted — new command will set its own activeCommand
+   *   3. After successful HX: prompt ControllerStatusActor to update its per-axis
+   *      tracking, so the next QR scan doesn't misattribute the halted program's
+   *      ae[] residue to whatever command runs next on this axis.
+   *   4. If sendST: send ST to stop motor motion
+   *   5. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
+   *   6. 10ms delay for watcher to observe the flag
+   *   7. Clear commandHalted — new command will set its own activeCommand
    *
    * Tracking special case: #TrackX ends with EN so the motor continues jogging
    * but the thread has already released. activeThread will be 0. HaltExecution is
-   * skipped, but ST is still sent (if sendST=true) to stop jogging motion, and
-   * commandHalted is set in case a slow watcher is still running.
+   * skipped (and so is the CS prompt), but ST is still sent (if sendST=true)
+   * to stop jogging motion, and commandHalted is set in case a slow watcher is
+   * still running.
    */
   private def checkAndInterrupt(
     commandName: String,
     axis: Axis,
     ciActor: ActorRef[GalilCommandMessage],
     internalStateActor: ActorRef[InternalStateActor.Command],
+    statusMonitor: ActorRef[ControllerStatusActor.Command],
     log: csw.logging.api.scaladsl.Logger,
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
@@ -523,7 +528,9 @@ object CommandHandlerActor {
     log.info(s"checkAndInterrupt: $commandName on Moving axis $axis " +
       s"(thread=$activeThread, cmd=$activeCmd) — interruption needed")
 
-    // Step 2: Halt the active thread if one is running (HX via CI actor)
+    // Step 2: Halt the active thread if one is running (HX via CI actor).
+    // On success, capture haltSucceeded=true so step 3 can do the ae attribution.
+    var haltSucceeded = false
     if activeThread > 0 then
       log.info(s"checkAndInterrupt: halting axis $axis thread=$activeThread for $commandName")
       val haltResult = Try {
@@ -541,11 +548,35 @@ object CommandHandlerActor {
             s"${result.error.getOrElse("unknown")} — proceeding")
         case Success(_) =>
           log.info(s"checkAndInterrupt: axis $axis thread $activeThread halted")
+          haltSucceeded = true
       }
     else
       log.info(s"checkAndInterrupt: axis $axis activeThread=0, skipping HX (already released)")
 
-    // Step 3: Stop motor motion if requested. Omitted when the next program is #StopX,
+    // Step 3: After successful HX, prompt CS to update its per-axis tracking
+    // before the next program registers. Without this, the next QR scan could
+    // see "axis registered with thread N, but thread N just cleared, ae==1" and
+    // misattribute the residue (the entry-time flag from the program we just
+    // halted) as an unexplained failure of whatever command runs next on this
+    // axis — particularly when the next command happens to reuse the same
+    // thread number. Skipped on HX failure (nothing was halted) and on the
+    // already-released path (no activeThread to begin with — Tracking case).
+    if haltSucceeded then
+      val notifyResult = Try {
+        val future = AskPattern.Askable(statusMonitor).ask[ControllerStatusActor.NotifyAxisHaltedAck](
+          ref => ControllerStatusActor.NotifyAxisHalted(axis, ref)
+        )(askTimeout, askScheduler)
+        Await.result(future, askTimeout.duration)
+      }
+      notifyResult match {
+        case Failure(ex) =>
+          log.warn(s"checkAndInterrupt: NotifyAxisHalted($axis) failed: ${ex.getMessage} " +
+            s"— next QR scan's Step 3 backstop may misattribute residue")
+        case Success(_) =>
+          log.debug(s"checkAndInterrupt: axis $axis halt notification acked by CS")
+      }
+
+    // Step 4: Stop motor motion if requested. Omitted when the next program is #StopX,
     // which handles deceleration itself. Always sent for other interrupting commands
     // (including the Tracking case where the thread has released but motor is still jogging).
     if sendST then
@@ -556,15 +587,15 @@ object CommandHandlerActor {
           log.info(s"checkAndInterrupt: axis $axis motor stopped")
       }
 
-    // Step 4: Signal existing watcher (if any) that its command was interrupted
+    // Step 5: Signal existing watcher (if any) that its command was interrupted
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> true),
       ctx.system.ignoreRef)
 
-    // Step 5: Brief delay for watcher to observe the flag and self-terminate
+    // Step 6: Brief delay for watcher to observe the flag and self-terminate
     Thread.sleep(10)
 
-    // Step 6: Clear flag — new command handler will set its own activeCommand
+    // Step 7: Clear flag — new command handler will set its own activeCommand
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> false),
       ctx.system.ignoreRef)
@@ -727,24 +758,26 @@ object CommandHandlerActor {
   // ========================================
 
   /**
-   * Executes an embedded program via the CI actor's ExecuteProgram protocol,
-   * confirms thread start via MG _NO, and either spawns a CommandWatcher
-   * or completes immediately if the program finished before we could observe it.
+   * Executes an embedded program via the CI actor's ExecuteProgram protocol
+   * and spawns a CommandWatcher to await completion.
    *
    * This is the standard pattern for all long-running commands that invoke
-   * embedded programs (homeAxis, positionAxis, offsetAxis, selectWheel, trackAxis).
+   * embedded programs (homeAxis, positionAxis, offsetAxis, selectWheel, trackAxis,
+   * stopAxis).
    *
    * Flow:
    *   1. Pre-escalate ControllerStatusActor to action polling rate
-   *   2. Ask CI actor to ExecuteProgram (sends XQ, then MG _NO atomically)
+   *   2. Ask CI actor to ExecuteProgram (sends "XQ #label,thread;MG _XQ<thread>"
+   *      as one compound, returning threadWasActive based on the MG _XQ result)
    *   3. If XQ rejected → set Error state, report Error to CRM
-   *   4. If thread confirmed active → spawn CommandWatcher normally
-   *   5. If thread already finished → command completed faster than MG _NO round-trip.
-   *      Evaluate completion mask directly. If satisfied → Completed. If not → Error.
+   *   4. Otherwise (regardless of threadWasActive) → register the thread with IS
+   *      and spawn the CommandWatcher. The watcher evaluates the completion mask
+   *      after the next QR scan, where CS reads ae[] and surfaces any program
+   *      error. This uniform path ensures a fast-completing program that errored
+   *      cannot be reported as Completed before the error surfaces.
    *
    * @param label         Embedded program label without # (e.g. "MoveA", "HomeB")
    * @param axis          The axis being commanded
-   * @param thread        Thread to execute on (typically axis.index + 1)
    * @param commandName   Command name for logging and error messages
    * @param runId         CSW command run ID
    * @param mask          CompletionMask for the CommandWatcher
@@ -784,7 +817,7 @@ object CommandHandlerActor {
     statusMonitor ! ControllerStatusActor.SetPollingRate(10.0)
 
     // Step 2: Execute program via CI actor (thread allocated from pool, optional preCommands,
-    // XQ, and MG _NO confirmation all inside galilIo.synchronized in the CI actor)
+    // and "XQ;MG _XQ<thread>" compound all inside galilIo.synchronized in the CI actor)
     val result = Try {
       val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.ExecuteProgramResult](
         ref => GalilCommandMessage.ExecuteProgram(label, ref, preCommands)
@@ -804,21 +837,28 @@ object CommandHandlerActor {
           internalStateActor, crm, runId, ctx)
 
       case Success(execResult) =>
-        // XQ accepted. Whether MG _NO showed the thread still active or already
-        // completed by the time we polled, we always register and spawn the
-        // watcher. The watcher evaluates the completion mask only after IS
-        // observes the next QR scan — which is also when CS reads ae[] for
-        // this axis and reports any program error. Without this uniform path,
-        // a fast-completing program that errored could be reported as Completed
-        // before the next QR scan surfaces the error. (SDD: a command must not
-        // be declared complete without confirmation from at least one full scan.)
+        // XQ accepted. Whether the parser-side _XQ<n> follow-up caught the thread
+        // mid-execution (line >= 0) or saw it already completed (-1), we always
+        // register and spawn the watcher. The watcher evaluates the completion
+        // mask only after IS observes the next QR scan — which is also when CS
+        // reads ae[] for this axis and reports any program error. Without this
+        // uniform path, a fast-completing program that errored could be reported
+        // as Completed before the next QR scan surfaces the error. (SDD: a
+        // command must not be declared complete without confirmation from at
+        // least one full scan.)
         val thread = execResult.thread
         if execResult.threadWasActive then
           log.debug(s"$commandName $axis: thread $thread confirmed active, registering and spawning watcher")
         else
-          log.warn(s"$commandName $axis: thread $thread reported _XQ=-1 immediately after XQ " +
-            s"(program may have completed instantly or never reached a meaningful line); " +
-            s"registering and spawning watcher to await next scan")
+          // _XQ<n>=-1 immediately after XQ means thread N has already run and
+          // stopped. The host parser yields between commands on a line, so a
+          // short embedded program (e.g. #StopX is just STX;MG;EN) can complete
+          // in microseconds before the parser-side MG runs. Not an error; the
+          // watcher will evaluate completion (and any ae[] error) on the next
+          // QR scan.
+          log.debug(s"$commandName $axis: thread $thread already completed by the time _XQ was queried " +
+            s"(short program ran to completion between XQ and the parser-side MG); " +
+            s"registering and spawning watcher to evaluate on next scan")
         internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
           loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState,
@@ -900,7 +940,7 @@ object CommandHandlerActor {
     // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
     // the new command: halt active thread (HX + ST), signal watcher, then proceed.
     if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+      checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
 
     // For rotating axes with countsPerRevolution configured, apply the approach algorithm
     // to resolve the algorithm-adjusted count target. This may add or subtract a whole
@@ -1122,7 +1162,7 @@ object CommandHandlerActor {
     // before executing #StopX. Without this, the running #MoveX or #HomeX program would
     // restart motion after #StopX sends ST, making the stop ineffective.
     if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
-      checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx, sendST = false)
+      checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx, sendST = false)
 
     // Update active command for this stop
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
@@ -1197,7 +1237,7 @@ object CommandHandlerActor {
     // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
     // the new command: halt active thread (HX + ST), signal watcher, then proceed.
     if currentState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+      checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
 
     val currentPosition = currentState match {
       case Some(state) => state.position
@@ -1327,7 +1367,7 @@ object CommandHandlerActor {
     }.getOrElse(None)
 
     if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+      checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
 
     // 1. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
@@ -1440,7 +1480,7 @@ object CommandHandlerActor {
 
     // If axis is currently Moving, apply SDD 4.8.1 interruption protocol
     if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx)
+      checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
 
     // Convert angular demand to raw count target
     val rawTarget = (angleDeg / 360.0) * cpr

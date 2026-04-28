@@ -111,7 +111,8 @@ object ControllerStatusActor:
    *
    * IS forwards this from CommandHandlerActor's RegisterThread call. CS uses the
    * map to interpret per-axis ae[] reads on each scan: ae[i]==1 only counts as
-   * a program failure when the axis's thread is no longer running (per _NO).
+   * a program failure when the axis's thread is no longer running (per the
+   * synthesized threadStatus byte built from _XQ<n> queries each scan).
    *
    * Sent by IS, never by external callers.
    */
@@ -126,7 +127,36 @@ object ControllerStatusActor:
    * Sent by IS, never by external callers.
    */
   case class ClearAxisThread(axis: Axis) extends Command
-  
+
+  /**
+   * Notify CS that CommandHandlerActor has halted the active thread on this
+   * axis (via HX in checkAndInterrupt).
+   *
+   * Without this notification, the next QR scan would see "axis X registered
+   * with thread N, but thread N is no longer running" and could attribute
+   * residual ae[X]==1 (the entry-time flag from the program we just halted) as
+   * an unexplained program failure on whatever command runs next on this axis —
+   * particularly when the next command happens to reuse the same thread number.
+   *
+   * The handler prunes the axis from CS's axisThreads map. CH owns the
+   * lifecycle: it will RegisterAxisThread again when it launches the next
+   * program. The reply (NotifyAxisHaltedAck) confirms the notification has been
+   * processed (synchronization point for the caller — needed so CH can be sure
+   * the prune is in place before launching the next program).
+   *
+   * Note: ae[] values >= 2 (#POSERR/#LIMSWI/#MCTIME) are independent of program
+   * execution and are detected by the regular QR scan's Step 2; no special
+   * post-HX handling for them is needed here.
+   */
+  case class NotifyAxisHalted(axis: Axis, replyTo: ActorRef[NotifyAxisHaltedAck]) extends Command
+
+  /**
+   * Acknowledgement of NotifyAxisHalted. Carries no information — the caller
+   * just needs a synchronization point confirming the notification has been
+   * processed.
+   */
+  case class NotifyAxisHaltedAck()
+
   /**
    * Response to GetPollingStatus
    */
@@ -237,10 +267,10 @@ class ControllerStatusActor(
 
   // True when a previous scan saw errorCode != 0 but couldn't attribute the
   // error to any axis (no axes had both ae==1 AND a just-cleared thread).
-  // The next scan re-evaluates with one more cycle of _NO updates available;
-  // if still unattributable, the HCD is faulted then. This single-scan
-  // deferral covers the race where errorCode latches before _NO clears the
-  // bit for the thread CMDERR just halted.
+  // The next scan re-evaluates with one more cycle of _XQ<n> updates available;
+  // if still unattributable, the HCD is faulted then. This single-scan deferral
+  // covers the race where errorCode latches before _XQ<n> reports -1 for the
+  // thread CMDERR just halted.
   private var pendingControllerError: Boolean = false
 
   // Per-axis last-reported axisErrorMsg (deduplication for steady-state ae[]
@@ -323,6 +353,25 @@ class ControllerStatusActor(
       case ClearAxisThread(axis) =>
         log.debug(s"ClearAxisThread: axis=$axis")
         axisThreads = axisThreads - axis
+        Behaviors.same
+
+      case NotifyAxisHalted(axis, replyTo) =>
+        // Notification from CommandHandlerActor that it has just halted the
+        // active thread on this axis. Any ae[axis]==1 residue is the entry-time
+        // flag from a program we deliberately stopped — not an error.
+        // (ae >= 2 codes from #POSERR/#LIMSWI/#MCTIME are independent of program
+        // execution and are caught by the regular QR scan's Step 2; no special
+        // handling is needed here.)
+        //
+        // The only thing we need to do post-HX is prune this axis from
+        // axisThreads, so the next QR scan's Step 3 doesn't see "axis registered
+        // with a thread that just cleared" and misattribute the residue to
+        // whatever command runs next on this axis. CH owns the lifecycle: it
+        // will RegisterAxisThread again when it launches the next program.
+        if axisThreads.contains(axis) then
+          log.debug(s"NotifyAxisHalted($axis): pruning axisThreads (was ${axisThreads(axis)})")
+          axisThreads = axisThreads - axis
+        replyTo ! NotifyAxisHaltedAck()
         Behaviors.same
 
       case CommandProbeResult(result) =>
@@ -534,8 +583,8 @@ class ControllerStatusActor(
         if axisThreads.isEmpty then 0
         else if xqValues.size != axisThreads.size then
           // Couldn't determine state for all registered threads — fall back to
-          // the raw QR byte. This is the safer behavior because if _NO says
-          // "still running" we won't fire spurious completion/error.
+          // the raw QR byte. This is the safer behavior because if the QR byte
+          // says "still running" we won't fire spurious completion/error.
           log.debug(s"_XQ query returned ${xqValues.size} of ${axisThreads.size} expected; " +
             s"falling back to QR threadStatus byte 0x${rawThreadStatusByte.toHexString}")
           rawThreadStatusByte
@@ -587,8 +636,9 @@ class ControllerStatusActor(
 
       // Step 8: thread status — IS clears activeThread for any registered
       // threads whose bits are now zero (and forwards ClearAxisThread to us).
-      // We send the SYNTHESIZED byte (from _XQ) rather than the raw QR byte
-      // so IS sees accurate per-thread completions even when _NO is misreporting.
+      // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries above)
+      // rather than the raw QR threadStatus byte, so IS sees accurate per-thread
+      // completions even when the QR byte is stuck stale post-CMDERR.
       internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte)
 
       Behaviors.same
@@ -734,11 +784,11 @@ class ControllerStatusActor(
     //   First time we see this: defer one scan. The QR snapshot returns
     //   errorCode and threadStatus from the same moment, but the controller
     //   updates these on slightly different cycles — errorCode latches the
-    //   instant a command fails, while _NO doesn't reflect the dead thread
-    //   until the next servo cycle. If we attribute too eagerly we miss the
-    //   axis whose thread cleared in the very next scan. Setting the
-    //   pendingControllerError flag without consuming TC lets the next scan
-    //   try again with one more cycle of _NO state available.
+    //   instant a command fails, while _XQ<n> may not yet report -1 for the
+    //   dead thread until the next servo cycle. If we attribute too eagerly
+    //   we miss the axis whose thread cleared in the very next scan. Setting
+    //   the pendingControllerError flag without consuming TC lets the next
+    //   scan try again with one more cycle of _XQ<n> state available.
     //
     //   Second consecutive scan still 0: genuinely unattributable —
     //   consume TC, fault HCD, safe motors.
@@ -765,7 +815,7 @@ class ControllerStatusActor(
         pendingControllerError = true
         log.debug(s"errorCode=$errorCode but no axis program just completed " +
           s"(axisThreads=$axisThreads, axesWithClearedThread=$axesWithClearedThread, " +
-          s"aeValues=$aeValues) — deferring one scan to let _NO settle")
+          s"aeValues=$aeValues) — deferring one scan to let _XQ<n> settle")
       else
         // Either (a) second scan still empty, or (b) 2+ candidates.
         // Both warrant HCD-wide fault. Consume TC and report.

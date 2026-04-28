@@ -283,11 +283,13 @@ private[hcd] object ControllerCommandActor {
 
           // Execute embedded program with automatic thread allocation and start confirmation.
           // Allocates a thread from hardware state (MG _NO), optionally sends preCommands,
-          // sends XQ, then confirms via MG _NO. All steps run inside galilIo.synchronized.
+          // then sends "XQ #label,thread;MG _XQ<thread>" as one line buffer. The _XQ
+          // result reports whether thread N is mid-execution (line >= 0) or has already
+          // run to completion (-1). All steps run inside galilIo.synchronized.
           case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
             try {
               galilIo.synchronized {
-                // Step 1: Allocate a thread (queries MG _NO, updates IS)
+                // Step 1: Allocate a thread (queries MG _NO for free bits, updates IS)
                 allocateThread() match {
                   case None =>
                     replyTo ! GalilCommandMessage.ExecuteProgramResult(
@@ -323,12 +325,16 @@ private[hcd] object ControllerCommandActor {
                       case None =>
                         // Step 3: Send XQ + per-thread _XQ query as ONE compound command.
                         //
-                        // Why compound: with two separate sends, the controller may have
-                        // executed and finished the embedded program in the brief gap
-                        // between XQ accept and our follow-up MG query, especially for
-                        // very short programs like #StopX. The compound runs the MG
-                        // immediately after XQ accept (same line buffer), giving an
-                        // atomic "did the thread really start?" answer.
+                        // Why compound: the parser-side MG _XQ<n> runs on the same line
+                        // buffer as XQ, eliminating a separate round-trip and giving us
+                        // the earliest possible read of the thread's state. On the host
+                        // channel the scheduler may switch between the XQ and the MG (the
+                        // "no thread switch within a line" rule applies to embedded code,
+                        // not host TCP commands), so by the time the MG runs, thread N
+                        // has either advanced into its body, or for short programs (e.g.
+                        // #StopX is STX;MG;EN) has already completed. Either way the
+                        // result is meaningful: a non-(-1) line number means thread N is
+                        // mid-execution; -1 means thread N has run and stopped.
                         //
                         // Why _XQ<n> (not _NO): empirically, on this controller firmware,
                         // _NO can show stale "thread active" state for many seconds when
@@ -353,10 +359,14 @@ private[hcd] object ControllerCommandActor {
                               error = Some(s"XQ #$label,$thread rejected: ${bs.utf8String.trim}"))
 
                           case None =>
-                            // Step 4: parse the second response (MG _XQ<n> result)
-                            // to determine whether the thread is actually running.
-                            // -1 means the program completed (or never ran) before the
-                            // compound's MG executed — unusual for non-trivial programs.
+                            // Step 4: parse the second response (MG _XQ<n> result).
+                            // A non-(-1) line number means thread N is mid-execution.
+                            // -1 means thread N has already run and stopped (typical for
+                            // short programs like #StopX). The caller (typically
+                            // executeProgramAndWatch) registers and spawns a watcher in
+                            // both cases; the watcher and the next QR scan determine
+                            // outcome (whether ae[] was left set, whether motion is in
+                            // position, etc).
                             val mgResponse = xqResponses(1)._2.utf8String.trim
                             val xqLine = try mgResponse.toDouble.toInt catch {
                               case _: NumberFormatException =>
@@ -367,11 +377,12 @@ private[hcd] object ControllerCommandActor {
 
                             // No threadStatus push to IS here. CS's per-scan _XQ-derived
                             // synthesized threadStatus byte is the single source of truth
-                            // (since _NO is empirically unreliable post-CMDERR). The next
-                            // QR scan in CS reports accurate state within ~100ms.
+                            // (the raw QR threadStatus byte is empirically unreliable
+                            // post-CMDERR). The next QR scan in CS reports accurate
+                            // state within ~100ms.
 
                             log.info(s"ExecuteProgram: #$label on thread $thread — " +
-                              s"_XQ$thread=$xqLine, ${if threadActive then "ACTIVE" else "already finished"}")
+                              s"_XQ$thread=$xqLine, ${if threadActive then "ACTIVE" else "already completed"}")
 
                             replyTo ! GalilCommandMessage.ExecuteProgramResult(
                               thread = thread, threadWasActive = threadActive, error = None)

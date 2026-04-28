@@ -53,19 +53,26 @@ object GalilCommandMessage {
    * Execute an embedded program with automatic thread allocation.
    *
    * The CI actor queries MG _NO to find a free thread (1-7), optionally sends
-   * preCommands as a single compound command, sends "XQ #label,thread", then
-   * queries MG _NO again to confirm the thread started. Both MG _NO results
-   * update IS threadStatus in real-time. The allocated thread number is returned
-   * in the result.
+   * preCommands as a single compound command, then sends "XQ #label,thread;MG _XQ<thread>"
+   * as a single line buffer. The MG _XQ<thread> reads the line currently
+   * being executed by thread N, or -1 if the thread has already stopped.
+   *
+   * Note on host-channel timing: the "all commands on a line execute before the
+   * scheduler switches" rule applies to embedded code, not to host TCP commands.
+   * Between the XQ and MG on the host parser line, the scheduler may run thread N.
+   * Therefore _XQ<N>=-1 in the compound's MG response means thread N has run
+   * and finished (e.g. a short program like #StopX that completes in microseconds),
+   * not that it never ran. A non-(-1) line number means thread N is still mid-execution.
    *
    * preCommands (if present) is sent atomically within the same galilIo.synchronized
    * block as the XQ — eliminating a separate CI round-trip for callers that need to
    * set embedded variables (e.g. dmd[idx]=target) immediately before launching a program.
    * If the preCommands send fails, ExecuteProgram returns an error and XQ is not sent.
    *
-   * Thread management uses the hardware as the source of truth — no
-   * separate pool bookkeeping. The controller's _NO bitmask is always
-   * authoritative for thread availability.
+   * Thread allocation uses the controller's MG _NO bitmask as the source of truth —
+   * no separate pool bookkeeping. (Allocation looks for *clear* bits, where _NO is
+   * reliable; per-thread state queries during execution use _XQ<n> instead, which is
+   * unaffected by the post-CMDERR _NO unreliability documented in ControllerStatusActor.)
    *
    * @param label       Program label without # prefix (e.g. "MoveA", "HomeB")
    * @param replyTo     Actor to receive the result
@@ -82,7 +89,9 @@ object GalilCommandMessage {
    * Result of ExecuteProgram.
    *
    * @param thread           Thread number that was allocated and used
-   * @param threadWasActive  true if MG _NO confirmed the thread was running after XQ
+   * @param threadWasActive  true if MG _XQ<thread> in the compound returned a non-(-1)
+   *                         line number (thread N is mid-execution); false if -1
+   *                         (thread N has already completed)
    * @param error            None on success, Some(message) if XQ was rejected or no threads available
    */
   case class ExecuteProgramResult(
@@ -1067,9 +1076,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
     scala.util.Try {
-      // 1. Send XQ via ExecuteProgram — allocates thread, sends XQ, then queries
-      //    MG _NO to confirm the thread started. Returns threadWasActive as
-      //    authoritative hardware truth.
+      // 1. Send XQ via ExecuteProgram — allocates thread, sends "XQ;MG _XQ<thread>"
+      //    as a single compound, returns threadWasActive=true if the parser-side
+      //    follow-up _XQ query saw a non-(-1) line number.
       val execFuture = controllerCommandActor.ask[GalilCommandMessage.ExecuteProgramResult](
         ref => GalilCommandMessage.ExecuteProgram(label, ref)
       )
@@ -1082,14 +1091,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val allocatedThread = execResult.thread
 
       if !execResult.threadWasActive then
-        // The post-XQ _NO query did not show the thread active. Either:
-        //   (a) XQ was rejected silently (no ? but program didn't start), or
-        //   (b) the program was so fast it completed before the _NO query.
-        // We cannot distinguish these cases from _NO alone. Fall through to
-        // the Faulted check below — if the program errored, the status actor
-        // will have already set Faulted+controllerErrorMsg from the QR errorCode.
-        log.info(s"Thread $allocatedThread completed (not observed active after XQ — " +
-          s"program finished before _NO query, or was a no-op)")
+        // The post-XQ _XQ<thread> query returned -1 — thread N has already
+        // run and stopped. The host parser yields between commands on a line
+        // (the no-switch rule applies to embedded code, not host TCP commands),
+        // so a short program (e.g. #Init) can complete in microseconds before
+        // the parser-side MG runs. Skip the polling loop and proceed to the
+        // TC 1 check below — if the program errored the latch will tell us.
+        log.info(s"Thread $allocatedThread: _XQ returned -1 immediately after XQ " +
+          s"(program completed before the parser-side follow-up query)")
       else
         // Thread confirmed active — poll IS until it clears
         val deadline     = timeout.fromNow

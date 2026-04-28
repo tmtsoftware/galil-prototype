@@ -62,16 +62,17 @@ REM Trap program errors so threads are not killed
 MG "HCD CMDERR ",_ED,_TA,_TC,_XQ
 EN
 REM Handle limits, treatment varies by mechanism
+REM Ignore limits if used while homing
 #LIMSWI
-IF ((_LFA = 0) | (_LRA = 0))
+IF (((_LFA = 0) | (_LRA = 0))&(homing[0]=0))
  MG "Limit Hit axis A"
  ae[0]=3
 ENDIF
-IF ((_LFB = 0) | (_LRB = 0))
+IF (((_LFB = 0) | (_LRB = 0))&(homing[1]=0))
  MG "Limit Hit axis B"
  ae[1]=3
 ENDIF
-IF ((_LFC = 0) | (_LRC = 0))
+IF (((_LFC = 0) | (_LRC = 0))&(homing[2]=0))
  MG "Limit Hit axis C"
  ae[2]=3
 ENDIF
@@ -81,17 +82,17 @@ REM one of these is currently 0, must not be wired, ignoring
 REM MG "Limit Hit axis D"
 REM ae[3]=3
 ENDIF
-IF ((_LFE = 0) | (_LRE = 0))
-REM not a fault, limits used for Homing
- MG "Limit Hit axis E, not a fault"
+IF (((_LFE = 0) | (_LRE = 0))&(homing[4]=0))
+ MG "Limit Hit axis E"
+ ae[4]=3
 ENDIF
-IF ((_LFF = 0) | (_LRF = 0))
-REM not a fault, limits used for Homing
- MG "Limit Hit axis E, not a fault"
+IF (((_LFF = 0) | (_LRF = 0))&(homing[5]=0))
+ MG "Limit Hit axis F"
+ ae[5]=3
 ENDIF
-IF ((_LFG = 0) | (_LRG = 0))
-REM not a fault, limits used for Homing
- MG "Limit Hit axis E, not a fault"
+IF (((_LFG = 0) | (_LRG = 0))&(homing[6]=0))
+ MG "Limit Hit axis G"
+ ae[6]=3
 ENDIF
 WT500
 RE1
@@ -127,6 +128,7 @@ DM hoff[8]
 DM mdelay[8]
 DM Dtarget[2]
 DM cpr[8]
+DM homing[8]
 ' default the motor parameters to those in flash EEPROM
 accel[0]=_ACA
 accel[1]=_ACB
@@ -161,6 +163,7 @@ hspd[5]=_HVF
 hspd[6]=_HVG
 REM
 JS #fill("ae",0)
+JS #fill("homing",0)
 REM setup home offset values
 REM (motion after index before setting position to 0)
 JS #fill("hoff",0); 'default to 0 home offset
@@ -411,7 +414,8 @@ REM ----------------------------------------------------------------------------
 REM Axis A - ANT
 REM ----------------------------------------------------------------------------
 #HomeA
-ae[0]=1
+ae[0]=1; 'Flag to detect if this program halts/errors before finishing
+homing[0]=1
 MG "Home Motor A (ANT) started"
 HVA=hspd[0]
 SHA
@@ -439,7 +443,8 @@ ENDIF
 MG "Setting encoder to zero position."
 DPA=0
 MG "Motor A (ANT) homed."
-ae[0]=0
+ae[0]=0; 'successful home
+homing[0]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveA
@@ -478,13 +483,17 @@ REM ----------------------------------------------------------------------------
 ae[0]=1
 STA
 MG "Motor A STOP"
+homing[0]=0
 ae[0]=0
 EN
 REM ----------------------------------------------------------------------------
 REM Axis B - ATS
+REM****************************************************************************
+REM****************************************************************************
 REM ----------------------------------------------------------------------------
 #HomeB
 ae[1]=1
+homing[1]=1
 MG "Home Motor B (ATS) started"
 HVB=hspd[1]
 SHB
@@ -519,6 +528,7 @@ MG "Setting encoder to zero position."
 DPB=0
 MG "Motor B (ATS) homed."
 ae[1]=0
+homing[1]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveB
@@ -549,6 +559,7 @@ REM ----------------------------------------------------------------------------
 ae[1]=1
 STB
 MG "Motor B STOP"
+homing[1]=0
 ae[1]=0
 EN
 REM ----------------------------------------------------------------------------
@@ -556,6 +567,7 @@ REM Axis C - AVS
 REM ----------------------------------------------------------------------------
 #HomeC
 ae[2]=1
+homing[2]=1
 MG "Home Motor C (AVS) started"
 HVC=hspd[2]
 SHC
@@ -583,6 +595,7 @@ MG "Setting encoder to zero position."
 DPC=0
 MG "Motor C (AVS) homed."
 ae[2]=0
+homing[2]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveC
@@ -613,6 +626,7 @@ REM ----------------------------------------------------------------------------
 ae[2]=1
 STC
 MG "Motor C (AVS) STOP"
+homing[2]=0
 ae[2]=0
 EN
 REM ----------------------------------------------------------------------------
@@ -692,6 +706,7 @@ REM Axis E - FSP-X
 REM ----------------------------------------------------------------------------
 #HomeE
 ae[4]=1
+homing[4]=1
 MG "Home Axis E (FSP-X) starting"
 SHE
 IF (_LRE=0); ' If already on the limit switch'
@@ -725,6 +740,7 @@ DPE=0
 FLE=195000; 'Setting a soft limit to protect the stage
 MG "Motor E (FSP-X) homed",_TDE," OK",{^22}{^10},":"
 ae[4]=0
+homing[4]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveE
@@ -755,6 +771,7 @@ REM ----------------------------------------------------------------------------
 ae[4]=1
 STE
 MG "Motor E (FSP-X) STOP"
+homing[4]=0
 ae[4]=0
 EN
 REM ----------------------------------------------------------------------------
@@ -762,6 +779,7 @@ REM Axis F - FSP-Y
 REM ----------------------------------------------------------------------------
 #HomeF
 ae[5]=1
+homing[5]=1
 REM HVF=hspd[5]
 MG "Home Axis F (FSP-Y) starting"
 SHF
@@ -796,6 +814,7 @@ DPF=0
 FLF=195000; 'Setting a soft limit to protect the stage
 MG "Motor F (FSP-Y) homed",_TDF," OK",{^22}{^10},":"
 ae[5]=0
+homing[5]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveF
@@ -826,6 +845,7 @@ REM ----------------------------------------------------------------------------
 ae[5]=1
 STF
 MG "Motor F (FSP-Y) STOP"
+homing[5]=0
 ae[5]=0
 EN
 REM ----------------------------------------------------------------------------
@@ -833,6 +853,7 @@ REM Axis G - FSP-Z
 REM ----------------------------------------------------------------------------
 #HomeG
 ae[6]=1
+homing[6]=1
 REM HVG=hspd[6]
 MG "Home Axis G (FSP-Z) starting"
 SHG
@@ -867,6 +888,7 @@ DPG=0
 FLG=195000; 'Setting a soft limit to protect the stage
 MG "Motor G (FSP-Z) homed",_TDG," OK",{^22}{^10},":"
 ae[6]=0
+homing[6]=0
 EN
 REM ----------------------------------------------------------------------------
 #MoveG
@@ -897,5 +919,6 @@ REM ----------------------------------------------------------------------------
 ae[6]=1
 STG
 MG "Motor G (FSP-Z) STOP"
+homing[6]=0
 ae[6]=0
 EN
