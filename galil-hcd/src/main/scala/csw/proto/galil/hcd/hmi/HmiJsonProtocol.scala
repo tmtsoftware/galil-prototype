@@ -30,6 +30,8 @@ object HmiJsonProtocol {
     "axisErrorMsg" -> s.axisError,
     "forwardLimit" -> s.forwardLimit,
     "reverseLimit" -> s.reverseLimit,
+    "forwardLimitEnabled" -> s.forwardLimitEnabled,
+    "reverseLimitEnabled" -> s.reverseLimitEnabled,
     "homeSwitch"   -> s.homeSwitch,
     "isStepper"    -> s.isStepper,
     "motorOff"     -> s.motorOff,

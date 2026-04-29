@@ -769,8 +769,9 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
   test("TS with no axis should return all axes") {
     val sim = spawnSimulator()
     val response = sendText(sim, "TS")
-    // All default stepper, not homed → 1 for each of 8 axes
-    assert(response == "1, 1, 1, 1, 1, 1, 1, 1", s"TS should return switches for all axes, got: '$response'")
+    // All default: stepper (bit 0) + reverse limit clear (bit 2) + forward limit clear (bit 3)
+    // = 0x01 | 0x04 | 0x08 = 13. Not homed (bit 1 = 0).
+    assert(response == "13, 13, 13, 13, 13, 13, 13, 13", s"TS should return switches for all axes, got: '$response'")
   }
 
   test("TS should show homed bit after #Home") {
@@ -778,13 +779,13 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     send(sim, "XQ #HomeA,1")
     Thread.sleep(200)
 
-    // Axis A: stepper (bit 0) + homed (bit 1) = 3
+    // Axis A: stepper (1) + homed (2) + rev clear (4) + fwd clear (8) = 15
     val tsa = sendText(sim, "TSA")
-    assert(tsa.toInt == 3, s"TSA after home should be 3 (stepper+homed), got: '$tsa'")
+    assert(tsa.toInt == 15, s"TSA after home should be 15 (stepper+homed+limits clear), got: '$tsa'")
 
-    // Axis B: stepper only = 1
+    // Axis B: stepper (1) + rev clear (4) + fwd clear (8) = 13
     val tsb = sendText(sim, "TSB")
-    assert(tsb.toInt == 1, s"TSB should still be 1 (not homed), got: '$tsb'")
+    assert(tsb.toInt == 13, s"TSB should be 13 (stepper+limits clear, not homed), got: '$tsb'")
   }
 
   test("TP and TD should reflect position changes from motion") {
@@ -968,5 +969,31 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     tokens.foreach { token =>
       assert(token == "2.5000", s"Each compound @AN value should be 2.5000, got: '$token'")
     }
+  }
+
+  test("MG _LDx defaults to 0 (both limits enabled) for an axis that has no LD set") {
+    val sim = spawnSimulator()
+    val response = sendText(sim, "MG _LDA")
+    assert(response == "0.0000", s"_LDA default should be 0.0000, got: '$response'")
+  }
+
+  test("LDx=N round-trip: write LDA=1, MG _LDA returns 1.0000") {
+    val sim = spawnSimulator()
+    send(sim, "LDA=1")
+    val response = sendText(sim, "MG _LDA")
+    assert(response == "1.0000", s"After LDA=1, _LDA should be 1.0000, got: '$response'")
+  }
+
+  test("MG _LDA,_LDB,_LDC compound query returns three space-separated values") {
+    val sim = spawnSimulator()
+    send(sim, "LDA=0")
+    send(sim, "LDB=1")
+    send(sim, "LDC=3")
+    val response = sendText(sim, "MG _LDA,_LDB,_LDC")
+    val tokens = response.trim.split("\\s+").filter(_.nonEmpty)
+    assert(tokens.length == 3, s"Compound MG _LD should return 3 values, got ${tokens.length}: '$response'")
+    assert(tokens(0) == "0.0000", s"_LDA expected 0.0000, got: '${tokens(0)}'")
+    assert(tokens(1) == "1.0000", s"_LDB expected 1.0000, got: '${tokens(1)}'")
+    assert(tokens(2) == "3.0000", s"_LDC expected 3.0000, got: '${tokens(2)}'")
   }
 }

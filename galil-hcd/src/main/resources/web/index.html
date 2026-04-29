@@ -132,9 +132,13 @@ function StatusDot({axisState}) {
   );
 }
 
-function BoolFlag({value,label,trueColor='#10B981',falseColor='#4B5563'}) {
+function BoolFlag({value,label,trueColor='#10B981',falseColor='#4B5563',enabled,disabledColor='#374151'}) {
+  // Tri-state: when `enabled` prop is provided and false, render the disabled color
+  // regardless of value (e.g. limit switch not implemented on this axis).
+  // When `enabled` is undefined, behaves as a normal two-state flag (back-compat).
+  const dotColor = (enabled === false) ? disabledColor : (value ? trueColor : falseColor);
   return e('span',{style:{display:'inline-flex',alignItems:'center',gap:3,fontSize:10.5,color:'#D1D5DB',marginRight:8}},
-    e('span',{style:{width:6,height:6,borderRadius:1.5,backgroundColor:value?trueColor:falseColor}}),
+    e('span',{style:{width:6,height:6,borderRadius:1.5,backgroundColor:dotColor}}),
     label
   );
 }
@@ -433,8 +437,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
         e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
         e(BoolFlag,{value:axState.isStepper,label:'Stepper',trueColor:'#8B5CF6'}),
         e(BoolFlag,{value:!axState.motorOff,label:'Motor',trueColor:'#10B981',falseColor:'#EF4444'}),
-        e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444'}),
-        e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444'})),
+        e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.forwardLimitEnabled}),
+        e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.reverseLimitEnabled})),
 
       // CmdState bar + Tracking toggle at right end
       e('div',{style:{marginTop:4,padding:'3px 7px',backgroundColor:'#1F2937',borderRadius:4,

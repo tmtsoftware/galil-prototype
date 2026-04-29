@@ -1224,38 +1224,48 @@ class ControllerStatusActor(
   
   /**
    * Parsed data from Galil QR DataRecord axis switches BYTE.
-   * Per DMC-500x0 User Manual, Data Record section:
+   *
+   * Per DMC-500x0 / DMC-4080 User Manual, Data Record section:
    *
    *   Bit 7: Latch Occurred
    *   Bit 6: State of Latch Input
    *   Bit 5: N/A
    *   Bit 4: N/A
-   *   Bit 3: State of Forward Limit
-   *   Bit 2: State of Reverse Limit
+   *   Bit 3: Forward Limit switch INACTIVE (1 = OK to move +, 0 = limit hit)
+   *   Bit 2: Reverse Limit switch INACTIVE (1 = OK to move -, 0 = limit hit)
    *   Bit 1: State of Home Input
    *   Bit 0: Stepper Mode
    *
-   * NOTE: These are RAW I/O states, NOT the same as the TS command output.
-   * The TS command has its own different bit layout.
+   * The forward/reverse limit bits are inverted at parse time so the field
+   * names match their meaning (forwardLimit=true means "limit hit"), matching
+   * how the rest of the codebase (HMI, axisError reporting) uses them.
+   *
+   * NOTE: These are RAW I/O states for the limit bits — the CN configuration
+   * determines which physical input level (high/low) constitutes "active",
+   * but the manual-documented semantic of the BIT is "INACTIVE", which is
+   * what we invert.
+   *
+   * The TS command has its own different bit layout — do not conflate.
    */
   private case class SwitchData(
     latchOccurred: Boolean,     // bit 7
     latchInput: Boolean,        // bit 6
-    forwardLimit: Boolean,      // bit 3 — raw state (CN config determines active high/low)
-    reverseLimit: Boolean,      // bit 2
+    forwardLimit: Boolean,      // bit 3 inverted: true = forward limit HIT
+    reverseLimit: Boolean,      // bit 2 inverted: true = reverse limit HIT
     homeInput: Boolean,         // bit 1
-    stepperMode: Boolean        // bit 0 — stepper mode indicator
+    stepperMode: Boolean        // bit 0
   )
   
   /**
-   * Parse switches byte from QR DataRecord
+   * Parse switches byte from QR DataRecord. Forward/reverse limit bits are
+   * INVERTED so the field names match their meaning (true = limit hit).
    */
   private def parseSwitches(switchByte: Byte): SwitchData =
     SwitchData(
       latchOccurred = (switchByte & (1 << 7)) != 0,
       latchInput = (switchByte & (1 << 6)) != 0,
-      forwardLimit = (switchByte & (1 << 3)) != 0,
-      reverseLimit = (switchByte & (1 << 2)) != 0,
+      forwardLimit = (switchByte & (1 << 3)) == 0,  // invert: bit clear = limit hit
+      reverseLimit = (switchByte & (1 << 2)) == 0,  // invert: bit clear = limit hit
       homeInput = (switchByte & (1 << 1)) != 0,
       stepperMode = (switchByte & (1 << 0)) != 0
     )

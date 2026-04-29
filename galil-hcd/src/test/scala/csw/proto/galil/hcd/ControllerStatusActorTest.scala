@@ -315,8 +315,18 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val statusMonitor = testKit.spawn(
       ControllerStatusActor.withIo(noOpIo, internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
     )
-    val switchesA: Byte = (0x08 | 0x02).toByte  // forwardLimit + homeInput
-    val switchesB: Byte = 0x04.toByte            // reverseLimit only
+    // Switch byte layout (per Galil TS / QR DataRecord):
+    //   bit 3 = Forward Limit INACTIVE (clear bit 3 → forward limit HIT after parser inversion)
+    //   bit 2 = Reverse Limit INACTIVE (clear bit 2 → reverse limit HIT after parser inversion)
+    //   bit 1 = Home switch status
+    //   bit 0 = Stepper Mode
+    //
+    // Axis A: forward limit hit (bit 3 clear), reverse limit clear (bit 2 set), home active (bit 1 set)
+    //   → bits 1+2 set, bit 3 clear → 0x06
+    val switchesA: Byte = (0x04 | 0x02).toByte
+    // Axis B: forward limit clear (bit 3 set), reverse limit hit (bit 2 clear), home inactive
+    //   → bit 3 set, bit 2 clear → 0x08
+    val switchesB: Byte = 0x08.toByte
     val dataRecord = createExtendedDataRecord(
       motorPositionA = 1000, switchesA = switchesA,
       motorPositionB = 2000, switchesB = switchesB,
@@ -327,8 +337,8 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val probeA = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
     val stateA = probeA.receiveMessage().get
-    stateA.forwardLimit should be(true)
-    stateA.reverseLimit should be(false)
+    stateA.forwardLimit should be(true)   // bit 3 clear → limit hit
+    stateA.reverseLimit should be(false)  // bit 2 set → limit clear
     stateA.homeSwitch should be(true)
     stateA.isStepper should be(false)
     stateA.negativeDirection should be(false)
@@ -336,8 +346,8 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val probeB = testKit.createTestProbe[Option[AxisState]]()
     internalState ! InternalStateActor.GetAxisState(Axis.B, probeB.ref)
     val stateB = probeB.receiveMessage().get
-    stateB.forwardLimit should be(false)
-    stateB.reverseLimit should be(true)
+    stateB.forwardLimit should be(false)  // bit 3 set → limit clear
+    stateB.reverseLimit should be(true)   // bit 2 clear → limit hit
     stateB.homeSwitch should be(false)
     stateB.isStepper should be(false)
     stateB.negativeDirection should be(false)

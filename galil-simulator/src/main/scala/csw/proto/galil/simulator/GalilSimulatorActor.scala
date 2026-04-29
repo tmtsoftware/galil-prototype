@@ -129,6 +129,8 @@ object GalilSimulatorActor {
     motorType: Double = 2.0,  // stepper
     stopCode: Byte = 0,
     homed: Boolean = false,
+    forwardLimitHit: Boolean = false,  // simulated physical limit; reflected in switches byte
+    reverseLimitHit: Boolean = false,
     settings: Map[String, Double] = Map.empty
   )
 
@@ -690,6 +692,19 @@ object GalilSimulatorActor {
       case s if s.startsWith("_TM") =>
         "1000.0000"
 
+      case s if s.length == 4 && s.startsWith("_LD") =>
+        // _LDx: per-axis Limit Disable setting.
+        // 0 = both enabled, 1 = forward disabled, 2 = reverse disabled, 3 = both disabled.
+        // The HCD reads this once at init via `readLimitConfig()` to seed
+        // forwardLimitEnabled/reverseLimitEnabled on AxisState.
+        // Default is 0 (both enabled). In normal operation, the embedded .dmc
+        // explicitly writes `LDx=N` per axis at #Setup, so this default only
+        // applies to degenerate test paths that bypass embedded setup.
+        // Tests can override per-axis via `LDx=N` (handled by handleGenericAxisCmd).
+        val axis = s.last
+        val ld = getAxis(state, axis).settings.getOrElse("LD", 0.0)
+        f"$ld%.4f"
+
       case s if s.startsWith("@AN") =>
         // Single channel (compound is now handled by the top-level split in handleMG)
         "2.5000"
@@ -927,13 +942,22 @@ object GalilSimulatorActor {
   /**
    * Compute the switches byte for an axis (used by TS and QR DataRecord).
    *
-   * Bit 0: Stepper Mode (1 = stepper motor, motorType >= 2.0)
-   * Bit 1: Home complete (1 = axis has been homed)
+   * Per DMC-500x0 / DMC-4080 manual (QR DataRecord layout):
+   *   Bit 3: Forward Limit switch INACTIVE (1 = OK to move +, 0 = limit hit)
+   *   Bit 2: Reverse Limit switch INACTIVE (1 = OK to move -, 0 = limit hit)
+   *   Bit 1: State of Home Input — repurposed here as "axis has been homed"
+   *   Bit 0: Stepper Mode (1 = stepper motor, motorType >= 2.0)
+   *
+   * Bits 3 and 2 default to 1 (limit clear) — the simulator does not model a
+   * physical limit by default. Tests can set forwardLimitHit/reverseLimitHit
+   * on a SimAxis to flip the corresponding bit to 0 ("limit hit").
    */
   private def switchesByte(ax: SimAxis): Int = {
     var sw: Int = 0
     if (ax.motorType >= 2.0) sw |= (1 << 0)
     if (ax.homed) sw |= (1 << 1)
+    if (!ax.reverseLimitHit) sw |= (1 << 2)  // bit set = limit clear
+    if (!ax.forwardLimitHit) sw |= (1 << 3)  // bit set = limit clear
     sw
   }
 

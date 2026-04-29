@@ -186,12 +186,21 @@ object Axis:
  *   |position - demand| <= inPositionThreshold, both in accumulated-count space.
  * @param inPositionThreshold Threshold for calculating inPosition
  * @param inPosition Whether axis is within threshold of demand (calculated)
- * @param forwardLimit Forward limit switch active (QR switches bit 0)
- * @param reverseLimit Reverse limit switch active (QR switches bit 1)
- * @param homeSwitch Home switch active (QR switches bit 2)
- * @param isStepper True if stepper motor type (QR switches bit 3)
- * @param negativeDirection True if moving in negative direction (QR switches bit 5)
- * @param motorOff True if motor amplifier is off / not energized (QR switches bit 6)
+ * @param forwardLimit Forward limit switch HIT (true = limit active, prevents +motion).
+ *   Derived from QR switches byte bit 3, which the Galil reports as "Forward Limit
+ *   switch INACTIVE" (1 = OK to move, 0 = limit hit). parseSwitches inverts the bit
+ *   so the field name matches its meaning.
+ * @param reverseLimit Reverse limit switch HIT (true = limit active, prevents -motion).
+ *   Derived from QR switches byte bit 2, same inversion as forwardLimit.
+ * @param homeSwitch Home switch active (QR switches bit 1)
+ * @param isStepper True if stepper motor type (QR switches bit 0)
+ * @param negativeDirection True if moving in negative direction (axis status word bit 7)
+ * @param motorOff True if motor amplifier is off / not energized (axis status word bit 0)
+ * @param forwardLimitEnabled True if the forward limit is wired/active per controller
+ *   _LDx config. Read once at init from MG _LDx (bit 0 of LD = forward disabled).
+ *   Defaults to true so a missed read leaves the indicator informative rather than grey.
+ * @param reverseLimitEnabled True if the reverse limit is wired/active per controller
+ *   _LDx config. Read once at init (bit 1 of LD = reverse disabled).
  * @param mechanismType Type of mechanism (linear or rotating)
  * @param upperLimit Upper soft limit (for linear mechanisms)
  * @param lowerLimit Lower soft limit (for linear mechanisms)
@@ -234,6 +243,12 @@ case class AxisState(
   isStepper: Boolean = false,
   negativeDirection: Boolean = false,
   motorOff: Boolean = true,  // Default: motor amplifier off
+  // Limit switch implementation status — read once at init from controller _LDx
+  // (LD = Limit Disable). Decoded bits: bit 0 = forward disabled, bit 1 = reverse
+  // disabled. Defaults to true (enabled) so a missed read still distinguishes
+  // hit vs clear in the HMI rather than going grey.
+  forwardLimitEnabled: Boolean = true,
+  reverseLimitEnabled: Boolean = true,
   // Mechanism configuration
   mechanismType: MechanismType = MechanismType.Linear,
   upperLimit: Option[Double] = None,
@@ -320,6 +335,8 @@ case class AxisState(
       // Named switch fields
       case ("forwardLimit", v: Boolean) => updated = updated.copy(forwardLimit = v)
       case ("reverseLimit", v: Boolean) => updated = updated.copy(reverseLimit = v)
+      case ("forwardLimitEnabled", v: Boolean) => updated = updated.copy(forwardLimitEnabled = v)
+      case ("reverseLimitEnabled", v: Boolean) => updated = updated.copy(reverseLimitEnabled = v)
       case ("homeSwitch", v: Boolean) => updated = updated.copy(homeSwitch = v)
       case ("isStepper", v: Boolean) => updated = updated.copy(isStepper = v)
       case ("negativeDirection", v: Boolean) => updated = updated.copy(negativeDirection = v)

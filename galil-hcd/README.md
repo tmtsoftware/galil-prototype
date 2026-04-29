@@ -252,6 +252,21 @@ synthesizes the per-scan thread bitmask from `_XQ<n>` queries each scan, falling
 back to the raw QR byte only when the per-thread query fails (parse error or
 simulator without `_XQ` support).
 
+**Halt-time notification** (Session 55): when `CommandHandlerActor.checkAndInterrupt`
+deliberately halts an axis's thread via `HX` (the SDD 4.8.1 interruption protocol
+for `positionAxis`/`stopAxis`/`offsetAxis`/`selectWheel`/`positionWheel` preempting
+an active move or home), it sends `ControllerStatusActor.NotifyAxisHalted(axis)` as
+a synchronous ask immediately after a successful `HX`. The handler removes the axis
+from CS's internal `axisThreads` map and replies with `NotifyAxisHaltedAck`. This
+prevents the next QR scan from observing "axis registered with thread N, thread N
+just cleared, `ae[axis]==1`, errorCode==0" and firing the defensive
+`unexplainedAxes` check (which would otherwise report "Embedded program ended
+unexpectedly" against whatever new command CH launched on the same axis — typically
+the same thread number, since CH reallocates the lowest free thread). CH's
+subsequent `RegisterAxisThread` re-adds the axis under the new thread number. The
+ack is a synchronization point: CH must wait for it before launching the next
+program so the prune is in place before the new `RegisterAxisThread`.
+
 ### Atomic XQ + Thread Confirmation
 
 `ControllerCommandActor.ExecuteProgram` sends `XQ #label,N;MG _XQN` as a single
@@ -286,6 +301,13 @@ Per-axis embedded program errors surface via `ae[]`. Each QR scan,
      error: <TC text>"`, `axisState=Error`). **Multiple candidates** → escalate to
      HCD-Faulted via `EnterFaulted`. **Zero candidates** → defer one scan, then
      escalate if still unresolved.
+   - **Defensive (`ae=1` AND thread cleared AND errorCode==0):** treat as per-axis
+     Error. This catches a program ending without clearing `ae[]` and without a
+     controller error, which shouldn't happen with the current embedded design.
+     Suppressed for axes where `CommandHandlerActor` deliberately halted the
+     thread (the `NotifyAxisHalted` post-HX prune; see Thread Management above):
+     in that case the `ae==1` is the entry-time flag from a program we stopped,
+     not a fault.
 5. Push HCD-level updates (position, I/O, timing).
 6. Push per-axis QR-derived updates (position, velocity, switches).
 7. Push `UpdateThreadStatus` to IS **last** — clears `activeThread` for completed

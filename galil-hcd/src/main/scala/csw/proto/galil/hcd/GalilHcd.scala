@@ -512,6 +512,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // hardware (supplanting EEPROM defaults) and simulator (initialising
       // what would otherwise be unset embedded variables).
       _ <- writeMotionConfig()
+      _ <- readLimitConfig()
       _ = log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
     } yield ()
     
@@ -914,6 +915,91 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               s"(${chunks.size} chunk(s))")
           }
       }
+    }
+
+    Future.successful(())
+  }
+
+  /**
+   * Read per-axis limit-disable configuration from the controller and seed
+   * `forwardLimitEnabled`/`reverseLimitEnabled` on each active axis's IS state.
+   *
+   * Issued as a single compound `MG _LDA,_LDB,...` round-trip on the command
+   * connection. Galil `LD` encoding (decoded from the returned float):
+   *   0 = both limits enabled
+   *   1 = forward disabled, reverse enabled
+   *   2 = forward enabled, reverse disabled
+   *   3 = both disabled
+   *
+   * Source of truth is the embedded program (which sets `LDx=...` per axis at
+   * setup time). The HCD just reads it back so the HMI can distinguish a
+   * physically absent limit (grey) from an enabled-but-clear limit (green) and
+   * an enabled-and-hit limit (red).
+   *
+   * On any parse or I/O failure, we leave the AxisState defaults in place
+   * (`forwardLimitEnabled=true`, `reverseLimitEnabled=true`) so the indicator
+   * still distinguishes hit vs clear. A WARN is logged but init does not fail —
+   * limit decoration is informational, not safety-critical (the controller
+   * enforces the actual `LD` config regardless of what the HCD knows).
+   */
+  private def readLimitConfig(): Future[Unit] = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    import scala.util.Try
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(5.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    val axisLetters = Seq("A", "B", "C", "D", "E", "F", "G", "H")
+    val activeAxisLetters = axisLetters.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
+
+    if activeAxisLetters.isEmpty then
+      log.info("readLimitConfig: no active axes, skipping")
+      return Future.successful(())
+
+    val mgCmd = "MG " + activeAxisLetters.map(l => s"_LD$l").mkString(",")
+    log.debug(s"readLimitConfig: $mgCmd")
+
+    try {
+      val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand(mgCmd, ref)
+      )
+      val result = Await.result(future, 2.seconds)
+      result.error match {
+        case Some(err) =>
+          log.warn(s"readLimitConfig: command failed ($err) — leaving limit-enabled defaults in place")
+        case None =>
+          val text   = result.response
+          // Split on whitespace OR ';' (the latter is how ControllerCommandActor
+          // joins multi-response sequences; a single compound MG normally
+          // returns one space-separated reply, but we tokenize defensively).
+          val tokens = text.trim.split("[\\s;]+").filter(_.nonEmpty)
+          if tokens.length != activeAxisLetters.length then
+            log.warn(s"readLimitConfig: expected ${activeAxisLetters.length} tokens, got ${tokens.length} (text='${text.trim}') — leaving defaults")
+          else
+            activeAxisLetters.zip(tokens).foreach { (letter, tok) =>
+              Try(tok.toDouble.toInt).toOption match {
+                case None =>
+                  log.warn(s"readLimitConfig: axis $letter unparseable token '$tok' — leaving defaults")
+                case Some(ld) =>
+                  val fwdEnabled = (ld & 0x1) == 0   // bit 0 set = forward disabled
+                  val revEnabled = (ld & 0x2) == 0   // bit 1 set = reverse disabled
+                  val axis = Axis.fromChar(letter.head)
+                  internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+                    Map(
+                      "forwardLimitEnabled" -> fwdEnabled,
+                      "reverseLimitEnabled" -> revEnabled
+                    ),
+                    ctx.system.ignoreRef
+                  )
+                  log.info(s"Axis $letter limits: LD=$ld → forward=${if fwdEnabled then "enabled" else "disabled"}, reverse=${if revEnabled then "enabled" else "disabled"}")
+              }
+            }
+      }
+    } catch {
+      case ex: Exception =>
+        log.warn(s"readLimitConfig: exception ($ex) — leaving defaults in place")
     }
 
     Future.successful(())
