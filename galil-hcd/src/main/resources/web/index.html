@@ -926,6 +926,45 @@ function PositionChart({history,activeAxes}) {
           e(Line,{key:a,type:'monotone',dataKey:a,stroke:CHART_COLORS[a],dot:false,strokeWidth:1.5,isAnimationActive:false})))));
 }
 
+function ShutdownModal({open, onConfirm, onCancel, busy, error}) {
+  if (!open) return null;
+  return e('div',{style:{position:'fixed',top:0,left:0,right:0,bottom:0,
+    backgroundColor:'rgba(0,0,0,0.65)',display:'flex',alignItems:'center',justifyContent:'center',
+    zIndex:1000,fontFamily:'var(--mono)'},
+    onClick:(ev)=>{ if(ev.target===ev.currentTarget && !busy) onCancel(); }},
+    e('div',{style:{backgroundColor:'#111827',border:'1px solid #7F1D1D',borderRadius:8,
+      padding:'18px 22px',minWidth:340,maxWidth:440,boxShadow:'0 10px 40px rgba(0,0,0,0.5)'}},
+      e('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:10}},
+        e('span',{style:{fontSize:22,lineHeight:1}},'⚠'),
+        e('span',{style:{fontSize:14,fontWeight:700,color:'#FCA5A5',letterSpacing:.3}},
+          'Shutdown HCD?')),
+      e('div',{style:{fontSize:12,color:'#D1D5DB',lineHeight:1.55,marginBottom:6}},
+        'This will stop all motion, disable motor drives, and terminate the HCD process. ',
+        'The HMI will lose its connection. Any in-flight commands will be cancelled.'),
+      error
+        ? e('div',{style:{backgroundColor:'#7F1D1D44',border:'1px solid #991B1B',borderRadius:4,
+            padding:'6px 10px',marginTop:10,marginBottom:10,fontSize:11,color:'#FCA5A5'}},error)
+        : null,
+      e('div',{style:{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}},
+        e('button',{
+          onClick:onCancel,
+          disabled:busy,
+          style:{padding:'6px 14px',borderRadius:4,border:'1px solid #4B5563',
+            backgroundColor:'#1F2937',color:'#D1D5DB',fontFamily:'var(--mono)',
+            fontSize:11,fontWeight:600,cursor:busy?'not-allowed':'pointer',
+            opacity:busy?0.5:1}},
+          'Cancel'),
+        e('button',{
+          onClick:onConfirm,
+          disabled:busy,
+          style:{padding:'6px 14px',borderRadius:4,border:'1px solid #F87171',
+            backgroundColor:'#991B1B',color:'#FEE2E2',fontFamily:'var(--mono)',
+            fontSize:11,fontWeight:700,cursor:busy?'wait':'pointer',
+            opacity:busy?0.7:1},
+          autoFocus:false},
+          busy ? 'Shutting down…' : 'Shutdown'))));
+}
+
 function ErrorBanner({hcdState,controllerErrorMsg,onCommand}) {
   if (hcdState==='Ready' && !controllerErrorMsg) return null;
   const isFaulted = hcdState === 'Faulted';
@@ -948,7 +987,38 @@ function GalilHMI() {
   const {state, connected, submitCommand, logLines} = useHmiConnection();
   const [history, setHistory] = useState([]);
   const [compact, setCompact] = useState(false);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [shutdownBusy, setShutdownBusy] = useState(false);
+  const [shutdownError, setShutdownError] = useState(null);
   const tickRef = useRef(0);
+
+  const requestShutdown = useCallback(() => {
+    setShutdownError(null);
+    setShutdownBusy(true);
+    fetch(`${API_BASE}/api/shutdown`, {method:'POST'})
+      .then(async (resp) => {
+        if (!resp.ok) {
+          let msg = `HTTP ${resp.status}`;
+          try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
+          throw new Error(msg);
+        }
+        // Success — close the modal. The page-level Connected → Disconnected
+        // indicator will signal completion within a couple seconds when the
+        // WebSocket drops as the HCD process exits.
+        setShutdownBusy(false);
+        setShutdownOpen(false);
+      })
+      .catch(err => {
+        setShutdownBusy(false);
+        setShutdownError(err.message || String(err));
+      });
+  }, []);
+
+  const cancelShutdown = useCallback(() => {
+    if (shutdownBusy) return;
+    setShutdownOpen(false);
+    setShutdownError(null);
+  }, [shutdownBusy]);
 
   // Derive active axes from state
   const activeAxes = state?.activeAxes || [];
@@ -1022,6 +1092,13 @@ function GalilHMI() {
             backgroundColor:compact?'#1D4ED8':'#1F2937',
             color:compact?'#BFDBFE':'#6B7280',transition:'all .15s'}},
           compact ? 'Compact ✓' : 'Compact'),
+        e('button',{
+          onClick:()=>{ setShutdownError(null); setShutdownOpen(true); },
+          title:'Shut down the HCD process (safes all motors first)',
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:700,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #7F1D1D',
+            backgroundColor:'#1F2937',color:'#FCA5A5',transition:'all .15s'}},
+          'Shutdown'),
         e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
           padding:'2px 8px',borderRadius:10,fontSize:10,fontWeight:600,
           backgroundColor:connected?'#064E3B':'#7F1D1D',
@@ -1050,7 +1127,15 @@ function GalilHMI() {
     e('div',{style:{marginTop:6,display:'flex',justifyContent:'space-between',fontSize:9,color:'#374151',
       fontFamily:'var(--mono)',padding:'0 2px',flexShrink:0}},
       e('span',null,`${state?.prefix||'APS.ICS.HCD.GalilMotion'} · Prototype HMI`),
-      e('span',null,`Axes: ${activeAxes.join(',')}`)));
+      e('span',null,`Axes: ${activeAxes.join(',')}`)),
+
+    // Shutdown confirmation modal (fixed-position overlay)
+    e(ShutdownModal,{
+      open: shutdownOpen,
+      onConfirm: requestShutdown,
+      onCancel: cancelShutdown,
+      busy: shutdownBusy,
+      error: shutdownError}));
 }
 
 // Mount

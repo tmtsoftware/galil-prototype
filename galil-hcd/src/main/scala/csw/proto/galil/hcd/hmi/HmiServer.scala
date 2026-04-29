@@ -10,6 +10,13 @@ import org.apache.pekko.http.scaladsl.server.Route
 import org.apache.pekko.stream.scaladsl.{BroadcastHub, Flow, Keep, Sink, Source}
 import org.apache.pekko.stream.OverflowStrategy
 import org.apache.pekko.util.Timeout
+import csw.command.client.messages.SupervisorContainerCommonMessages
+import csw.command.client.messages.ComponentMessage
+import csw.command.client.models.framework.ComponentInfo
+import csw.location.api.extensions.URIExtension._
+import csw.location.api.models.ComponentId
+import csw.location.api.models.Connection.PekkoConnection
+import csw.location.api.scaladsl.LocationService
 import csw.logging.api.scaladsl.Logger
 import csw.logging.client.commons.LogAdminUtil
 import csw.logging.models.Level
@@ -32,6 +39,7 @@ import scala.util.{Failure, Success}
  *   WS   /ws/state      -> Streaming JSON state updates
  *   POST /api/command   -> Submit CSW commands via JSON
  *   GET  /api/status    -> One-shot full state snapshot
+ *   POST /api/shutdown  -> Initiate lifecycle Shutdown of the HCD component
  *
  * The server subscribes to InternalStateActor state changes and broadcasts
  * them to all connected WebSocket clients as JSON frames.
@@ -43,6 +51,8 @@ class HmiServer(
   commandHandlerActor: ActorRef[CommandHandlerActor.Command],
   hcdPrefix: Prefix,
   log: Logger,
+  locationService: LocationService,
+  componentInfo: ComponentInfo,
   port: Int = 9090
 )(implicit system: ActorSystem[?]) {
 
@@ -147,6 +157,29 @@ class HmiServer(
       }
     },
 
+    // REST: initiate lifecycle Shutdown of the HCD component.
+    // Resolves this component's own supervisor via the location service
+    // and sends SupervisorContainerCommonMessages.Shutdown. The supervisor
+    // stops the TLA, which triggers PostStop → lifecycleHandlers.onShutdown(),
+    // and (since the HCD runs as a standalone process) terminates the JVM.
+    //
+    // Returns immediately after the message is sent; the actual teardown
+    // happens asynchronously and the WebSocket will drop within a few seconds.
+    // Available even when the HCD is in a Faulted state — Shutdown is an
+    // admin operation, not a regular command, and is not gated.
+    path("api" / "shutdown") {
+      post {
+        onComplete(handleShutdownRequest()) {
+          case Success(msg) =>
+            complete(HttpEntity(ContentTypes.`application/json`, s"""{"status":"$msg"}"""))
+          case Failure(ex) =>
+            log.error(s"HMI shutdown request failed: ${ex.getMessage}")
+            complete(StatusCodes.InternalServerError,
+              HttpEntity(ContentTypes.`application/json`, s"""{"error":"${ex.getMessage}"}"""))
+        }
+      }
+    },
+
     // Static files: serve React SPA from resources/web/
     pathEndOrSingleSlash {
       getFromResource("web/index.html", ContentTypes.`text/html(UTF-8)`)
@@ -169,6 +202,28 @@ class HmiServer(
   // ── Log level helpers ───────────────────────────────────────────────
 
   // ── Command handling ────────────────────────────────────────────────
+
+  /**
+   * Resolve this component's own supervisor via the location service and
+   * send SupervisorContainerCommonMessages.Shutdown. Returns a Future with
+   * a status string on success, or fails with an exception on resolve error.
+   */
+  private def handleShutdownRequest(): Future[String] = {
+    log.warn(s"HMI: Shutdown requested for ${componentInfo.prefix}")
+    val connection = PekkoConnection(ComponentId(componentInfo.prefix, componentInfo.componentType))
+    locationService.resolve(connection, 5.seconds).map {
+      case Some(pekkoLocation) =>
+        val supervisor: ActorRef[ComponentMessage] =
+          pekkoLocation.uri.toActorRef.unsafeUpcast[ComponentMessage]
+        supervisor ! SupervisorContainerCommonMessages.Shutdown
+        log.info(s"HMI: Shutdown message sent to supervisor for ${componentInfo.prefix}")
+        "initiated"
+      case None =>
+        val msg = s"Could not resolve supervisor location for ${componentInfo.prefix}"
+        log.error(s"HMI: $msg")
+        throw new RuntimeException(msg)
+    }
+  }
 
   /**
    * Parse a JSON command request, build a CSW Setup, and submit it

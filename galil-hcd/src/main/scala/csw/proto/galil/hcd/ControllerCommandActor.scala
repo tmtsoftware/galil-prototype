@@ -4,6 +4,7 @@ import java.io.IOException
 
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
+import org.apache.pekko.util.ByteString
 import csw.logging.client.scaladsl.LoggerFactory
 import csw.proto.galil.hcd.GalilCommandMessage.GalilCommand
 import csw.proto.galil.io.{DataRecord, GalilIo, GalilIoTcp}
@@ -516,6 +517,30 @@ private[hcd] object ControllerCommandActor {
 
         }.receiveSignal {
           case (_, org.apache.pekko.actor.typed.PostStop) =>
+            // Send ST;MO before closing the socket — this is the safe-state
+            // policy that protects motors on every shutdown path (HMI Shutdown
+            // button, supervisor Restart, FailureStop exception, container
+            // shutdown, etc.). The send is synchronous because PostStop has
+            // no mailbox processing — we go directly through galilIo.
+            //
+            // Idempotent: ST on stationary axes and MO on already-disabled
+            // drives are both no-ops on the controller side.
+            //
+            // Failures (controller unreachable, broken socket) are caught
+            // and logged; we always proceed to the socket close so PostStop
+            // completes within the framework's 10s budget.
+            log.info("ControllerCommandActor stopping — sending ST;MO before closing")
+            try {
+              galilIo.synchronized {
+                val responses = galilIo.send("ST;MO")
+                val errored = responses.exists { case (_, bs) => bs.utf8String.trim.startsWith("?") }
+                if (errored) log.warn(s"ControllerCommandActor PostStop: ST;MO returned error: ${responses.map(_._2.utf8String.trim).mkString("; ")}")
+                else log.info("ControllerCommandActor PostStop: ST;MO acknowledged")
+              }
+            } catch {
+              case ex: Exception =>
+                log.warn(s"ControllerCommandActor PostStop: ST;MO failed (${ex.getMessage}) — continuing close")
+            }
             log.info("ControllerCommandActor stopping — closing command connection")
             try galilIo.close() catch { case _: Exception => () }
             Behaviors.same

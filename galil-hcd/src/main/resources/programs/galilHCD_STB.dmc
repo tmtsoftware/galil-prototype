@@ -66,10 +66,10 @@ REM Ignore limits if used while homing
 #LIMSWI
 IF ((_LFA = 0) | (_LRA = 0))
  IF (homing[0])
+  MG "Ignoring Limit Hit axis A during homing"
+ ELSE
   MG "Limit Hit axis A"
   ae[0]=3
- ELSE
-  MG "Ignoring Limit Hit axis A during homing"
  ENDIF
 ENDIF
 IF ((_LFB = 0) | (_LRB = 0))
@@ -443,17 +443,25 @@ homing[0]=1
 MG "Home Motor A (ANT) started"
 HVA=hspd[0]
 SHA
-JGA=10000
-MG "	Seeking Index marker..."
-FIA
-BGA
-MCA
-IF (_LFA=0); 'we hit the positive limit
+IF (_LFA=0); 'we are on the positive limit
  MG "Positive Limit Hit, Seeking Index Marker negative..."
  JGA=-10000
  FIA
  BGA
  MCA
+ELSE
+ JGA=10000
+ MG "	Seeking Index marker..."
+ FIA
+ BGA
+ MCA
+ IF (_LFA=0); 'we hit the positive limit
+  MG "Positive Limit Hit, Seeking Index Marker negative..."
+  JGA=-10000
+  FIA
+  BGA
+  MCA
+ ENDIF
 ENDIF
 IF (hoff[0]<>0)
  MG "Applying offset: ", hoff[0]

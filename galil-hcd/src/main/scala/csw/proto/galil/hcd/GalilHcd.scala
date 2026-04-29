@@ -415,6 +415,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         commandHandlerActor = commandHandlerActor,
         hcdPrefix           = componentInfo.prefix,
         log                 = log,
+        locationService     = locationService,
+        componentInfo       = componentInfo,
         port                = hmiPort
       )(ctx.system)
       hmiServer.start()
@@ -1255,10 +1257,10 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
   override def onShutdown(): Unit = {
     log.info("Shutting down Galil HCD")
-    
+
     // Stop HMI server first (clients will see disconnect)
     if (hmiServer != null) hmiServer.stop()
-    
+
     // Stop actors gracefully (null checks for case where initialize failed partway)
     if (statusMonitor != null) statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
     // Explicitly stop the console actor so its TCP handle is released immediately.
