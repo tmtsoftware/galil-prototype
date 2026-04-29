@@ -961,6 +961,21 @@ object CommandHandlerActor {
       case _ => rawTarget
     }
 
+    // Defensive soft-limit check.  The CSW path runs the same check in
+    // GalilHcd.validateAxisStateAndLimits before accepting the command, and the
+    // HMI path runs it in HmiServer.softLimitRejection before submitting.  This
+    // backstop catches any path that bypasses both — and is itself a no-op for
+    // rotating axes, axes with softLimitsEnabled=false, or axes whose limits are
+    // not configured.
+    maybeAxisState.flatMap(_.checkSoftLimit(target)) match {
+      case Some(reason) =>
+        val msg = s"positionAxis $axis: $reason"
+        log.warn(msg)
+        crm.updateCommand(Error(runId, msg))
+        return
+      case None => // accepted; continue
+    }
+
     // Check if axis is already at the requested position
     maybeAxisState match {
       case Some(axisState) =>
@@ -1266,6 +1281,19 @@ object CommandHandlerActor {
             rawTarget
         }
       case _ => rawTarget
+    }
+
+    // Defensive soft-limit check.  See handlePositionAxis for the full rationale —
+    // the validate-time check should already have caught any violation; this is a
+    // backstop and a no-op for any axis that doesn't have soft limits configured
+    // and enabled.
+    currentState.flatMap(_.checkSoftLimit(target)) match {
+      case Some(reason) =>
+        val msg = s"offsetAxis $axis: $reason"
+        log.warn(msg)
+        crm.updateCommand(Error(runId, msg))
+        return
+      case None => // accepted; continue
     }
 
     // Zero-distance offset — already at target, complete immediately

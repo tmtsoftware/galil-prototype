@@ -20,7 +20,8 @@ import csw.proto.galil.io.DataRecord
 import csw.time.core.models.UTCTime
 
 import scala.compiletime.uninitialized
-import scala.concurrent.{ExecutionContextExecutor, Future}
+import scala.concurrent.{Await, ExecutionContextExecutor, Future}
+import scala.concurrent.duration._
 
 // Add messages here...
 sealed trait GalilCommandMessage
@@ -155,6 +156,205 @@ object GalilCommandMessage {
 
 }
 
+/**
+ * JVM-shutdown driver — ensures actor PostStop work completes on signal-based
+ * JVM exit (SIGINT, SIGTERM) before the JVM tears down.
+ *
+ * The problem this solves.  Empirical testing (Session 57) on the staged
+ * binary showed that on Ctrl-C / SIGTERM the JVM exits silently with no
+ * `ControllerCommandActor stopping — sending ST;MO` log line — i.e. the
+ * actor's PostStop signal is not running, and motors stay energised.
+ *
+ * What was actually happening.  Pekko's CoordinatedShutdown *does* run on
+ * a JVM shutdown hook of its own (registered by Pekko at actor-system
+ * construction), and *does* eventually deliver PostStop to all actors —
+ * including ours.  But Pekko's hook and the JVM's exit are racing: by the
+ * time the JVM hook starts, the JVM is also concluding the exit sequence,
+ * and there is no synchronisation that holds the JVM open until
+ * CoordinatedShutdown's phases all complete.  The result is that the JVM
+ * tears down threads and sockets out from under Pekko's in-progress
+ * shutdown — sometimes before PostStop runs at all.  On HMI Shutdown,
+ * the supervisor → onShutdown → actor-system-terminate path is fully
+ * synchronous on the actor side, so by the time the JVM exits everything
+ * has already finished cleanly.  Signal exit doesn't have that
+ * synchronisation.
+ *
+ * What this driver does.  Registers our own JVM shutdown hook that:
+ *   1. Tries to resolve our supervisor and send Shutdown — best-effort
+ *      belt-and-suspenders, mostly fails on signal exit because Pekko's
+ *      own coordinated shutdown has already removed us from the location
+ *      service by the time we get here, but harmless when it fails.  Useful
+ *      on any future shutdown path where Pekko's hook hasn't already kicked
+ *      in (some launcher script variant, embedded scenario, etc).
+ *   2. Blocks on `system.whenTerminated` with a 15s cap.  This is the
+ *      load-bearing step.  By waiting on the actor system's termination
+ *      Future, we hold the JVM open until *all* CoordinatedShutdown phases
+ *      complete — which means PostStop runs to completion, ST;MO is sent
+ *      and acknowledged, and the command socket is closed cleanly before
+ *      the JVM tears down threads.
+ *
+ * Logging caveat.  By the time our hook runs, the SLF4J/CSW logging actors
+ * may already be in mid-teardown via Pekko's own shutdown.  Some log lines
+ * we'd expect (notably `ControllerCommandActor stopping — sending ST;MO`)
+ * are not flushed to csw.log even though the underlying work happens — the
+ * raw TCP send to the controller succeeds and ST;MO is acknowledged, but
+ * the structured log entry is dropped.  This is why our `announce()` helper
+ * always writes to stderr first and only attempts SLF4J best-effort:
+ * stderr survives the entire shutdown and reaches the operator's terminal.
+ * If you need to verify ST;MO was actually sent on a Ctrl-C, check the
+ * controller-side log (or the simulator's CMD/RSP trace) — the HCD-side
+ * structured log won't show it.
+ *
+ * Three exit paths and what happens on each:
+ *   - HMI Shutdown.  Supervisor → component shutdown runs synchronously
+ *     while the JVM is still healthy.  All log lines flush.  Our hook
+ *     fires last (as the JVM begins its exit), finds the supervisor
+ *     already gone, finds `whenTerminated` already complete, returns
+ *     immediately.  Belt-and-suspenders only.
+ *   - SIGINT (Ctrl-C).  Pekko's own JVM hook starts CoordinatedShutdown.
+ *     Our hook runs in parallel.  Resolve fails (location service already
+ *     gone).  We await `whenTerminated`; PostStop runs during that wait
+ *     and ST;MO succeeds.  JVM exits cleanly.
+ *   - SIGTERM.  Same as SIGINT.  (Earlier testing suggested SIGTERM and
+ *     SIGINT behaved differently — the difference was actually that on
+ *     SIGTERM Pekko's CoordinatedShutdown sometimes flushes more log lines
+ *     before the logging actors stop, but the underlying behaviour is the
+ *     same.)
+ *
+ * Bounded runtime.  The await caps at 15s so that a wedged controller or
+ * a stuck shutdown phase cannot block the JVM exit indefinitely.  In
+ * practice the HMI-Shutdown trace shows the full sequence completes in
+ * ~50ms on the simulator and ~1.5s on hardware (with 7 axes' worth of
+ * BZ-paused cleanup), so 15s is generous.  If we hit the timeout we
+ * announce that on stderr and let the JVM proceed — the OS will reclaim
+ * the sockets, motors may not be safed.
+ *
+ * Registration is one-shot per JVM (guarded by `registered`).  Restart
+ * re-invokes `initialize()` but the JVM-level hook persists; we don't
+ * want to register a second copy.
+ *
+ * What this driver is NOT.  It's not a replacement for HMI Shutdown or
+ * for the deployed control system's lifecycle commands — those remain
+ * the proper way to stop the HCD.  This is a development-time and
+ * defensive safety net.
+ */
+private object SignalShutdownDriver {
+  // JVM-lifetime flag — survives Restart's destruction of GalilHcdHandlers
+  // because this object lives at the classloader level, not the actor level.
+  private val registered = new java.util.concurrent.atomic.AtomicBoolean(false)
+
+  // Total time we'll let the hook block before giving up and letting the JVM
+  // proceed with its exit.  Sized to comfortably cover the observed clean-
+  // shutdown duration even on hardware with all 7 axes active.
+  private val ShutdownAwaitTimeout = scala.concurrent.duration.Duration(15, scala.concurrent.duration.SECONDS)
+
+  /**
+   * Register a JVM shutdown hook on first call; no-op on subsequent calls.
+   *
+   * The hook closes over `cswCtx` and the `ActorSystem` rather than `ctx`
+   * because `ctx` belongs to the TLA actor, which gets destroyed and
+   * recreated on Restart — keeping a reference to it would create a stale
+   * binding.  The actor system is JVM-scoped and stable across Restart.
+   */
+  def registerOnce(
+    cswCtx: CswContext,
+    system: org.apache.pekko.actor.typed.ActorSystem[?]
+  ): Unit = {
+    if (registered.compareAndSet(false, true)) {
+      val log = cswCtx.loggerFactory.getLogger
+      val hook = new Thread(() => runShutdown(cswCtx, system), "galil-hcd-signal-shutdown")
+      try {
+        Runtime.getRuntime.addShutdownHook(hook)
+        log.info("Signal shutdown driver registered")
+      } catch {
+        case ex: IllegalStateException =>
+          log.warn(s"Could not register signal shutdown driver: ${ex.getMessage}")
+      }
+    }
+  }
+
+  /**
+   * Drive a clean CSW Shutdown from the JVM-shutdown thread.  Runs on its
+   * own thread (not on a Pekko dispatcher) so blocking calls are safe.
+   *
+   * Strategy:
+   *   1. Resolve our supervisor by component prefix.
+   *   2. If found, send Shutdown.  If not found, the system is probably
+   *      already shutting down — just wait for it.
+   *   3. Block on `whenTerminated` with a hard timeout so a wedged shutdown
+   *      can't hang the JVM forever.
+   *
+   * stderr is used for the visible status messages because by the time the
+   * hook runs the SLF4J logging actors may be mid-teardown — stderr is the
+   * one channel guaranteed to reach the operator's terminal.  We also try
+   * SLF4J for the structured log file; if it works it works.
+   */
+  private def runShutdown(
+    cswCtx: CswContext,
+    system: org.apache.pekko.actor.typed.ActorSystem[?]
+  ): Unit = {
+    import csw.command.client.messages.{ComponentMessage, SupervisorContainerCommonMessages}
+    import csw.location.api.extensions.URIExtension._
+    import csw.location.api.models.{ComponentId, Connection}
+    import scala.concurrent.{Await, ExecutionContext}
+    import scala.concurrent.duration._
+
+    val log    = cswCtx.loggerFactory.getLogger
+    val prefix = cswCtx.componentInfo.prefix
+    // ActorSystem in implicit scope: required by URIExtension.toActorRef and
+    // also serves as the ExecutionContext for any Future operations below.
+    given org.apache.pekko.actor.typed.ActorSystem[?] = system
+    given ExecutionContext = system.executionContext
+
+    def announce(msg: String): Unit = {
+      System.err.println(s"[galil-hcd] $msg")
+      try log.warn(msg) catch { case _: Throwable => () }
+    }
+
+    announce(s"JVM shutdown — driving clean CSW Shutdown for $prefix")
+
+    try {
+      // Step 1: resolve our supervisor.  Short timeout — if location service
+      // is unreachable, fall through to the await below.
+      val connection = Connection.PekkoConnection(
+        ComponentId(prefix, cswCtx.componentInfo.componentType)
+      )
+      val resolveFuture = cswCtx.locationService.resolve(connection, 3.seconds)
+      val maybeSupervisor = Await.result(resolveFuture, 4.seconds)
+
+      maybeSupervisor match {
+        case Some(loc) =>
+          val supervisor: ActorRef[ComponentMessage] =
+            loc.uri.toActorRef.unsafeUpcast[ComponentMessage]
+          supervisor ! SupervisorContainerCommonMessages.Shutdown
+          announce("Shutdown message sent to supervisor; waiting for termination")
+        case None =>
+          // Either location service is gone or the supervisor has already
+          // unregistered (which happens early in a normal CSW Shutdown).
+          // Either way the right thing to do is just wait.
+          announce("Supervisor not resolvable — likely already shutting down; waiting for termination")
+      }
+    } catch {
+      case ex: Throwable =>
+        announce(s"Resolve/send failed: ${ex.getMessage} — proceeding to await termination anyway")
+    }
+
+    // Step 2: block until the actor system is fully done, capped at the
+    // hook's overall budget.  whenTerminated is the Future that completes
+    // when ALL the coordinated-shutdown phases have run — including our
+    // component's PostStop chain, which is what does the ST;MO.
+    try {
+      Await.result(system.whenTerminated, ShutdownAwaitTimeout)
+      announce("Actor system terminated cleanly — JVM exit proceeding")
+    } catch {
+      case _: java.util.concurrent.TimeoutException =>
+        announce(s"Shutdown await exceeded ${ShutdownAwaitTimeout.toSeconds}s — proceeding to JVM exit anyway")
+      case ex: Throwable =>
+        announce(s"Shutdown await failed: ${ex.getMessage} — proceeding to JVM exit")
+    }
+  }
+}
+
 class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
     extends ComponentHandlers(ctx, cswCtx) {
 
@@ -286,6 +486,16 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
 
     log.info("Initializing Galil HCD")
+
+    // Register a JVM-level shutdown hook that holds the JVM open until
+    // Pekko's CoordinatedShutdown phases (including our actor PostStop
+    // signals) have fully completed on signal-based exit (SIGINT, SIGTERM).
+    // Without this, the JVM tears down threads and sockets out from under
+    // the in-progress shutdown and our ST;MO safe-state policy may not run
+    // to completion.  See SignalShutdownDriver for the empirical findings
+    // and the full picture.  One-shot per JVM (Restart re-runs initialize()
+    // but the hook persists).
+    SignalShutdownDriver.registerOnce(cswCtx, ctx.system)
     
     // Phase 1: Load controller and axis-specific parameters from CSW Configuration Service
     hcdConfig = loadConfiguration()
@@ -520,6 +730,19 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     
     try {
       Await.result(initFuture, 120.seconds)
+
+      // Transition HCD state from Uninitialized → Ready.  Until this point,
+      // commands are rejected by the universal gate in CommandHandlerActor
+      // (and by the HMI and CSW-validate gates that mirror it).  Doing the
+      // transition AFTER initFuture's Await.result completes guarantees that
+      // we only flip to Ready if every step of init actually succeeded — if
+      // any step throws, we fall through to the catch below and stay in
+      // Uninitialized, which leaves the operator looking at a stuck-init view
+      // and able to Restart from the HMI to retry.
+      internalStateActor ! InternalStateActor.UpdateHcdState(
+        Map("state" -> HcdStateEnum.Ready),
+        ctx.system.ignoreRef
+      )
     } catch {
       case ex: Exception =>
         log.error("Initialization failed", ex = ex)
@@ -1258,8 +1481,21 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   override def onShutdown(): Unit = {
     log.info("Shutting down Galil HCD")
 
-    // Stop HMI server first (clients will see disconnect)
-    if (hmiServer != null) hmiServer.stop()
+    // Stop HMI server first (clients will see disconnect).  We MUST await
+    // termination — without this, the old binding's existing connections
+    // (browser keep-alive HTTP, WebSocket) survive into the new TLA's
+    // initialize() on Restart, and HTTP requests continue to be routed by
+    // the OLD binding's route closures, which hold references to the
+    // already-terminated InternalStateActor.  See HmiServer.stop() for
+    // the full explanation.  3s budget = 2s hardDeadline + 1s slack.
+    if (hmiServer != null) {
+      try {
+        Await.result(hmiServer.stop(), 3.seconds)
+      } catch {
+        case ex: Throwable =>
+          log.warn(s"HMI server shutdown await failed: ${ex.getMessage} — proceeding anyway")
+      }
+    }
 
     // Stop actors gracefully (null checks for case where initialize failed partway)
     if (statusMonitor != null) statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
@@ -1287,16 +1523,26 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       case setup: Setup =>
         val commandName = setup.commandName.name
 
-        // Gate: if HCD is Faulted, only faultReset is permitted.
-        // This covers both controller errors and connection loss — any Faulted
-        // transition blocks commands until the operator explicitly clears the fault.
-        if commandName != "faultReset" then
-          val hcdState = queryHcdStateSync()
-          if hcdState.state == HcdStateEnum.Faulted then
+        // Gate: reject all commands when the HCD is not in Ready state.
+        //   Uninitialized — startup is still in progress (controller setup,
+        //                  motion config writes, etc.); accepting commands
+        //                  here would race the init sequence.  No exemption:
+        //                  faultReset doesn't make sense when there is no
+        //                  fault yet.
+        //   Faulted      — operator must clear the fault first; only
+        //                  faultReset is permitted (legacy behavior).
+        // Ready commands fall through to normal validation.
+        val hcdState = queryHcdStateSync()
+        hcdState.state match
+          case HcdStateEnum.Uninitialized =>
+            log.warn(s"Command '$commandName' rejected: HCD is Uninitialized")
+            return CommandResponse.Invalid(runId, CommandIssue.OtherIssue("HCD Uninitialized — commands not yet accepted"))
+          case HcdStateEnum.Faulted if commandName != "faultReset" =>
             val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
                          else "HCD is Faulted"
             log.warn(s"Command '$commandName' rejected: $reason")
             return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(s"HCD Faulted: $reason"))
+          case _ => // Ready, or Faulted-with-faultReset — proceed
 
         // Immediate commands handled by CommandHandlerActor use ICD keys directly
         if (CommandHandlerActor.isImmediate(commandName)) {
@@ -1439,12 +1685,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             CommandIssue.UnsupportedCommandIssue(s"Unknown long-running command: $other"))
       }
 
-      // Phase 2: Axis state machine validation (SDD Figure 4-2)
+      // Phase 2: Axis state machine validation (SDD Figure 4-2) and, for the
+      // motion commands that accept a target, soft-limit enforcement.  Both
+      // checks reuse a single IS query for the axis state.
       val commandName = setup.commandName.name
       val axis = Axis.fromChar(axisChoice.name.head)
-      
-      validateAxisState(runId, axis, commandName)
-      
+
+      validateAxisStateAndLimits(runId, axis, commandName, setup)
+
     } catch {
       case _: NoSuchElementException =>
         CommandResponse.Invalid(runId, CommandIssue.MissingKeyIssue("Required parameter missing"))
@@ -1452,13 +1700,30 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
 
   /**
-   * Validate that the given command is permitted in the axis's current state.
-   * Queries InternalState for the axis's axisState and checks against Figure 4-2 transitions.
+   * Validate that the given command is permitted in the axis's current state, and
+   * (for positionAxis and offsetAxis) that the requested absolute target lies within
+   * the axis's soft limits.  Both checks share a single InternalState query for the
+   * axis.
+   *
+   * Soft-limit enforcement intentionally applies only to absolute and relative move
+   * commands.  homeAxis is excluded because the homing routine is required to seek
+   * the limits.  selectWheel / positionWheel / trackAxis are excluded because they
+   * are used only on rotating axes and there is no soft-limit configuration for them.
+   *
+   * Per AxisState.checkSoftLimit, soft-limit enforcement is itself a no-op when the
+   * axis is rotating, when softLimitsEnabled is false, or when limits are not
+   * configured (degenerate 0.0/0.0).
    */
-  private def validateAxisState(runId: Id, axis: Axis, commandName: String): ValidateCommandResponse = {
+  private def validateAxisStateAndLimits(
+    runId: Id,
+    axis: Axis,
+    commandName: String,
+    setup: Setup
+  ): ValidateCommandResponse = {
     import scala.concurrent.Await
     import scala.concurrent.duration._
     import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
 
     implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(2.seconds)
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
@@ -1471,14 +1736,36 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
       maybeState match {
         case Some(axisState) =>
+          // 1. State machine check first.
           axisState.axisState.validateCommand(commandName) match {
-            case None =>
-              // Transition is valid
-              CommandResponse.Accepted(runId)
             case Some(reason) =>
               log.warn(s"Command rejected: $commandName on axis $axis — $reason")
-              CommandResponse.Invalid(runId, CommandIssue.OtherIssue(reason))
+              return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(reason))
+            case None =>
+              // Transition valid; fall through to soft-limit check.
           }
+
+          // 2. Soft-limit check for positionAxis and offsetAxis.
+          // For positionAxis the target is absolute; for offsetAxis it is the
+          // current axis position plus the requested distance, so we evaluate
+          // it against the same accumulated-count `position` field used elsewhere.
+          val maybeTarget: Option[Double] = commandName match {
+            case "positionAxis" =>
+              Some(setup(PositionAxisCommand.targetKey).head.toDouble)
+            case "offsetAxis" =>
+              Some(axisState.position + setup(OffsetAxisCommand.distanceKey).head.toDouble)
+            case _ => None
+          }
+
+          maybeTarget.flatMap(axisState.checkSoftLimit) match {
+            case Some(reason) =>
+              val msg = s"$commandName $axis rejected: $reason"
+              log.warn(msg)
+              CommandResponse.Invalid(runId, CommandIssue.ParameterValueOutOfRangeIssue(msg))
+            case None =>
+              CommandResponse.Accepted(runId)
+          }
+
         case None =>
           // Axis not initialized in IS — reject (axis should be initialized during HCD init)
           CommandResponse.Invalid(runId,

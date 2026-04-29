@@ -169,11 +169,36 @@ class HmiServer(
     // admin operation, not a regular command, and is not gated.
     path("api" / "shutdown") {
       post {
-        onComplete(handleShutdownRequest()) {
+        onComplete(sendSupervisorMessage("Shutdown", SupervisorContainerCommonMessages.Shutdown)) {
           case Success(msg) =>
             complete(HttpEntity(ContentTypes.`application/json`, s"""{"status":"$msg"}"""))
           case Failure(ex) =>
             log.error(s"HMI shutdown request failed: ${ex.getMessage}")
+            complete(StatusCodes.InternalServerError,
+              HttpEntity(ContentTypes.`application/json`, s"""{"error":"${ex.getMessage}"}"""))
+        }
+      }
+    },
+
+    // REST: initiate lifecycle Restart of the HCD component.
+    // Resolves this component's own supervisor and sends
+    // SupervisorContainerCommonMessages.Restart. The supervisor unregisters
+    // from the Location Service, stops the TLA (PostStop → onShutdown), then
+    // re-creates a fresh TLA and runs initialize() again.  Net effect: HCD
+    // internal state, controller TCP connections, and embedded program load
+    // are all reset, but the JVM stays alive — the HMI WebSocket client will
+    // see a brief disconnect (auto-reconnects after 2s) and then resume.
+    //
+    // Available even when the HCD is in a Faulted state — Restart is an admin
+    // operation and a strictly bigger hammer than faultReset for HCD-internal
+    // issues.  Like Shutdown, it is not gated by the Faulted guard.
+    path("api" / "restart") {
+      post {
+        onComplete(sendSupervisorMessage("Restart", SupervisorContainerCommonMessages.Restart)) {
+          case Success(msg) =>
+            complete(HttpEntity(ContentTypes.`application/json`, s"""{"status":"$msg"}"""))
+          case Failure(ex) =>
+            log.error(s"HMI restart request failed: ${ex.getMessage}")
             complete(StatusCodes.InternalServerError,
               HttpEntity(ContentTypes.`application/json`, s"""{"error":"${ex.getMessage}"}"""))
         }
@@ -205,18 +230,34 @@ class HmiServer(
 
   /**
    * Resolve this component's own supervisor via the location service and
-   * send SupervisorContainerCommonMessages.Shutdown. Returns a Future with
-   * a status string on success, or fails with an exception on resolve error.
+   * send the given lifecycle message (Shutdown or Restart).  Both messages
+   * share the same resolve path; the only difference is which message is
+   * delivered.
+   *
+   * The parameter type is `ComponentMessage` rather than the more specific
+   * `SupervisorContainerCommonMessages` because the latter is an `object`
+   * (containing the case objects), not a sealed-trait type.  `ComponentMessage`
+   * is the common parent the supervisor's `ActorRef` accepts — both `Shutdown`
+   * and `Restart` extend it, as do the other administrative messages we may
+   * later add (e.g. `GoOffline` / `GoOnline` if exposed in the HMI).
+   *
+   * @param action  short human label used for logging (e.g. "Shutdown", "Restart")
+   * @param message the actual lifecycle message to send
+   * @return Future of a status string on success, or fails with an exception
+   *         if the supervisor location can't be resolved.
    */
-  private def handleShutdownRequest(): Future[String] = {
-    log.warn(s"HMI: Shutdown requested for ${componentInfo.prefix}")
+  private def sendSupervisorMessage(
+    action: String,
+    message: ComponentMessage
+  ): Future[String] = {
+    log.warn(s"HMI: $action requested for ${componentInfo.prefix}")
     val connection = PekkoConnection(ComponentId(componentInfo.prefix, componentInfo.componentType))
     locationService.resolve(connection, 5.seconds).map {
       case Some(pekkoLocation) =>
         val supervisor: ActorRef[ComponentMessage] =
           pekkoLocation.uri.toActorRef.unsafeUpcast[ComponentMessage]
-        supervisor ! SupervisorContainerCommonMessages.Shutdown
-        log.info(s"HMI: Shutdown message sent to supervisor for ${componentInfo.prefix}")
+        supervisor ! message
+        log.info(s"HMI: $action message sent to supervisor for ${componentInfo.prefix}")
         "initiated"
       case None =>
         val msg = s"Could not resolve supervisor location for ${componentInfo.prefix}"
@@ -236,16 +277,47 @@ class HmiServer(
       val request = parseCommandRequest(body)
       val runId = Id()
 
-      // Gate: if HCD is Faulted, only faultReset is permitted.
-      // The HMI dispatches directly to CommandHandlerActor (bypassing CSW validateCommand),
-      // so we must enforce the same Faulted check here.
-      if request.commandName != "faultReset" then
-        val hcdState = queryHcdStateForHmi()
-        if hcdState.state == HcdStateEnum.Faulted then
+      // Gate: reject all commands when the HCD is not in Ready state.
+      //   Uninitialized — startup is still in progress.  No exemptions:
+      //                  faultReset has nothing to reset, setSoftLimits
+      //                  could race the initial axis-config writes, and
+      //                  no other command should reach the controller
+      //                  before init completes.
+      //   Faulted      — operator must clear the fault first; faultReset
+      //                  is permitted, and setSoftLimits is permitted
+      //                  because it's an HMI-internal flag flip useful
+      //                  for preparing limit-switch tests before recovery.
+      // Ready commands fall through to normal handling.
+      val hcdState = queryHcdStateForHmi()
+      hcdState.state match
+        case HcdStateEnum.Uninitialized =>
+          log.warn(s"HMI command '${request.commandName}' rejected: HCD is Uninitialized")
+          return commandResponseJson(runId.id, "Error", "HCD Uninitialized — commands not yet accepted")
+        case HcdStateEnum.Faulted
+             if request.commandName != "faultReset" && request.commandName != "setSoftLimits" =>
           val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
                        else "HCD is Faulted"
           log.warn(s"HMI command '${request.commandName}' rejected: $reason")
           return commandResponseJson(runId.id, "Error", s"HCD Faulted: $reason")
+        case _ => // Ready, or Faulted-with-faultReset/setSoftLimits — proceed
+
+      // HMI-internal action: per-axis soft-limit bypass toggle.  Not exposed to
+      // assemblies (no CSW Setup, no CommandHandlerActor); fires UpdateAxisState
+      // directly to the InternalStateActor.  The HMI sends:
+      //   { commandName: "setSoftLimits", params: { axis: "A", enabled: true } }
+      if request.commandName == "setSoftLimits" then
+        return handleSetSoftLimits(request.params, runId)
+
+      // Soft-limit check for positionAxis / offsetAxis.  The CSW path runs the
+      // same check in validateCommand and would reject the command before
+      // submitting it; the HMI bypasses that path so we must replicate it here.
+      // Returning "Error" synchronously means the HMI sees the rejection in the
+      // immediate response rather than as an asynchronous CRM update.
+      softLimitRejection(request.commandName, request.params) match
+        case Some(reason) =>
+          log.warn(s"HMI command '${request.commandName}' rejected: $reason")
+          return commandResponseJson(runId.id, "Error", reason)
+        case None => // accepted, fall through
 
       // Build CSW Setup from JSON params using ICD key objects
       val setup = buildSetup(request.commandName, request.params, runId)
@@ -263,6 +335,84 @@ class HmiServer(
         commandResponseJson("", "Error", ex.getMessage)
     }
   }
+
+  /**
+   * HMI-internal handler for the setSoftLimits action.  Updates the per-axis
+   * softLimitsEnabled flag directly in InternalState — not a CSW command.  No
+   * controller interaction; the flag is consulted at command-validation time only.
+   */
+  private def handleSetSoftLimits(params: Map[String, JsValue], runId: Id): String = {
+    val axisChar = params.get("axis") match
+      case Some(JsString(s)) if s.length == 1 => s.head.toUpper
+      case _ =>
+        return commandResponseJson(runId.id, "Error", "setSoftLimits: missing or invalid 'axis' parameter")
+    val enabled = params.get("enabled") match
+      case Some(JsBoolean(b)) => b
+      case _ =>
+        return commandResponseJson(runId.id, "Error", "setSoftLimits: missing or invalid 'enabled' parameter")
+    try
+      val axis = Axis.fromChar(axisChar)
+      internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+        Map("softLimitsEnabled" -> enabled),
+        system.ignoreRef)
+      log.info(s"HMI: softLimitsEnabled=$enabled on axis $axisChar")
+      commandResponseJson(runId.id, "Completed")
+    catch
+      case ex: IllegalArgumentException =>
+        commandResponseJson(runId.id, "Error", s"setSoftLimits: ${ex.getMessage}")
+  }
+
+  /**
+   * Mirror of GalilHcd.validateAxisStateAndLimits's soft-limit check for the HMI
+   * command path.  Returns Some(reason) if the command must be rejected for a
+   * soft-limit violation, None otherwise.
+   *
+   * Only positionAxis and offsetAxis carry an absolute or relative target; for
+   * everything else this is a no-op.  Soft-limit enforcement itself is gated by
+   * AxisState.checkSoftLimit (linear-only, softLimitsEnabled, limits configured).
+   */
+  private def softLimitRejection(commandName: String, params: Map[String, JsValue]): Option[String] = {
+    if commandName != "positionAxis" && commandName != "offsetAxis" then return None
+
+    val axisChar = params.get("axis") match
+      case Some(JsString(s)) if s.nonEmpty => s.head.toUpper
+      case _ => return None  // missing axis → buildSetup will produce a clearer error
+    val raw = params.get("target") match
+      case Some(JsNumber(n)) => Some(n.toDouble)
+      case Some(JsString(s)) => scala.util.Try(s.toDouble).toOption
+      case _ => None
+    val rawTarget = raw match
+      case Some(v) => v
+      case None    => return None  // no target → not a soft-limit issue
+
+    val axis = try Axis.fromChar(axisChar)
+               catch { case _: IllegalArgumentException => return None }
+    val maybeAxisState = queryAxisStateForHmi(axis)
+    maybeAxisState.flatMap { axisState =>
+      val absTarget =
+        if commandName == "offsetAxis" then axisState.position + rawTarget
+        else rawTarget
+      axisState.checkSoftLimit(absTarget).map(reason => s"$commandName $axisChar rejected: $reason")
+    }
+  }
+
+  /**
+   * Synchronously query a single AxisState from InternalState for HMI gating.
+   * Returns None on missing axis or query failure (fail-open, like the CSW path).
+   */
+  private def queryAxisStateForHmi(axis: Axis): Option[AxisState] =
+    import scala.concurrent.Await
+    try
+      Await.result(
+        AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+          ref => InternalStateActor.GetAxisState(axis, ref)
+        )(timeout, system.scheduler),
+        timeout.duration
+      )
+    catch
+      case ex: Exception =>
+        log.warn(s"HMI: axis state query failed for $axis: ${ex.getMessage}")
+        None
 
   /**
    * Synchronously query HcdState from InternalStateActor for HMI command gating.
@@ -405,17 +555,50 @@ class HmiServer(
     }
   }
 
-  def stop(): Unit = {
+  /**
+   * Stop the HMI HTTP server and return a Future that completes when all
+   * existing connections are actually closed.
+   *
+   * Uses `ServerBinding.terminate(hardDeadline)` rather than `unbind()`:
+   *   - unbind() only stops accepting new connections; existing ones (the
+   *     persistent browser keep-alive HTTP connection and the WebSocket)
+   *     remain alive until the client closes them.  On Restart this matters
+   *     because the new HmiServer's bind() succeeds even though the old
+   *     binding still holds open connections — and HTTP requests on those
+   *     persistent connections continue to be routed by the OLD binding's
+   *     route closures, which capture the OLD (now-terminated) actor refs.
+   *     Result: post-Restart commands fail with "InternalStateActor had
+   *     already been terminated."
+   *   - terminate(hardDeadline) actively closes existing connections after
+   *     the deadline, which forces the browser to reconnect — and the next
+   *     connection lands on the new binding with the new actor refs.
+   *
+   * The hard deadline is short (2s) because:
+   *   1. We're tearing down for either a Shutdown (HCD is stopping) or a
+   *      Restart (we want the new server up quickly) — neither needs a
+   *      lengthy in-flight-request grace period.
+   *   2. Real HMI requests are sub-second; if anything is in flight at
+   *      this moment it's almost certainly stalled.
+   *
+   * Caller (onShutdown) MUST await this Future before returning, otherwise
+   * a subsequent initialize() may bind a second server on the same port
+   * before this one fully releases.
+   */
+  def stop(): Future[Unit] = {
     // Disable log appender broadcast before teardown
     HmiLogAppender.clearBroadcast()
 
     // Cancel the WebSocket state push timer
     wsCancellable.cancel()
 
-    bindingFuture.foreach { bf =>
-      bf.flatMap(_.unbind()).onComplete { _ =>
-        log.info("HMI server stopped")
-      }
+    bindingFuture match {
+      case Some(bf) =>
+        bf.flatMap(_.terminate(hardDeadline = 2.seconds)).map { _ =>
+          log.info("HMI server stopped")
+          ()
+        }
+      case None =>
+        Future.successful(())
     }
   }
 }

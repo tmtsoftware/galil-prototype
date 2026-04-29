@@ -123,7 +123,8 @@ class CurrentStatePublisherActor(
       // (e.g. Idle→Homing→Idle) is captured in CSP regardless of poll timer phase.
       // Without this, fast-completing commands (~100ms) can skip transient states
       // because the 10Hz timer hasn't fired between the state changes.
-      if changedFields.contains("axisState") then
+      // Suppressed during Uninitialized — see Publish10Hz comment below.
+      if changedFields.contains("axisState") && newState.state != HcdStateEnum.Uninitialized then
         changedAxes.foreach { axis =>
           newState.getAxis(axis).foreach { axisState =>
             publishAxisState(axis, axisState)
@@ -133,27 +134,40 @@ class CurrentStatePublisherActor(
       this
       
     case Publish1Hz =>
-      // CurrentState published unconditionally at 1Hz so late subscribers always
-      // receive a message within 1 second. Change-detection caused starvation:
-      // after initialization state stabilizes, hcdChanged stays false and
-      // a subscriber that arrives after the first publish never receives anything.
-      // InputOutputState keeps change-detection (no tests block on it).
+      // CurrentState (HCD lifecycle state, controllerId, controllerErrorMsg) is
+      // published unconditionally at 1Hz, including during Uninitialized — the
+      // ICD defines "Uninitialized" as a valid choice value precisely so
+      // assemblies can see this state.  Late subscribers always receive a
+      // message within 1 second.  Change-detection caused starvation: after
+      // initialization state stabilizes, hcdChanged stays false and a
+      // subscriber that arrives after the first publish never receives anything.
+      //
+      // InputOutputState is suppressed during Uninitialized — digital/analog
+      // values are at default zeros until the QR poll starts reading the
+      // controller.  Once Ready, normal change-detection applies.
       latestState.foreach { state =>
         publishCurrentState(state)
 
-        val prev = lastPublishedHcdState
-        val ioChanged = prev.isEmpty ||
-          prev.get.digitalInputs  != state.digitalInputs  ||
-          prev.get.digitalOutputs != state.digitalOutputs ||
-          prev.get.analogInputs   != state.analogInputs
-        if ioChanged then publishInputOutputState(state)
+        if state.state != HcdStateEnum.Uninitialized then
+          val prev = lastPublishedHcdState
+          val ioChanged = prev.isEmpty ||
+            prev.get.digitalInputs  != state.digitalInputs  ||
+            prev.get.digitalOutputs != state.digitalOutputs ||
+            prev.get.analogInputs   != state.analogInputs
+          if ioChanged then publishInputOutputState(state)
 
-        lastPublishedHcdState = Some(state)
+          lastPublishedHcdState = Some(state)
       }
       this
 
     case Publish10Hz =>
-      latestState.foreach { state =>
+      // Per-axis publications (position/velocity/axisState/command state) are
+      // suppressed during Uninitialized — values are at construction defaults
+      // (position=0, velocity=0, axisState=Lost) until the controller is read.
+      // Publishing those would create noise for subscribing assemblies and could
+      // misleadingly trigger logic that watches for axisState transitions
+      // (e.g. "axis is Lost, home it").  Resumes once Ready.
+      latestState.filter(_.state != HcdStateEnum.Uninitialized).foreach { state =>
         // CurrentStateAxis[A-H] always published at 10 Hz — position/velocity is
         // a continuous stream that Assemblies need at rate, not just on change.
         publishAllAxisStates(state)
@@ -180,10 +194,13 @@ class CurrentStatePublisherActor(
    * Uses keys from CurrentStateCurrentState
    */
   private def publishCurrentState(hcdState: HcdState): Unit =
-    // Map internal enum to ICD choice string
+    // Map internal enum to ICD choice string.  Names are identical to the
+    // ICD's stateKey choices (Uninitialized, Ready, Faulted) — see
+    // GalilMotionKeys.CurrentStateCurrentState.stateKey.
     val stateValue = hcdState.state match
-      case HcdStateEnum.Ready => "Ready"
-      case HcdStateEnum.Faulted => "Faulted"
+      case HcdStateEnum.Uninitialized => "Uninitialized"
+      case HcdStateEnum.Ready         => "Ready"
+      case HcdStateEnum.Faulted       => "Faulted"
     
     val cs = CurrentState(
       CurrentStateCurrentState.eventKey.source,

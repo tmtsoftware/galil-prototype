@@ -22,7 +22,7 @@ import java.time.Instant
 // ========================================
 
 enum HcdStateEnum:
-  case Ready, Faulted
+  case Uninitialized, Ready, Faulted
 
 /**
  * Connection status for a single TCP handle to the Galil DMC-500x0.
@@ -202,9 +202,22 @@ object Axis:
  * @param reverseLimitEnabled True if the reverse limit is wired/active per controller
  *   _LDx config. Read once at init (bit 1 of LD = reverse disabled).
  * @param mechanismType Type of mechanism (linear or rotating)
- * @param upperLimit Upper soft limit (for linear mechanisms)
- * @param lowerLimit Lower soft limit (for linear mechanisms)
+ * @param upperLimit Upper soft limit in encoder counts (linear mechanisms only).
+ *   Seeded from AxisConfig.upperLimit at HCD init. Same units as positionAxis.target
+ *   and the raw motor `position` field. Soft-limit enforcement is active only when
+ *   upperLimit > lowerLimit (a degenerate 0.0/0.0 disables enforcement, matching the
+ *   "not configured" sentinel pattern used elsewhere) and softLimitsEnabled is true.
+ * @param lowerLimit Lower soft limit in encoder counts (linear mechanisms only).
+ *   Seeded from AxisConfig.lowerLimit at HCD init. Same units as upperLimit.
  * @param algorithm Target approach algorithm (for rotating mechanisms)
+ * @param softLimitsEnabled Per-axis runtime bypass for soft-limit enforcement (linear axes only).
+ *   When true (default), positionAxis and offsetAxis targets that fall outside [lowerLimit,
+ *   upperLimit] are rejected at validate-time before any motion is initiated. When false,
+ *   the limits are not consulted — the axis is then protected only by its hardware limit
+ *   switches (#LIMSWI), which is the necessary condition for testing those switches.
+ *   Operator-controlled via the HMI; not exposed in the assembly ICD. Internal HCD flag —
+ *   not published in CurrentStateAxis. Has no effect on rotating axes (which have no
+ *   soft limits) or on homeAxis (which is permitted to seek limits by design).
  *
  * Motion configuration (mirrors embedded variables from SDD Table 3-2,
  * set by configAxis command, used for timeout calculation):
@@ -254,6 +267,11 @@ case class AxisState(
   upperLimit: Option[Double] = None,
   lowerLimit: Option[Double] = None,
   algorithm: Option[RotatingAlgorithm] = None,
+  // Per-axis runtime bypass for soft-limit enforcement.  Defaults to true (limits active)
+  // so the safe-by-default behaviour applies on startup and after any state reset.  Toggled
+  // off temporarily from the HMI when the operator wants to test hardware limit switches.
+  // Has no effect on rotating axes (no soft limits configured) or on homeAxis.
+  softLimitsEnabled: Boolean = true,
   // Motion configuration (embedded variables, set by configAxis / readMotionConfig, SDD Table 3-2)
   maxSpeed: Option[Double] = None,
   acceleration: Option[Double] = None,
@@ -316,6 +334,38 @@ case class AxisState(
     }.getOrElse(demand)
 
   /**
+   * Validate a target position against this axis's soft limits.
+   *
+   * Returns None when the target is acceptable (or when soft-limit enforcement does
+   * not apply to this axis), and Some(reason) when the target must be rejected.
+   *
+   * Enforcement applies only when ALL of:
+   *   - mechanismType is Linear (rotating axes have no soft limits)
+   *   - softLimitsEnabled is true (operator hasn't bypassed for limit-switch testing)
+   *   - upperLimit and lowerLimit are both set, with upperLimit > lowerLimit
+   *     (degenerate 0.0/0.0 from an unconfigured linear axis is treated as "limits
+   *     not configured" and disables enforcement, matching the sentinel pattern used
+   *     for countsPerRevolution=0.0 elsewhere)
+   *
+   * Targets are compared in raw encoder counts (the same space as `position` and
+   * positionAxis.target).
+   *
+   * @param target the proposed absolute target position in encoder counts
+   * @return None if the target is acceptable, Some(reason) if it violates a soft limit
+   */
+  def checkSoftLimit(target: Double): Option[String] =
+    if mechanismType != MechanismType.Linear then None
+    else if !softLimitsEnabled then None
+    else (lowerLimit, upperLimit) match
+      case (Some(lo), Some(hi)) if hi > lo =>
+        if target > hi then
+          Some(f"target $target%.0f exceeds upper soft limit $hi%.0f")
+        else if target < lo then
+          Some(f"target $target%.0f below lower soft limit $lo%.0f")
+        else None
+      case _ => None  // limits not configured — enforcement disabled
+
+  /**
    * Update this axis state with new values.
    * Uses a map of field names to values.
    */
@@ -346,6 +396,7 @@ case class AxisState(
       case ("upperLimit", v: Double) => updated = updated.copy(upperLimit = Some(v))
       case ("lowerLimit", v: Double) => updated = updated.copy(lowerLimit = Some(v))
       case ("algorithm", v: RotatingAlgorithm) => updated = updated.copy(algorithm = Some(v))
+      case ("softLimitsEnabled", v: Boolean) => updated = updated.copy(softLimitsEnabled = v)
       // Motion configuration (from configAxis / controller query)
       case ("maxSpeed", v: Double) => updated = updated.copy(maxSpeed = Some(v))
       case ("acceleration", v: Double) => updated = updated.copy(acceleration = Some(v))
@@ -461,7 +512,7 @@ case class AxisCmdState(
  * @param cmdStates Command execution state for each configured axis
  */
 case class HcdState(
-  state: HcdStateEnum = HcdStateEnum.Ready,
+  state: HcdStateEnum = HcdStateEnum.Uninitialized,
   controllerId: Int = 1,
   controllerErrorMsg: String = "",
   version: Int = 0,

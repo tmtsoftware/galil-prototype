@@ -54,20 +54,115 @@ function useHmiConnection() {
   const [logLines, setLogLines] = useState([]);
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
+  // Tracks whether we've ever observed a WS close.  Used to distinguish the
+  // initial page-load connect (no reload) from a post-drop reconnect (reload
+  // to refresh React state from the new HCD session).  Plain ref rather than
+  // useState because it's read inside the WS callbacks without needing to
+  // trigger re-renders.
+  const hasDisconnectedRef = useRef(false);
+  // Per-connection liveness watchdog.  The HCD streams a stateUpdate every
+  // 250ms (and log lines whenever they happen), so any silence longer than
+  // a couple of seconds means the connection is dead — even if the browser
+  // hasn't yet noticed (e.g. the server's TCP socket was closed via Pekko's
+  // ServerBinding.terminate(), but the OS-level keep-alive on the client
+  // hasn't fired yet, which can take a minute or more).  The watchdog
+  // detects this case and force-closes the WS so the existing onclose →
+  // reconnect → reload path can run.
+  const lastFrameAtRef = useRef(0);
+  const watchdogRef = useRef(null);
+  const FRAME_TIMEOUT_MS = 3000;
+  // Reconnect backoff: start at 2s, double up to a 30s ceiling on each failed
+  // connection.  Reset to the floor whenever a connection succeeds.  Without
+  // this, a long-term HCD outage (overnight, weekend) leaves the browser tab
+  // making a reconnect attempt every 2s indefinitely — wasteful and noisy in
+  // DevTools.  At the 30s ceiling we still recover within half a minute when
+  // the HCD comes back.
+  const reconnectDelayRef = useRef(2000);
+  const RECONNECT_DELAY_MIN_MS = 2000;
+  const RECONNECT_DELAY_MAX_MS = 30000;
 
   const connect = useCallback(() => {
+    // Centralised reconnect scheduler with exponential backoff.  Each call
+    // uses the current delay then doubles it for the next attempt, capped at
+    // RECONNECT_DELAY_MAX_MS.  Reset back to the floor inside onmessage when
+    // a frame proves the connection is healthy (see below).
+    const scheduleReconnect = () => {
+      const delay = reconnectDelayRef.current;
+      console.log(`WS scheduling reconnect in ${delay}ms`);
+      clearTimeout(reconnectRef.current);
+      reconnectRef.current = setTimeout(connect, delay);
+      reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_DELAY_MAX_MS);
+    };
+
     if (wsRef.current && wsRef.current.readyState < 2) return;
     try {
       const ws = new WebSocket(WS_URL);
       ws.onopen = () => {
+        console.log(`WS open: hasDisconnectedRef=${hasDisconnectedRef.current}, readyState=${ws.readyState}`);
+        // If we previously disconnected (i.e. this is a *re*-connect, not the
+        // initial page-load connect), do a full page reload.  The HCD's
+        // Restart action gives us a fresh InternalStateActor with re-initialized
+        // axes (un-homed, all flags reset), but React's component state is
+        // sticky across the WS drop — even though stateUpdate frames refresh
+        // the per-axis fields, derived display state (cfgLoaded, expanded
+        // panels, sticky form values) and any field that the new payload
+        // happens to omit can show stale data.  A page reload is the cleanest
+        // way to get a clean view of the new HCD session.
+        //
+        // No reload on first connect, since there's no stale state to clear
+        // and the existing initial-status fetch handles it.
+        if (hasDisconnectedRef.current) {
+          console.log('WS reconnected — reloading page to refresh HMI state');
+          window.location.reload();
+          return;
+        }
         setConnected(true);
         // Clear stale log lines from a previous HCD session on every fresh connection.
         // The HCD clears its own state on restart; we mirror that here so the log
         // panel shows only messages from the current session.
         setLogLines([]);
+        // Start the liveness watchdog: if no frame arrives within
+        // FRAME_TIMEOUT_MS, assume the connection is dead and force-close it.
+        // Seed lastFrameAt now so the timeout doesn't fire on connections that
+        // are healthy but haven't pushed their first frame yet.
+        lastFrameAtRef.current = Date.now();
+        if (watchdogRef.current) clearInterval(watchdogRef.current);
+        watchdogRef.current = setInterval(() => {
+          const silence = Date.now() - lastFrameAtRef.current;
+          if (silence > FRAME_TIMEOUT_MS) {
+            console.log(`WS watchdog: no frames for ${silence}ms — abandoning connection (readyState=${ws.readyState})`);
+            // Stop the watchdog
+            clearInterval(watchdogRef.current);
+            watchdogRef.current = null;
+            // CRITICAL: when the server has done a half-broken close (e.g.
+            // pekko-http's ServerBinding.terminate() during JVM Restart), the
+            // browser does NOT fire onclose for a client-side ws.close() —
+            // observed empirically. So we don't rely on onclose; we do its
+            // work directly: mark disconnected, detach handlers from this
+            // dead socket, schedule a reconnect.  The old socket will be GC'd
+            // (or closed by OS-level keep-alive eventually) — we just stop
+            // listening to it.
+            try { ws.close(); } catch(_) { /* best-effort */ }
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onclose = null;
+            ws.onerror = null;
+            wsRef.current = null;
+            setConnected(false);
+            hasDisconnectedRef.current = true;
+            console.log('WS watchdog: scheduling reconnect');
+            scheduleReconnect();
+          }
+        }, 1000);
         console.log('WS connected');
       };
       ws.onmessage = (evt) => {
+        // Any frame counts as proof of liveness for the watchdog
+        lastFrameAtRef.current = Date.now();
+        // Healthy frame proves the server is reachable; reset backoff so a
+        // future blip starts fresh from the floor instead of inheriting a
+        // long delay from a previous outage.
+        reconnectDelayRef.current = RECONNECT_DELAY_MIN_MS;
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'stateUpdate') {
@@ -80,13 +175,25 @@ function useHmiConnection() {
           }
         } catch(e) { console.warn('Bad WS frame', e); }
       };
-      ws.onclose = () => {
+      ws.onclose = (evt) => {
+        console.log(`WS close: code=${evt?.code}, reason='${evt?.reason}', wasClean=${evt?.wasClean}`);
         setConnected(false);
-        reconnectRef.current = setTimeout(connect, 2000);
+        hasDisconnectedRef.current = true;
+        if (watchdogRef.current) {
+          clearInterval(watchdogRef.current);
+          watchdogRef.current = null;
+        }
+        scheduleReconnect();
       };
-      ws.onerror = () => ws.close();
+      ws.onerror = (err) => {
+        console.log('WS error fired', err);
+        ws.close();
+      };
       wsRef.current = ws;
-    } catch(e) { console.error('WS connect error', e); }
+    } catch(e) {
+      console.error('WS connect error', e);
+      scheduleReconnect();
+    }
   }, []);
 
   useEffect(() => {
@@ -97,6 +204,7 @@ function useHmiConnection() {
     connect();
     return () => {
       clearTimeout(reconnectRef.current);
+      if (watchdogRef.current) clearInterval(watchdogRef.current);
       if (wsRef.current) wsRef.current.close();
     };
   }, [connect]);
@@ -194,12 +302,22 @@ function ExpandToggle({label, open, onToggle, color='#6B7280'}) {
     e('span',null, label));
 }
 
-function AxisErrorBar({msg}) {
+function AxisErrorBar({msg, kind}) {
   if (!msg) return null;
-  return e('div',{style:{backgroundColor:'#451A1A',borderRadius:3,padding:'4px 8px',margin:'6px 0 2px',
-    fontSize:10.5,color:'#FCA5A5',display:'flex',alignItems:'center',gap:5,
-    fontFamily:'var(--mono)',borderLeft:'3px solid #EF4444'}},
-    e('span',{style:{fontWeight:700,fontSize:9.5,color:'#F87171'}},'ERR'),
+  // 'fault' = genuine controller error (e.g. POSERR, LIMSWI) — red.
+  // 'reject' = HMI-side command rejection (e.g. soft-limit violation) — amber,
+  //   to signal "the command was refused; the axis itself is fine".
+  // Default to 'fault' colouring for back-compat.
+  const isReject = kind === 'reject';
+  const bg     = isReject ? '#3F2D14' : '#451A1A';
+  const border = isReject ? '#F59E0B' : '#EF4444';
+  const text   = isReject ? '#FCD34D' : '#FCA5A5';
+  const tag    = isReject ? 'REJ' : 'ERR';
+  const tagFg  = isReject ? '#FBBF24' : '#F87171';
+  return e('div',{style:{backgroundColor:bg,borderRadius:3,padding:'4px 8px',margin:'6px 0 2px',
+    fontSize:10.5,color:text,display:'flex',alignItems:'center',gap:5,
+    fontFamily:'var(--mono)',borderLeft:`3px solid ${border}`}},
+    e('span',{style:{fontWeight:700,fontSize:9.5,color:tagFg}},tag),
     msg);
 }
 
@@ -227,6 +345,11 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
   const [cfgAlgorithm,setCfgAlgorithm] = useState('shortest');
   const [cfgUpperLimit,setCfgUpperLimit] = useState('');
   const [cfgLowerLimit,setCfgLowerLimit] = useState('');
+  // Last HMI-side command rejection for this axis (e.g. soft-limit violation
+  // returned synchronously from POST /api/command).  Cleared on the next
+  // command from this card.  Server-side axisErrorMsg from a genuine controller
+  // error takes precedence over this in the AxisErrorBar display.
+  const [rejectMsg,setRejectMsg] = useState('');
 
   // Populate config fields from current state when panel first opens
   useEffect(() => {
@@ -253,11 +376,24 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
 
   // Dispatch a command and toggle demand visibility:
   // positionAxis and offsetAxis show demand; all other commands hide it.
+  // Captures HMI-side synchronous rejections (e.g. soft-limit violations) into
+  // rejectMsg so the user sees why the command did nothing — the calling
+  // assembly would see the same message in its own response, but the HMI
+  // bypasses the assembly and submits direct to the HCD.  Server-side errors
+  // (genuine controller faults) flow through axisErrorMsg and override this.
   const cmd = (name, extra={}) => {
     if (!enabled) return;
     if (name === 'positionAxis' || name === 'offsetAxis' || name === 'positionWheel') setShowDemand(true);
     else setShowDemand(false);
-    onCommand(name, {axis, ...extra});
+    setRejectMsg('');  // clear stale rejection when a new command is issued
+    const p = onCommand(name, {axis, ...extra});
+    if (p && typeof p.then === 'function') {
+      p.then(result => {
+        if (result && result.status === 'Error' && result.message) {
+          setRejectMsg(result.message);
+        }
+      });
+    }
   };
 
   const sendConfig = () => {
@@ -338,8 +474,13 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
     e('div',{style:{padding:'6px 12px 8px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim,
       display:'flex',flexDirection:'column',flex:1}},
 
-      // Error bar — immediately below header when present
-      e(AxisErrorBar,{msg:axState.axisErrorMsg || cs.axisErrorMsg || null}),
+      // Error bar — immediately below header when present.
+      // Server-side errors (real controller faults) take precedence over
+      // HMI-side rejections (e.g. soft-limit violations) so a stale rejection
+      // never masks a live fault.  rejectMsg is cleared when the next command
+      // is issued from this card.
+      e(AxisErrorBar,{msg: axState.axisErrorMsg || cs.axisErrorMsg || rejectMsg || null,
+                      kind: (axState.axisErrorMsg || cs.axisErrorMsg) ? 'fault' : (rejectMsg ? 'reject' : null)}),
 
       // Type badge + Home/Stop/Config on same row
       e('div',{style:{display:'flex',gap:5,alignItems:'center',marginBottom:6,
@@ -518,7 +659,30 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
           e('span',{style:{color:'#9CA3AF'}},'Lower Lim'),
           e(In,{value:cfgLowerLimit,onChange:setCfgLowerLimit,ph:'counts'})),
         e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
-          e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig}))
+          e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig})),
+
+        // Soft-limit enforcement toggle.  Operational state (not config), so
+        // takes effect immediately on click — no Apply.  Visible only on linear
+        // axes; meaningless for rotating mechanisms (no soft limits in play).
+        // Bypassing leaves the axis protected only by its hardware limit
+        // switches (#LIMSWI), which is the necessary condition for testing
+        // those switches.
+        axState.mechanismType === 'Linear'
+          ? e('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:8,paddingTop:6,
+              borderTop:'1px dashed #1F2937',fontFamily:'var(--mono)',fontSize:10.5}},
+              e('span',{style:{color:'#9CA3AF',width:70,flexShrink:0}},'Soft Lim'),
+              e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
+                color: axState.softLimitsEnabled ? '#6EE7B7' : '#FCD34D'}},
+                e('span',{style:{width:6,height:6,borderRadius:1.5,
+                  backgroundColor: axState.softLimitsEnabled ? '#10B981' : '#F59E0B'}}),
+                axState.softLimitsEnabled ? 'Enforced' : 'Bypassed'),
+              e('span',{style:{flex:1}}),
+              e(Btn,{
+                label: axState.softLimitsEnabled ? 'Bypass' : 'Enforce',
+                color: axState.softLimitsEnabled ? '#F59E0B' : '#10B981',
+                small: true,
+                onClick: () => onCommand('setSoftLimits',{axis,enabled:!axState.softLimitsEnabled})}))
+          : null
 
       ) : null));
 }
@@ -926,21 +1090,45 @@ function PositionChart({history,activeAxes}) {
           e(Line,{key:a,type:'monotone',dataKey:a,stroke:CHART_COLORS[a],dot:false,strokeWidth:1.5,isAnimationActive:false})))));
 }
 
-function ShutdownModal({open, onConfirm, onCancel, busy, error}) {
+// Lifecycle modal — used for both Shutdown and Restart confirmations.
+// `kind` is either 'shutdown' or 'restart'; the modal adapts title, body,
+// and confirm-button colour/label accordingly.  Both actions go through
+// the same modal because they're administrative siblings — we want the
+// operator to look at the same dialog and pick which they actually want.
+function LifecycleModal({open, kind, onConfirm, onCancel, busy, error}) {
   if (!open) return null;
+
+  // Per-kind appearance and copy.
+  const isRestart = kind === 'restart';
+  const title       = isRestart ? 'Restart HCD?' : 'Shutdown HCD?';
+  const tagBg       = isRestart ? '#451A03'     : '#7F1D1D';
+  const tagBorder   = isRestart ? '#F59E0B'     : '#7F1D1D';
+  const tagFg       = isRestart ? '#FCD34D'     : '#FCA5A5';
+  const confirmBorder = isRestart ? '#FBBF24'   : '#F87171';
+  const confirmBg     = isRestart ? '#92400E'   : '#991B1B';
+  const confirmFg     = isRestart ? '#FEF3C7'   : '#FEE2E2';
+  const confirmLabel  = busy
+    ? (isRestart ? 'Restarting…' : 'Shutting down…')
+    : (isRestart ? 'Restart'     : 'Shutdown');
+  const body = isRestart
+    ? ('This will safe all motors, drop all controller connections, and re-initialise '
+       + 'the HCD from scratch (fresh embedded program load and #Init).  The HMI will '
+       + 'briefly disconnect and reconnect on its own within a few seconds.  '
+       + 'Any in-flight commands will be cancelled.')
+    : ('This will stop all motion, disable motor drives, and terminate the HCD process.  '
+       + 'The HMI will lose its connection.  Any in-flight commands will be cancelled.');
+
   return e('div',{style:{position:'fixed',top:0,left:0,right:0,bottom:0,
     backgroundColor:'rgba(0,0,0,0.65)',display:'flex',alignItems:'center',justifyContent:'center',
     zIndex:1000,fontFamily:'var(--mono)'},
     onClick:(ev)=>{ if(ev.target===ev.currentTarget && !busy) onCancel(); }},
-    e('div',{style:{backgroundColor:'#111827',border:'1px solid #7F1D1D',borderRadius:8,
+    e('div',{style:{backgroundColor:'#111827',border:`1px solid ${tagBorder}`,borderRadius:8,
       padding:'18px 22px',minWidth:340,maxWidth:440,boxShadow:'0 10px 40px rgba(0,0,0,0.5)'}},
       e('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:10}},
         e('span',{style:{fontSize:22,lineHeight:1}},'⚠'),
-        e('span',{style:{fontSize:14,fontWeight:700,color:'#FCA5A5',letterSpacing:.3}},
-          'Shutdown HCD?')),
-      e('div',{style:{fontSize:12,color:'#D1D5DB',lineHeight:1.55,marginBottom:6}},
-        'This will stop all motion, disable motor drives, and terminate the HCD process. ',
-        'The HMI will lose its connection. Any in-flight commands will be cancelled.'),
+        e('span',{style:{fontSize:14,fontWeight:700,color:tagFg,letterSpacing:.3}},
+          title)),
+      e('div',{style:{fontSize:12,color:'#D1D5DB',lineHeight:1.55,marginBottom:6}}, body),
       error
         ? e('div',{style:{backgroundColor:'#7F1D1D44',border:'1px solid #991B1B',borderRadius:4,
             padding:'6px 10px',marginTop:10,marginBottom:10,fontSize:11,color:'#FCA5A5'}},error)
@@ -957,12 +1145,12 @@ function ShutdownModal({open, onConfirm, onCancel, busy, error}) {
         e('button',{
           onClick:onConfirm,
           disabled:busy,
-          style:{padding:'6px 14px',borderRadius:4,border:'1px solid #F87171',
-            backgroundColor:'#991B1B',color:'#FEE2E2',fontFamily:'var(--mono)',
+          style:{padding:'6px 14px',borderRadius:4,border:`1px solid ${confirmBorder}`,
+            backgroundColor:confirmBg,color:confirmFg,fontFamily:'var(--mono)',
             fontSize:11,fontWeight:700,cursor:busy?'wait':'pointer',
             opacity:busy?0.7:1},
           autoFocus:false},
-          busy ? 'Shutting down…' : 'Shutdown'))));
+          confirmLabel))));
 }
 
 function ErrorBanner({hcdState,controllerErrorMsg,onCommand}) {
@@ -987,38 +1175,56 @@ function GalilHMI() {
   const {state, connected, submitCommand, logLines} = useHmiConnection();
   const [history, setHistory] = useState([]);
   const [compact, setCompact] = useState(false);
-  const [shutdownOpen, setShutdownOpen] = useState(false);
-  const [shutdownBusy, setShutdownBusy] = useState(false);
-  const [shutdownError, setShutdownError] = useState(null);
+  // Lifecycle (Shutdown / Restart) modal state.  `kind` is 'shutdown' or 'restart'
+  // when the modal is open, null when closed.  busy/error apply to the in-flight
+  // request regardless of which kind triggered it.
+  const [lifecycleKind, setLifecycleKind] = useState(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState(null);
   const tickRef = useRef(0);
 
-  const requestShutdown = useCallback(() => {
-    setShutdownError(null);
-    setShutdownBusy(true);
-    fetch(`${API_BASE}/api/shutdown`, {method:'POST'})
+  // Open the modal in the requested mode, clearing any prior error from a
+  // previous open.  Wrapped in useCallback because it's used as a button
+  // onClick directly.
+  const openLifecycle = useCallback((kind) => {
+    setLifecycleError(null);
+    setLifecycleKind(kind);
+  }, []);
+
+  // Send the current modal action to the HCD.  Both endpoints have identical
+  // shape (POST, no body, 200 with JSON status / 5xx with JSON error), so the
+  // request code is shared — only the path differs by kind.
+  const confirmLifecycle = useCallback(() => {
+    if (!lifecycleKind) return;
+    const path = lifecycleKind === 'restart' ? '/api/restart' : '/api/shutdown';
+    setLifecycleError(null);
+    setLifecycleBusy(true);
+    fetch(`${API_BASE}${path}`, {method:'POST'})
       .then(async (resp) => {
         if (!resp.ok) {
           let msg = `HTTP ${resp.status}`;
           try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
           throw new Error(msg);
         }
-        // Success — close the modal. The page-level Connected → Disconnected
-        // indicator will signal completion within a couple seconds when the
-        // WebSocket drops as the HCD process exits.
-        setShutdownBusy(false);
-        setShutdownOpen(false);
+        // Success — close the modal.  The page-level Connected → Disconnected
+        // indicator will signal completion within a couple seconds:
+        //   shutdown — WebSocket drops permanently as the HCD process exits
+        //   restart  — WebSocket drops briefly, then auto-reconnects when
+        //              the new HmiServer comes up inside the same JVM
+        setLifecycleBusy(false);
+        setLifecycleKind(null);
       })
       .catch(err => {
-        setShutdownBusy(false);
-        setShutdownError(err.message || String(err));
+        setLifecycleBusy(false);
+        setLifecycleError(err.message || String(err));
       });
-  }, []);
+  }, [lifecycleKind]);
 
-  const cancelShutdown = useCallback(() => {
-    if (shutdownBusy) return;
-    setShutdownOpen(false);
-    setShutdownError(null);
-  }, [shutdownBusy]);
+  const cancelLifecycle = useCallback(() => {
+    if (lifecycleBusy) return;
+    setLifecycleKind(null);
+    setLifecycleError(null);
+  }, [lifecycleBusy]);
 
   // Derive active axes from state
   const activeAxes = state?.activeAxes || [];
@@ -1041,7 +1247,7 @@ function GalilHMI() {
   }, [state, activeAxes.join(',')]);
 
   const handleCommand = useCallback((commandName, params) => {
-    submitCommand(commandName, params);
+    return submitCommand(commandName, params);
   }, [submitCommand]);
 
   const hcdState = state?.hcdState || 'Unknown';
@@ -1092,8 +1298,18 @@ function GalilHMI() {
             backgroundColor:compact?'#1D4ED8':'#1F2937',
             color:compact?'#BFDBFE':'#6B7280',transition:'all .15s'}},
           compact ? 'Compact ✓' : 'Compact'),
+        // Restart — amber, less destructive than Shutdown.  Re-initialises the
+        // HCD without exiting the JVM; the HMI auto-reconnects after a brief drop.
         e('button',{
-          onClick:()=>{ setShutdownError(null); setShutdownOpen(true); },
+          onClick:()=>openLifecycle('restart'),
+          title:'Restart the HCD (safes motors, reloads embedded code, re-runs init — JVM stays up; HMI auto-reconnects)',
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:700,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #92400E',
+            backgroundColor:'#1F2937',color:'#FCD34D',transition:'all .15s'}},
+          'Restart'),
+        // Shutdown — red, terminal.  Stops motors and exits the HCD process.
+        e('button',{
+          onClick:()=>openLifecycle('shutdown'),
           title:'Shut down the HCD process (safes all motors first)',
           style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:700,cursor:'pointer',
             fontFamily:'var(--mono)',border:'1px solid #7F1D1D',
@@ -1129,13 +1345,14 @@ function GalilHMI() {
       e('span',null,`${state?.prefix||'APS.ICS.HCD.GalilMotion'} · Prototype HMI`),
       e('span',null,`Axes: ${activeAxes.join(',')}`)),
 
-    // Shutdown confirmation modal (fixed-position overlay)
-    e(ShutdownModal,{
-      open: shutdownOpen,
-      onConfirm: requestShutdown,
-      onCancel: cancelShutdown,
-      busy: shutdownBusy,
-      error: shutdownError}));
+    // Lifecycle confirmation modal (Shutdown or Restart) — fixed-position overlay
+    e(LifecycleModal,{
+      open: lifecycleKind !== null,
+      kind: lifecycleKind,
+      onConfirm: confirmLifecycle,
+      onCancel: cancelLifecycle,
+      busy: lifecycleBusy,
+      error: lifecycleError}));
 }
 
 // Mount
