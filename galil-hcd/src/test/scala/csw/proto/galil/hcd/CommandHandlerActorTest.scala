@@ -397,7 +397,6 @@ class CommandHandlerActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     CommandHandlerActor.isImmediate("configLinearAxis") shouldBe true
     CommandHandlerActor.isImmediate("setBit") shouldBe true
     CommandHandlerActor.isImmediate("setAO") shouldBe true
-    CommandHandlerActor.isImmediate("faultReset") shouldBe true
 
     // Long-running commands
     CommandHandlerActor.isImmediate("homeAxis") shouldBe false
@@ -406,6 +405,13 @@ class CommandHandlerActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     CommandHandlerActor.isImmediate("selectWheel") shouldBe false
     CommandHandlerActor.isImmediate("trackAxis") shouldBe false
     CommandHandlerActor.isImmediate("stopAxis") shouldBe false
+
+    // faultReset is NOT in either CHA classification — it's dispatched
+    // directly by GalilHcd because it drives HCD-level lifecycle state
+    // (Session 58).  It should NOT be reported as immediate or long-running
+    // by CHA's isImmediate / isLongRunning helpers.
+    CommandHandlerActor.isImmediate("faultReset") shouldBe false
+    CommandHandlerActor.isLongRunning("faultReset") shouldBe false
 
     info("All command classifications verified")
   }

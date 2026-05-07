@@ -212,9 +212,26 @@ private[hcd] object ControllerCommandActor {
             replyTo ! controllerIdentity
             Behaviors.same
 
-          // Download current embedded program from controller (UL command)
+          // Download current embedded program from controller (UL command).
+
+          //
+          // The pre-UL drain below remains as a buffer-hygiene check: the
+          // buffer should be empty before any UL, so anything we drain here
+          // indicates a new desync somewhere upstream that needs investigation.
           case GalilCommandMessage.DownloadProgram(replyTo) =>
             try {
+              // Pre-UL drain: a clean buffer is a precondition for UL.
+              // Under normal operation this should always be empty — the
+              // post-DL drain in galilIo.uploadProgram and the TCP-actor
+              // protocol discipline keep the buffer clean across commands.
+              // Logged when non-empty so any future protocol drift is
+              // immediately visible rather than silently recovered.
+              val preDrain = galilIo.synchronized {
+                galilIo.drainAndShowBuffer(timeoutMs = 100)
+              }
+              if (preDrain.nonEmpty)
+                log.warn(s"Pre-UL drain consumed unexpected ${preDrain.length} bytes: '${preDrain.take(80).replace("\r","\\r").replace("\n","\\n")}' — investigate which prior command left this")
+
               log.info("Downloading program from controller (UL)")
               val program = galilIo.synchronized {
                 galilIo.downloadProgram()
@@ -230,6 +247,126 @@ private[hcd] object ControllerCommandActor {
               case ex: Exception =>
                 log.error(s"Download failed: ${ex.getMessage}")
                 replyTo ! GalilCommandMessage.DownloadProgramResult("", error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
+          // Upload an embedded program to the controller (DL command).  Used
+          // by faultReset Reload severity (Session 58).  galilIo.uploadProgram
+          // implements the DL handshake: writeRaw "DL" → write program →
+          // send "\" terminator → consume "\"'s ":" ack → consume DL's
+          // deferred ":" ack.
+          //
+          // The controller is silent during DL streaming; it ends up emitting
+          // both acks after "\" is received.  The "\" ack arrives after the
+          // controller has parsed all program lines, which can take 3+ seconds
+          // for a full-size program — the default 3s socket read timeout cuts
+          // it close.  Extend to 10s for the upload and restore 3s afterward,
+          // mirroring the BP handler pattern below.
+          case GalilCommandMessage.UploadProgram(program, replyTo) =>
+            try {
+              log.info(s"Uploading program to controller (DL): ${program.length} characters, ${program.linesIterator.size} lines")
+              galilIo.synchronized {
+                galilIo.setReadTimeout(10000)
+                try {
+                  galilIo.uploadProgram(program)
+                } finally {
+                  galilIo.setReadTimeout(3000)
+                }
+              }
+              log.info("Upload complete")
+              replyTo ! GalilCommandMessage.UploadProgramResult(success = true)
+            } catch {
+              case ex: IOException =>
+                log.error(s"Upload — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.UploadProgramResult(success = false, error = Some(ex.getMessage))
+              case ex: Exception =>
+                log.error(s"Upload failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.UploadProgramResult(success = false, error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
+          // Burn the loaded volatile program to EEPROM (BP command).  Takes
+          // 2–3 seconds on hardware; we extend the read timeout to 5s for
+          // the burn and restore the original 3s afterward.  All three
+          // operations (set timeout, send BP, restore timeout) run inside
+          // a single galilIo.synchronized block so no other actor traffic
+          // can interleave.  Used by faultReset Reload severity (Session 58).
+          case GalilCommandMessage.BurnProgram(replyTo) =>
+            try {
+              log.info("Burning program to EEPROM (BP)")
+              galilIo.synchronized {
+                galilIo.setReadTimeout(5000)
+                try {
+                  // sendAndWaitForPrompt returns Unit on ":" success and
+                  // throws RuntimeException on "?" rejection.  No data
+                  // response — BP just acks with the prompt when done.
+                  galilIo.sendAndWaitForPrompt("BP")
+                } finally {
+                  galilIo.setReadTimeout(3000)
+                }
+              }
+              log.info("BP complete")
+              replyTo ! GalilCommandMessage.BurnProgramResult(success = true)
+            } catch {
+              case ex: IOException =>
+                log.error(s"BP — command connection lost: ${ex.getMessage}")
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                replyTo ! GalilCommandMessage.BurnProgramResult(success = false, error = Some(ex.getMessage))
+              case ex: Exception =>
+                log.error(s"BP failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.BurnProgramResult(success = false, error = Some(ex.getMessage))
+            }
+            Behaviors.same
+
+          // Send the controller-reset command (RS).  RS terminates ALL TCP
+          // sessions on the controller as part of the reset, so we use
+          // writeRaw (no wait for response) and proactively report the
+          // command connection as Disconnected.  Caller must wait for the
+          // controller to come back (~5–10s on STB per empirical testing)
+          // and then reconnect via Reconnect on this actor and on the
+          // status / console actors.  Used by faultReset Reset and Reload.
+          case GalilCommandMessage.SendReset(replyTo) =>
+            try {
+              log.warn("Sending RS — controller will reset embedded state")
+              galilIo.synchronized {
+                galilIo.writeRaw("RS")
+              }
+              // RS resets the controller's embedded state but on DMC-500
+              // series the TCP session is preserved (verified empirically
+              // via GalilTools session — `:RS` returns to a live `:` prompt
+              // without reconnect).  We do NOT close the local socket here.
+              //
+              // We still mark commandConnection as Disconnected so the rest
+              // of the system pauses traffic during the controller's reset
+              // window; the upcoming Reconnect call will re-mark Connected
+              // once the controller is responsive again.  Reconnect's drain
+              // step (Session 58) clears any pre-RS bytes that may still be
+              // sitting in our receive buffer.
+              internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                "commandConnection", ConnectionStatus.Disconnected)
+              replyTo ! GalilCommandMessage.SendResetResult(success = true)
+            } catch {
+              case ex: IOException =>
+                // If the write itself failed the socket is genuinely dead
+                // (RS write is a tiny payload — IOException here means TCP
+                // is broken, not a controller-side issue).  Mark Disconnected
+                // and let the next Reconnect open a fresh socket.
+                log.warn(s"RS write — IOException (socket may already be dead): ${ex.getMessage}")
+                try galilIo.close() catch case _: Exception => ()
+                internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                  "commandConnection", ConnectionStatus.Disconnected)
+                // Still report success — RS was attempted; the caller's job
+                // is to reconnect, which will tell us whether the controller
+                // came back.  Returning failure here would short-circuit
+                // recovery for a probably-cosmetic reason.
+                replyTo ! GalilCommandMessage.SendResetResult(success = true,
+                  error = Some(s"RS write threw IOException (likely already disconnected): ${ex.getMessage}"))
+              case ex: Exception =>
+                log.error(s"RS failed: ${ex.getMessage}")
+                replyTo ! GalilCommandMessage.SendResetResult(success = false, error = Some(ex.getMessage))
             }
             Behaviors.same
 
@@ -457,12 +594,28 @@ private[hcd] object ControllerCommandActor {
           // Step 1: test existing socket with MG 0. If that succeeds, report Connected and done.
           // Step 2: if test fails, close dead socket, open fresh GalilIoTcp, retest.
           // Reports commandConnection Connected/Disconnected to IS in either outcome.
+          //
+          // Buffer hygiene (Session 58): drain the receive buffer before testing
+          // and after a successful test to clear any stale data left over from
+          // pre-fault traffic.  Without this, a stale response chunk ending in
+          // ":" can confuse the next multi-chunk read (notably UL during
+          // verifyEmbeddedProgram) and short-circuit termination — the post-RS
+          // STB regression that motivated this drain.  Status actor already
+          // does this; command actor now mirrors the pattern.
           case GalilCommandMessage.Reconnect(replyTo) =>
             log.info(s"Reconnect: verifying command connection to ${galilConfig.host}:${galilConfig.port}")
+
+            def drainBuffer(io: GalilIo): Unit =
+              val stale = io.drainAndShowBuffer(timeoutMs = 500)
+              if (stale.nonEmpty)
+                log.info(s"Reconnect: drained ${stale.length} bytes of stale buffer data")
 
             def testCurrentSocket(): Boolean =
               try
                 galilIo.synchronized {
+                  // Pre-drain: clear any stale buffered data so the MG 0
+                  // response isn't mixed in with prior unread bytes.
+                  drainBuffer(galilIo)
                   val responses = galilIo.send("MG 0")
                   responses.nonEmpty // any response means socket is alive
                 }
@@ -483,6 +636,9 @@ private[hcd] object ControllerCommandActor {
 
             if testCurrentSocket() then
               log.info("Reconnect: existing command socket is working")
+              // Post-drain: clear anything that arrived during/after the MG 0
+              // exchange — for example, late data from before the disconnect.
+              galilIo.synchronized { drainBuffer(galilIo) }
               internalStateActor ! InternalStateActor.ReportConnectionStatus(
                 "commandConnection", ConnectionStatus.Connected
               )
@@ -494,6 +650,10 @@ private[hcd] object ControllerCommandActor {
               openFreshSocket() match
                 case Right(newIo) =>
                   galilIo = newIo
+                  // Post-drain on fresh socket too — controllers can emit an
+                  // initial prompt on accept that we want consumed before any
+                  // commands flow.
+                  galilIo.synchronized { drainBuffer(galilIo) }
                   log.info("Reconnect: new command connection established")
                   internalStateActor ! InternalStateActor.ReportConnectionStatus(
                     "commandConnection", ConnectionStatus.Connected

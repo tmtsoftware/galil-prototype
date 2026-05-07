@@ -8,7 +8,7 @@ import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
 import csw.location.api.models.TrackingEvent
-import csw.params.commands.CommandResponse.{SubmitResponse, ValidateCommandResponse}
+import csw.params.commands.CommandResponse.{Completed, Error, Started, SubmitResponse, ValidateCommandResponse}
 import csw.params.commands._
 import csw.params.core.models.{Id, ObsId}
 import csw.logging.client.commons.LogAdminUtil
@@ -22,6 +22,7 @@ import csw.time.core.models.UTCTime
 import scala.compiletime.uninitialized
 import scala.concurrent.{Await, ExecutionContextExecutor, Future}
 import scala.concurrent.duration._
+import scala.util.Try
 
 // Add messages here...
 sealed trait GalilCommandMessage
@@ -153,6 +154,45 @@ object GalilCommandMessage {
    * Used by faultReset (None severity) to recover from a detected connection loss.
    */
   case class Reconnect(replyTo: ActorRef[ReconnectResult]) extends GalilCommandMessage
+
+  // ── Fault-recovery primitives (Session 58) ───────────────────────────
+  //
+  // These three messages back the deeper faultReset severities (Reset and
+  // Reload).  They run on the command connection because the simulator and
+  // hardware both implement DL/UL/BP/RS as command-connection operations.
+
+  /**
+   * Upload an embedded program to the controller (DL command).  Replaces any
+   * existing program in the controller's volatile memory.  The program stays
+   * volatile until burnt to EEPROM with BurnProgram (BP).
+   *
+   * @param program the full program text (newline-separated lines, no DL prefix)
+   */
+  case class UploadProgram(program: String, replyTo: ActorRef[UploadProgramResult]) extends GalilCommandMessage
+  case class UploadProgramResult(success: Boolean, error: Option[String] = None)
+
+  /**
+   * Burn the currently-loaded volatile program to EEPROM (BP command).
+   * Typically takes 2–3 seconds on real hardware; pauses the controller
+   * while writing.  The command-connection read timeout is temporarily
+   * extended to 5s to cover the burn, then restored to 3s.
+   */
+  case class BurnProgram(replyTo: ActorRef[BurnProgramResult]) extends GalilCommandMessage
+  case class BurnProgramResult(success: Boolean, error: Option[String] = None)
+
+  /**
+   * Send the controller-reset command (RS).  RS terminates all open TCP
+   * sessions on the controller as part of the reset, so this message does
+   * NOT wait for a reply (none is coming) — it just writes the bytes and
+   * proactively reports the command connection as Disconnected to IS.  The
+   * caller is responsible for waiting for the controller to come back and
+   * re-opening sockets via Reconnect on the affected actors.
+   *
+   * On the simulator this is implemented as a controlled connection close
+   * so the same caller-side recovery code path is exercised in tests.
+   */
+  case class SendReset(replyTo: ActorRef[SendResetResult]) extends GalilCommandMessage
+  case class SendResetResult(success: Boolean, error: Option[String] = None)
 
 }
 
@@ -627,7 +667,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         log                 = log,
         locationService     = locationService,
         componentInfo       = componentInfo,
-        port                = hmiPort
+        port                = hmiPort,
+        // Route HMI-issued faultReset directly to handleFaultReset.  Runs
+        // on the class-level execution context so the HMI HTTP handler
+        // returns immediately (the recovery is long-running).
+        onFaultReset        = (setup, runId) => Future { handleFaultReset(setup, runId) }
       )(ctx.system)
       hmiServer.start()
       log.info(s"HMI test console starting on port $hmiPort")
@@ -678,25 +722,80 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         s"type=${axisConfig.mechanismType}, algorithm=${axisConfig.algorithm}, " +
         s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}")
     }
-    // Set the activeAxes flags and simulation mode on HcdState so the HMI knows which axes are configured
+    // Set the activeAxes flags and simulation mode on HcdState so the HMI knows which axes are configured.
+    // Also set initializingReason so the HMI banner says "HCD starting up" while runInitSequence runs.
     internalStateActor ! InternalStateActor.UpdateHcdState(
       Map(
-        "activeAxes" -> hcdConfig.activeAxes.toArray,
-        "simulation" -> hcdConfig.simulate
+        "activeAxes"         -> hcdConfig.activeAxes.toArray,
+        "simulation"         -> hcdConfig.simulate,
+        "initializingReason" -> "startup"
       ),
       ctx.system.ignoreRef
     )
 
-    // Phase 4: Embedded program verification + controller initialization
+    // Phase 4: Embedded program verification + controller initialization.
     //
-    // Program verification only runs against real hardware — it compares
-    // the controller's stored DMC program to the resource file. The simulator
-    // has no real embedded program to verify.
-    //
-    // Controller init (XQ #Init), axis setup (XQ #SetupX), and motion config
-    // write (speed[], accel[], cpr[], etc.) run in both modes — the simulator
-    // handles these commands just like real hardware.
-    val initFuture = for {
+    // The body of Phase 4 lives in runInitSequence() — it is the sequence
+    // we'll re-run during faultReset (severities Init/Reset/Reload).  See
+    // that method for the step-by-step rationale.
+    try {
+      Await.result(runInitSequence(), 120.seconds)
+
+      // Transition HCD state from Uninitialized → Ready.  Until this point,
+      // commands are rejected by the universal gate in CommandHandlerActor
+      // (and by the HMI and CSW-validate gates that mirror it).  Doing the
+      // transition AFTER runInitSequence completes guarantees that we only
+      // flip to Ready if every step of init actually succeeded — if any
+      // step throws, we fall through to the catch below and stay in
+      // Uninitialized, which leaves the operator looking at a stuck-init view
+      // and able to Restart from the HMI to retry.
+      internalStateActor ! InternalStateActor.UpdateHcdState(
+        Map(
+          "state"              -> HcdStateEnum.Ready,
+          "initializingReason" -> ""
+        ),
+        ctx.system.ignoreRef
+      )
+      log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
+    } catch {
+      case ex: Exception =>
+        log.error("Initialization failed", ex = ex)
+        throw ex
+    }
+    
+  }
+
+  // ========================================
+  // Phase 4: Controller Initialization Sequence
+  // ========================================
+
+  /**
+   * Run the controller-side initialization sequence.  Used by initialize()
+   * at startup and (in subsequent sessions) by handleFaultReset for the
+   * Init/Reset/Reload severities.
+   *
+   * Preconditions (caller's responsibility):
+   *   - hcdConfig has been loaded
+   *   - controllerCommandActor, controllerStatusActor, hmiServer, internalStateActor
+   *     are all alive
+   *   - command and status TCP connections are functional (or will fail
+   *     here with a clear error)
+   *   - HCD state is Uninitialized (so the validate / HMI gates reject
+   *     stray commands while this sequence runs)
+   *
+   * Steps (mirror what initialize() Phase 4 used to do inline):
+   *   1. (hardware only) verifyEmbeddedProgram — diff-only warning, never fails
+   *   2. initController (XQ #Init + post-init TC 1 check)
+   *   3. polling off → setupAxes → polling on  (BZ commutation pauses TCP)
+   *   4. writeMotionConfig — push authoritative motion params from config file
+   *   5. readLimitConfig   — query LD per axis to seed limit-enabled flags
+   *
+   * The caller is responsible for the Uninitialized → Ready transition
+   * after this Future succeeds, and for the Uninitialized → Faulted
+   * transition (with reason text) on failure.
+   */
+  private def runInitSequence(): Future[Unit] = {
+    for {
       _ <- if (!hcdConfig.simulate) {
         for {
           _ <- verifyEmbeddedProgram()
@@ -725,30 +824,545 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // what would otherwise be unset embedded variables).
       _ <- writeMotionConfig()
       _ <- readLimitConfig()
-      _ = log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
+      _ = log.info(s"Galil HCD init sequence complete (simulate=${hcdConfig.simulate})")
     } yield ()
-    
-    try {
-      Await.result(initFuture, 120.seconds)
+  }
 
-      // Transition HCD state from Uninitialized → Ready.  Until this point,
-      // commands are rejected by the universal gate in CommandHandlerActor
-      // (and by the HMI and CSW-validate gates that mirror it).  Doing the
-      // transition AFTER initFuture's Await.result completes guarantees that
-      // we only flip to Ready if every step of init actually succeeded — if
-      // any step throws, we fall through to the catch below and stay in
-      // Uninitialized, which leaves the operator looking at a stuck-init view
-      // and able to Restart from the HMI to retry.
+  // ========================================
+  // Fault Recovery — handleFaultReset
+  // ========================================
+
+  /**
+   * Handle the faultReset CSW command (SDD §4.6.4).  Routed directly from
+   * onSubmit, runs on a Future so the framework thread is not blocked.
+   *
+   * Severity ladder (per ICD §2.2.1.13 and SDD §4.6.4):
+   *   None   — Just clear the error message; HCD goes Faulted → Ready.
+   *            Pre-step: verify both command and status TCP connections
+   *            still respond.  If either is dead we fail recovery rather
+   *            than let stale Ready state mislead callers.
+   *   Init   — Verify connections, then Faulted → Uninitialized → re-run
+   *            the controller init sequence (verifyEmbedded → initController
+   *            → setupAxes → writeMotionConfig → readLimitConfig) → Ready.
+   *            Used when the controller's embedded program state has gone
+   *            stale (e.g. a stale axis error) but the hardware itself is
+   *            otherwise fine.
+   *   Reset  — Verify connections, send RS to the controller, wait for it
+   *            to come back (controller reset takes ~5–10s on STB), reconnect
+   *            all three TCP handles (command/status/console) with a 15s
+   *            wall-clock budget, then run the init sequence.  Used when
+   *            embedded program state is suspected and Init alone won't help.
+   *   Reload — Verify connections, upload fresh embedded code from the
+   *            HCD's resource folder (DL), burn it to EEPROM (BP), then
+   *            perform the Reset sequence (RS + reconnect + init).  Used
+   *            when the controller's embedded program is wrong and needs
+   *            forced replacement.  EEPROM-write — use sparingly.
+   *
+   * Final SubmitResponse is delivered via the CRM:
+   *   - Completed(runId) on success
+   *   - Error(runId, msg) on failure (HCD remains Faulted with error msg
+   *     placed via EnterFaulted so per-axis transitions are also re-applied)
+   */
+  private def handleFaultReset(setup: Setup, runId: Id): Unit = {
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+
+    val severity = Try(setup(FaultResetCommand.severityKey).head.name).getOrElse("None")
+    log.info(s"faultReset: severity=$severity")
+
+    severity match {
+      case "None" =>
+        // Verify both controller TCP connections respond.  Per design (Q2):
+        // every severity gates on connection health before doing its work.
+        // For None, the gate is the entire body — there is no further
+        // controller interaction.  If a connection is down, recovery fails
+        // and the HCD remains Faulted with a clear reason.
+        log.info("faultReset None: verifying controller connections")
+
+        verifyConnectionsAliveEither() match {
+          case Right(_) =>
+            // Both connections working — clear the controllerErrorMsg and
+            // transition Faulted → Ready.
+            internalStateActor ! InternalStateActor.UpdateHcdState(
+              Map(
+                "state"              -> HcdStateEnum.Ready,
+                "controllerErrorMsg" -> ""
+              ),
+              ctx.system.ignoreRef
+            )
+            log.info("faultReset None: connections OK — HCD Ready")
+            commandResponseManager.updateCommand(Completed(runId))
+
+          case Left(failures) =>
+            // One or both still down — re-enter Faulted with a fresh reason
+            // (idempotent if already Faulted but re-applies per-axis
+            // transitions consistently).  No safe-state ST;MO attempt here:
+            // at least one connection is bad, so the send would IOException.
+            val errorMsg = s"Connection check failed — $failures"
+            internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+            log.error(s"faultReset None: $errorMsg")
+            commandResponseManager.updateCommand(Error(runId, errorMsg))
+        }
+
+      case "Init" =>
+        // Init severity: verify connections, then re-run the full init
+        // sequence.  HCD transitions Faulted → Uninitialized for the
+        // duration of the sequence (gates already reject all other
+        // commands during Uninitialized — this naturally prevents
+        // concurrent recoveries) and then either Uninitialized → Ready
+        // on success or Uninitialized → Faulted on failure.
+        log.info("faultReset Init: verifying controller connections")
+
+        verifyConnectionsAliveEither() match {
+          case Left(failures) =>
+            val errorMsg = s"Init connection check failed — $failures"
+            internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+            log.error(s"faultReset Init: $errorMsg")
+            commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+          case Right(_) =>
+            runRecoveryInitPhase(runId, "faultReset Init")
+        }
+
+      case "Reset" =>
+        // Reset severity: send RS to the controller, wait briefly for it to
+        // come back, reconnect all three TCP handles (command + status +
+        // console), then run the init sequence.  Per design (Q2): we still
+        // verify connections alive first — if the controller is already
+        // unreachable, escalating to RS won't help and we fail fast.
+        log.info("faultReset Reset: verifying controller connections")
+
+        verifyConnectionsAliveEither() match {
+          case Left(failures) =>
+            val errorMsg = s"Reset connection check failed — $failures"
+            internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+            log.error(s"faultReset Reset: $errorMsg")
+            commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+          case Right(_) =>
+            performResetSequence(runId, "faultReset Reset")
+        }
+
+      case "Reload" =>
+        // Reload severity: upload fresh embedded code from the repository,
+        // burn it to EEPROM, then re-run the init phase.  Used when the
+        // controller's embedded program is suspected to be wrong or
+        // out-of-date and an Init alone won't help (Init re-runs setup
+        // against whatever code is already loaded).
+        //
+        // Reload does NOT perform RS — DL replaces the loaded program in
+        // controller RAM as part of the upload itself, so the new program
+        // is already active by the time DL completes.  BP persists it to
+        // EEPROM.  Adding RS on top is redundant (RS only re-loads from
+        // EEPROM, which we just burnt) and harmful — it forces an
+        // unnecessary TCP reconnect cycle and can cause controller-side
+        // TCPERR (error 123) due to half-closed sockets, as observed on
+        // the STB.  TCP stays connected throughout Reload.
+        log.info("faultReset Reload: verifying controller connections")
+
+        verifyConnectionsAliveEither() match {
+          case Left(failures) =>
+            val errorMsg = s"Reload connection check failed — $failures"
+            internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+            log.error(s"faultReset Reload: $errorMsg")
+            commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+          case Right(_) =>
+            // Suspend QR/AI polling on the status connection for the duration
+            // of the upload + burn + post-BP verify.  Rationale (Session 58):
+            // the heavy DL transfer (~6KB streamed in chunks over ~3 seconds)
+            // and the immediately-following UL during verifyEmbeddedProgram
+            // both exercise the controller's TCP scheduler hard.  When QR
+            // polling continues in parallel on the status socket, the
+            // controller's TCP input/output buffers can get out of sync,
+            // triggering the embedded #TCPERR handler (controller error 123
+            // "TCP lost sync or timeout").  When that fires, #TCPERR's
+            // `MG "HCD TCPERR ", _IA4` writes to all open TCP handles —
+            // including the command socket where UL's response is
+            // streaming — and corrupts the UL response stream.  Suspending
+            // polling around the heavy command-side work eliminates the
+            // contention.  The init phase that follows (runRecoveryInitPhase
+            // → runInitSequence) re-enables polling after its own
+            // setupAxes block, so we resume here and let the init flow
+            // manage it from there.
+            log.info("faultReset Reload: suspending QR polling for DL+BP+verify")
+            statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
+
+            try {
+              // Upload the program; burn it to EEPROM; then run the init
+              // phase against the freshly-loaded code.  Any failure
+              // short-circuits straight back to Faulted.
+              uploadAndBurnProgram() match {
+                case Left(reason) =>
+                  val errorMsg = s"Reload program upload/burn failed: $reason"
+                  internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+                  log.error(s"faultReset Reload: $errorMsg")
+                  commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+                case Right(_) =>
+                  log.info("faultReset Reload: program uploaded and burnt — proceeding to init phase")
+                  // runRecoveryInitPhase calls runInitSequence which begins
+                  // with verifyEmbeddedProgram (UL).  Polling stays suspended
+                  // through that UL.  runInitSequence then re-enables polling
+                  // after #Setup completes, so by the time we return from
+                  // runRecoveryInitPhase polling is back on.
+                  runRecoveryInitPhase(runId, "faultReset Reload")
+              }
+            } finally {
+              // Defensive resume: if uploadAndBurnProgram threw or
+              // runRecoveryInitPhase exited early without re-enabling
+              // polling, we don't want to leave it suspended forever.
+              // The runInitSequence path already re-enables on its happy
+              // path; this catches the failure paths.  Sending SetPolling
+              // when it's already enabled is a no-op (handleSetPolling
+              // checks for change).
+              statusMonitor ! ControllerStatusActor.SetPolling(enabled = true)
+            }
+        }
+
+      case other =>
+        val msg = s"faultReset severity='$other' not yet implemented"
+        log.warn(msg)
+        commandResponseManager.updateCommand(Error(runId, msg))
+    }
+  }
+
+  /**
+   * Send RS, wait for the controller to come back, reconnect all three TCP
+   * handles, then run the init phase.  Shared by Reset and Reload severities;
+   * Reload runs uploadAndBurnProgram() before this.
+   *
+   * Caller has already verified connections are alive.  On any failure step,
+   * EnterFaulted is sent and CRM Error is delivered.  On success, the init
+   * phase handles the final state transition to Ready.
+   */
+  private def performResetSequence(runId: Id, reason: String): Unit = {
+    sendControllerReset() match {
+      case Left(rsReason) =>
+        val errorMsg = s"$reason RS send failed: $rsReason"
+        internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+        log.error(s"$reason: $errorMsg")
+        commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+      case Right(_) =>
+        // RS issued — controller is rebooting.  Settle delay before first
+        // reconnect attempt; empirically reconnect can succeed anywhere from
+        // ~5s to ~10s after RS on STB.  We start polling at 2s with 1s
+        // retry interval, total budget 15s.
+        log.info(s"$reason: RS sent — settling 2s before reconnect attempts")
+        Thread.sleep(2000L)
+
+        reconnectAllWithRetry(budgetMs = 15000) match {
+          case Left(rcReason) =>
+            val errorMsg = s"$reason post-RS reconnect failed: $rcReason"
+            internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+            log.error(s"$reason: $errorMsg")
+            commandResponseManager.updateCommand(Error(runId, errorMsg))
+
+          case Right(_) =>
+            log.info(s"$reason: all connections re-established — entering init phase")
+            runRecoveryInitPhase(runId, reason)
+        }
+    }
+  }
+
+  /**
+   * Reload primitive: load the embedded program from resources, send DL, then
+   * send BP.  Returns Right(()) on full success or Left(reason) on any
+   * failure.  Used by Reload severity (Session 58).
+   *
+   * Both DL and BP run on the command connection.  BP takes 2-3s on real
+   * hardware; the BurnProgram handler in CCA temporarily extends the socket
+   * read timeout to cover this.
+   */
+  private def uploadAndBurnProgram(): Either[String, Unit] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    // Step 1: load the program text from resources
+    val programText = Try {
+      Await.result(loadEmbeddedProgram(), 10.seconds)
+    } match {
+      case scala.util.Success(text) => text
+      case scala.util.Failure(ex)   => return Left(s"loadEmbeddedProgram failed: ${ex.getMessage}")
+    }
+
+    // Step 1b: prepare the program text for DL upload.
+    //
+    // The raw .dmc file contains REM comment lines, blank lines, and uses
+    // bare LF (\n) line endings.  The Galil controller in DL mode expects
+    // CR+LF (\r\n) line termination and rejects "REM" as an unrecognized
+    // command.  Without preparation the controller exits DL mode partway
+    // through (the bare-LF blob exceeds the 80-char parser line buffer or
+    // the REM token is rejected), which is why the post-DL `\` terminator
+    // comes back as `?` — the controller is no longer in DL mode by then.
+    //
+    // prepareProgramForUpload strips REM lines and blank lines, removes
+    // trailing whitespace per line, and joins with \r\n.  Same preparation
+    // used by the original galil-client TestProgramUploadDownload path.
+    val cleanedProgram = ProgramFileManager.prepareProgramForUpload(programText)
+    log.info(s"Prepared program for DL: ${cleanedProgram.length} chars (raw was ${programText.length}); REM/blank lines removed, line endings normalized to CRLF")
+
+    // Step 2: upload to controller via DL (galilIo.uploadProgram)
+    val uploadResult = Try {
+      Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.UploadProgramResult](
+          ref => GalilCommandMessage.UploadProgram(cleanedProgram, ref)
+        )(org.apache.pekko.util.Timeout(15.seconds), askScheduler),
+        16.seconds
+      )
+    }
+    uploadResult match {
+      case scala.util.Success(r) if r.success => // continue
+      case scala.util.Success(r)              => return Left(s"DL failed: ${r.error.getOrElse("unknown")}")
+      case scala.util.Failure(ex)             => return Left(s"DL ask threw: ${ex.getMessage}")
+    }
+
+    // Step 3: burn to EEPROM via BP
+    val burnResult = Try {
+      Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.BurnProgramResult](
+          ref => GalilCommandMessage.BurnProgram(ref)
+        )(org.apache.pekko.util.Timeout(10.seconds), askScheduler),
+        11.seconds
+      )
+    }
+    burnResult match {
+      case scala.util.Success(r) if r.success => Right(())
+      case scala.util.Success(r)              => Left(s"BP failed: ${r.error.getOrElse("unknown")}")
+      case scala.util.Failure(ex)             => Left(s"BP ask threw: ${ex.getMessage}")
+    }
+  }
+
+  /**
+   * Common post-connection init phase shared by Init, Reset, Reload.
+   * Caller has verified connections are alive; this method:
+   *   1. transitions HCD state to Uninitialized with the given reason
+   *   2. runs runInitSequence with the same 120s budget as initialize()
+   *   3. on success → Ready (clears initializingReason), CRM Completed
+   *   4. on failure → EnterFaulted (which clears initializingReason as a
+   *      side effect), CRM Error
+   */
+  private def runRecoveryInitPhase(runId: Id, reason: String): Unit = {
+    log.info(s"$reason: entering Uninitialized for init sequence")
+    internalStateActor ! InternalStateActor.UpdateHcdState(
+      Map(
+        "state"              -> HcdStateEnum.Uninitialized,
+        "controllerErrorMsg" -> "",
+        "initializingReason" -> reason
+      ),
+      ctx.system.ignoreRef
+    )
+
+    try {
+      Await.result(runInitSequence(), 120.seconds)
+      // Recovery succeeded: explicitly clear controllerErrorMsg in addition
+      // to setting Ready state.  Without this, a transient Faulted that the
+      // status actor may have driven during recovery (e.g., from a TCPERR
+      // event raised while DL/BP/RS was disturbing the controller) would
+      // leave its error message visible in the HMI banner even though the
+      // HCD itself is Ready and functional.  Recovery completing
+      // successfully is the authoritative "all clear" — clear the message.
       internalStateActor ! InternalStateActor.UpdateHcdState(
-        Map("state" -> HcdStateEnum.Ready),
+        Map(
+          "state"              -> HcdStateEnum.Ready,
+          "initializingReason" -> "",
+          "controllerErrorMsg" -> ""
+        ),
         ctx.system.ignoreRef
       )
+      log.info(s"$reason: init sequence complete — HCD Ready")
+      commandResponseManager.updateCommand(Completed(runId))
     } catch {
       case ex: Exception =>
-        log.error("Initialization failed", ex = ex)
-        throw ex
+        val errorMsg = s"$reason init sequence failed: ${ex.getMessage}"
+        log.error(errorMsg, ex = ex)
+        internalStateActor ! InternalStateActor.EnterFaulted(errorMsg)
+        commandResponseManager.updateCommand(Error(runId, errorMsg))
     }
-    
+  }
+
+  /**
+   * Send the RS controller-reset command via ControllerCommandActor.
+   * Returns Right(()) on success or Left(reason) on failure.  The caller
+   * must wait for the controller to come back and reconnect — RS drops
+   * all TCP sessions on the controller.
+   */
+  private def sendControllerReset(): Either[String, Unit] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+    Try {
+      Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.SendResetResult](
+          ref => GalilCommandMessage.SendReset(ref)
+        )(org.apache.pekko.util.Timeout(5.seconds), askScheduler),
+        6.seconds
+      )
+    } match {
+      case scala.util.Success(result) =>
+        if (result.success) Right(())
+        else Left(result.error.getOrElse("RS reported failure"))
+      case scala.util.Failure(ex) =>
+        Left(s"RS ask threw: ${ex.getMessage}")
+    }
+  }
+
+  /**
+   * Reconnect all three TCP handles (command, status, console) after an
+   * RS, retrying each that fails until either all succeed or the wall-clock
+   * budget is exhausted.  The console handle is informational and not
+   * required for Ready state, but we attempt it as part of full recovery.
+   * Console failures are logged but do not fail the overall reconnect —
+   * Reset/Reload should not be blocked by an unrecoverable console handle.
+   *
+   * @param budgetMs total wall-clock budget across all retries
+   */
+  private def reconnectAllWithRetry(budgetMs: Long): Either[String, Unit] = {
+    val deadline = System.currentTimeMillis() + budgetMs
+    var cmdOk = false
+    var stsOk = false
+    var lastCmdErr: String = ""
+    var lastStsErr: String = ""
+
+    while (!(cmdOk && stsOk) && System.currentTimeMillis() < deadline) {
+      if (!cmdOk) tryReconnectCommand() match {
+        case Right(_)     => cmdOk = true; log.info("Reconnect-with-retry: command OK")
+        case Left(reason) => lastCmdErr = reason
+      }
+      if (!stsOk) tryReconnectStatus() match {
+        case Right(_)     => stsOk = true; log.info("Reconnect-with-retry: status OK")
+        case Left(reason) => lastStsErr = reason
+      }
+      if (!(cmdOk && stsOk) && System.currentTimeMillis() < deadline) {
+        Thread.sleep(1000L)
+      }
+    }
+
+    if (!(cmdOk && stsOk)) {
+      val failures = Seq(
+        if (!cmdOk) Some(s"Command: $lastCmdErr") else None,
+        if (!stsOk) Some(s"Status: $lastStsErr")  else None
+      ).flatten.mkString("; ")
+      Left(s"Required connections did not come back within ${budgetMs}ms — $failures")
+    } else {
+      // Required (command+status) connections are back.  Try console as a
+      // best-effort.  Console is informational — log but don't fail.
+      tryReconnectConsole() match {
+        case Right(_)     => log.info("Reconnect-with-retry: console OK")
+        case Left(reason) => log.warn(s"Reconnect-with-retry: console failed (informational, continuing): $reason")
+      }
+      Right(())
+    }
+  }
+
+  private def tryReconnectCommand(): Either[String, Unit] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+    Try {
+      Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.ReconnectResult](
+          ref => GalilCommandMessage.Reconnect(ref)
+        )(org.apache.pekko.util.Timeout(15.seconds), askScheduler),
+        16.seconds
+      )
+    } match {
+      case scala.util.Success(r) if r.success => Right(())
+      case scala.util.Success(r)              => Left(r.error.getOrElse("failed"))
+      case scala.util.Failure(ex)             => Left(s"ask threw: ${ex.getMessage}")
+    }
+  }
+
+  private def tryReconnectStatus(): Either[String, Unit] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+    Try {
+      Await.result(
+        statusMonitor.ask[ControllerStatusActor.ReconnectResult](
+          ref => ControllerStatusActor.Reconnect(ref)
+        )(org.apache.pekko.util.Timeout(15.seconds), askScheduler),
+        16.seconds
+      )
+    } match {
+      case scala.util.Success(r) if r.success => Right(())
+      case scala.util.Success(r)              => Left(r.error.getOrElse("failed"))
+      case scala.util.Failure(ex)             => Left(s"ask threw: ${ex.getMessage}")
+    }
+  }
+
+  /**
+   * Reconnect the console handle if it exists.  Console actor is only
+   * spawned in hardware mode; in simulator mode this is a no-op success.
+   */
+  private def tryReconnectConsole(): Either[String, Unit] = {
+    if (consoleActor == null) return Right(())  // simulator mode, nothing to do
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+    Try {
+      Await.result(
+        consoleActor.ask[ControllerConsoleActor.ReconnectResult](
+          ref => ControllerConsoleActor.Reconnect(ref)
+        )(org.apache.pekko.util.Timeout((ControllerConsoleActor.ReconnectTimeoutMs + 1000).millis), askScheduler),
+        (ControllerConsoleActor.ReconnectTimeoutMs + 2000).millis
+      )
+    } match {
+      case scala.util.Success(r) if r.success => Right(())
+      case scala.util.Success(r)              => Left(r.error.getOrElse("failed"))
+      case scala.util.Failure(ex)             => Left(s"ask threw: ${ex.getMessage}")
+    }
+  }
+
+  /**
+   * Verify both command and status TCP connections respond.  Each actor's
+   * Reconnect handler tests its existing socket first (fast path) and
+   * opens a fresh socket only if the test fails.  IS connection-status
+   * fields are updated by the actors themselves as a side-effect.
+   *
+   * Returns Right(()) on success, Left(reason) where reason describes
+   * which connection(s) failed and why.
+   *
+   * Note: the console connection is not part of this check.  It is
+   * informational and excluded from isOperational; it is recovered
+   * separately during Reset/Reload severities via tryReconnectConsole().
+   */
+  private def verifyConnectionsAliveEither(): Either[String, Unit] = {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    val cmdResult = Try {
+      Await.result(
+        controllerCommandActor.ask[GalilCommandMessage.ReconnectResult](
+          ref => GalilCommandMessage.Reconnect(ref)
+        )(org.apache.pekko.util.Timeout(15.seconds), askScheduler),
+        16.seconds
+      )
+    }.getOrElse(GalilCommandMessage.ReconnectResult(
+      success = false,
+      error   = Some("Command reconnect ask timed out")
+    ))
+
+    val stsResult = Try {
+      Await.result(
+        statusMonitor.ask[ControllerStatusActor.ReconnectResult](
+          ref => ControllerStatusActor.Reconnect(ref)
+        )(org.apache.pekko.util.Timeout(15.seconds), askScheduler),
+        16.seconds
+      )
+    }.getOrElse(ControllerStatusActor.ReconnectResult(
+      success = false,
+      error   = Some("Status reconnect ask timed out")
+    ))
+
+    val cmdOk = cmdResult.success
+    val stsOk = stsResult.success
+    log.info(s"verifyConnectionsAlive: command=${if (cmdOk) "OK" else "FAILED"}, " +
+             s"status=${if (stsOk) "OK" else "FAILED"}")
+
+    if (cmdOk && stsOk) Right(())
+    else Left(
+      Seq(
+        if (!cmdOk) Some(s"Command: ${cmdResult.error.getOrElse("failed")}") else None,
+        if (!stsOk) Some(s"Status: ${stsResult.error.getOrElse("failed")}")  else None
+      ).flatten.mkString("; ")
+    )
   }
 
   // ========================================
@@ -1335,8 +1949,23 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       log.info("Command connection read timeout restored to 3000ms")
     }
 
-    // 4. Apply per-axis config now that hardware setup is done.
+    // 4. Apply per-axis config now that hardware setup is done.  Also reset
+    //    each active axis's IS state to Lost — at startup this matches the
+    //    default (no-op); during faultReset Init recovery it clears any
+    //    lingering Error/Homing/Moving/Tracking state from before the fault.
+    //    Position/velocity will be refreshed by the next QR poll once
+    //    polling resumes; activeCommand cmdState is cleared on fault entry
+    //    by EnterFaulted.
     activeAxes.foreach { axisName =>
+      val axis = Axis.fromChar(axisName.head)
+      internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+        Map(
+          "axisState"  -> AxisStateEnum.Lost,
+          "inPosition" -> false,
+          "axisError"  -> ""
+        ),
+        ctx.system.ignoreRef
+      )
       hcdConfig.axes.get(axisName).foreach { axisConfig =>
         storeMechanismConfig(axisName, axisConfig)
         log.info(s"Axis $axisName setup complete")
@@ -1544,6 +2173,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(s"HCD Faulted: $reason"))
           case _ => // Ready, or Faulted-with-faultReset — proceed
 
+        // faultReset is handled directly by GalilHcd, not CommandHandlerActor,
+        // so it is not in either CHA classification set.  Validate its
+        // parameters explicitly here.
+        if (commandName == "faultReset") {
+          return validateFaultReset(runId, setup)
+        }
+
         // Immediate commands handled by CommandHandlerActor use ICD keys directly
         if (CommandHandlerActor.isImmediate(commandName)) {
           validateImmediateCommand(runId, setup)
@@ -1624,16 +2260,41 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           setup(SetAOCommand.valueKey)
           CommandResponse.Accepted(runId)
 
-        case "faultReset" =>
-          // severity is optional — defaults to None if absent
-          CommandResponse.Accepted(runId)
-          
         case other =>
           CommandResponse.Invalid(runId, CommandIssue.UnsupportedCommandIssue(s"Unknown immediate command: $other"))
       }
     } catch {
       case _: NoSuchElementException =>
         CommandResponse.Invalid(runId, CommandIssue.MissingKeyIssue("Required parameter missing"))
+    }
+  }
+
+  /**
+   * Validate the faultReset command.
+   *
+   * faultReset is the only HCD-administrative command — it does not target an
+   * axis and is not gated by axis state.  The ICD declares severity as a
+   * required enum (None | Init | Reset | Reload), but for backwards
+   * compatibility with the existing Clear Fault button (which omits the
+   * parameter and expects None semantics), we default to None when the
+   * parameter is absent.  An unrecognised severity value is rejected.
+   *
+   * Per ICD it is a long-running command; the work runs asynchronously and
+   * the final SubmitResponse is delivered via the CRM from handleFaultReset.
+   */
+  private def validateFaultReset(runId: Id, setup: Setup): ValidateCommandResponse = {
+    import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+
+    try {
+      // severity is optional — default None — but if provided it must be one
+      // of the four ICD-defined values.  ChoiceKey enforces this at parse
+      // time, so reading the parameter is sufficient validation.
+      val _ = scala.util.Try(setup(FaultResetCommand.severityKey).head.name).getOrElse("None")
+      CommandResponse.Accepted(runId)
+    } catch {
+      case ex: Exception =>
+        CommandResponse.Invalid(runId,
+          CommandIssue.OtherIssue(s"faultReset: invalid severity parameter: ${ex.getMessage}"))
     }
   }
 
@@ -1785,9 +2446,21 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     controlCommand match {
       case setup: Setup =>
         val commandName = setup.commandName.name
-        
-        // Route immediate and long-running commands to CommandHandlerActor
-        if (CommandHandlerActor.isImmediate(commandName) || CommandHandlerActor.isLongRunning(commandName)) {
+
+        // faultReset is an HCD-administrative command — it does not target an
+        // axis, does not allocate a controller thread, and does not go through
+        // the normal CommandHandlerActor / CommandWatcherActor pipeline.  It is
+        // dispatched directly here so that it can drive HCD lifecycle state
+        // transitions (Faulted → Uninitialized → Ready) and call shared init
+        // helpers (runInitSequence) that live on this class.  The work runs
+        // off-thread so onSubmit returns Started immediately; the final
+        // SubmitResponse is delivered via the CRM when handleFaultReset
+        // completes.
+        if (commandName == "faultReset") {
+          Future { handleFaultReset(setup, runId) }
+          CommandResponse.Started(runId)
+        } else if (CommandHandlerActor.isImmediate(commandName) || CommandHandlerActor.isLongRunning(commandName)) {
+          // Route other immediate and long-running commands to CommandHandlerActor
           commandHandlerActor ! CommandHandlerActor.HandleCommand(setup, runId, setup.maybeObsId)
           CommandResponse.Started(runId)
         } else {

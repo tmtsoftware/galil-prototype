@@ -597,10 +597,70 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(response.endsWith("\\") || response.contains("\\"), s"UL response should end with backslash continuation")
   }
 
-  test("DL should acknowledge program download") {
+  test("DL alone should return no ack — only the terminator does") {
+    // Real Galil DMC behaviour: DL puts the controller into receive mode and
+    // is silent.  The ":" prompt only arrives after the "\" terminator, once
+    // the program text has been accumulated.  Session 58 made the simulator
+    // match this: DL → empty response, "\" → ":" ack.
     val sim = spawnSimulator()
     val response = send(sim, "DL").utf8String
-    assert(response == ":", s"DL should return prompt, got: '$response'")
+    assert(response == "", s"DL alone should return no response, got: '$response'")
+  }
+
+  test("DL + program lines + \\ terminator should accept and store the program") {
+    // Full DL handshake: DL → program lines → "\" terminator → ":".
+    // Session 58: simulator now implements DL receive mode correctly so
+    // the Reload severity faultReset can exercise it end-to-end.  We then
+    // verify the program by reading it back via UL.
+    val sim = spawnSimulator()
+    assert(send(sim, "DL").utf8String == "", "DL should be silent")
+    assert(send(sim, "MG \"hello\"").utf8String == "", "Program lines should be silent in DL mode")
+    assert(send(sim, "EN").utf8String == "", "Program lines should be silent in DL mode")
+    val ack = send(sim, "\\").utf8String
+    assert(ack == ":", s"Terminator should return ':' ack, got: '$ack'")
+
+    // Round-trip: UL should now return the stored program text.
+    val ulResponse = send(sim, "UL").utf8String
+    assert(ulResponse.contains("MG \"hello\""), s"UL should include uploaded line, got: '$ulResponse'")
+    assert(ulResponse.contains("EN"),           s"UL should include uploaded EN, got: '$ulResponse'")
+  }
+
+  test("BP should ack with prompt") {
+    // Session 58: Burn Program — no flash on the simulator, just an ack.
+    val sim = spawnSimulator()
+    val response = send(sim, "BP").utf8String
+    assert(response == ":", s"BP should return prompt ack, got: '$response'")
+  }
+
+  test("RS should reset state and preserve the burnt program") {
+    // Session 58: Reset Controller — clears axes, threads, errors, embedded
+    // vars, but preserves programText (the burnt program lives in EEPROM on
+    // real hardware).  Simulator does NOT drop the TCP connection on RS;
+    // recovery code's MG 0 reconnect test will succeed without a fresh socket.
+    val sim = spawnSimulator()
+
+    // Set up some state to verify it gets cleared.
+    send(sim, "DPA=1234")
+    send(sim, "dmd[0]=999")  // custom embedded var
+
+    // Upload + (sim) burn a program so we can verify it survives RS.
+    send(sim, "DL")
+    send(sim, "MG \"survives RS\"")
+    send(sim, "EN")
+    send(sim, "\\")
+    send(sim, "BP")
+
+    // Issue RS.
+    val rsResponse = send(sim, "RS").utf8String
+    assert(rsResponse == ":", s"RS should ack with prompt, got: '$rsResponse'")
+
+    // After RS: position cleared (axis A back to 0), demand var reset to default.
+    val pos = send(sim, "TPA").utf8String
+    assert(pos.startsWith("0"), s"Position should be reset to 0 after RS, got: '$pos'")
+
+    // Embedded program should still be there (programText preserved).
+    val ulResponse = send(sim, "UL").utf8String
+    assert(ulResponse.contains("survives RS"), s"Program should survive RS, got: '$ulResponse'")
   }
 
   // ==========================================================================

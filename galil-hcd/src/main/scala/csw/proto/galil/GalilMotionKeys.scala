@@ -575,14 +575,14 @@ object GalilMotionKeys {
 
     /**
      * Initiates fault recovery using the specified severity level. <br /> None: Just clear error messages <br /> Init: Initialize
-     * Controller (reload embedded programs, reconnect to hardware) <br /> Minor: Perform a Reset of the controller (and recover).
-     * <br /> Major: Perform a Power Cycle of the controller (and recover).
+     * Controller (reload embedded programs, reconnect to hardware) <br /> Reset: Perform a Reset of the controller (and recover).
+     * <br /> Reload: Upload fresh embedded code from repository, burn to EEPROM, and initialize.
      */
     object FaultResetCommand {
       val commandName: CommandName = CommandName("faultReset")
 
       /** Fault recovery level to perform. */
-      val severityKey: GChoiceKey = ChoiceKey.make("severity", "None", "Init", "Minor", "Major")
+      val severityKey: GChoiceKey = ChoiceKey.make("severity", "None", "Init", "Reset", "Reload")
 
     }
 

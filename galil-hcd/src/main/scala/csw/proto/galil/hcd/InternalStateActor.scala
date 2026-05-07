@@ -184,7 +184,7 @@ object InternalStateActor:
    *     error cannot be attributed to a single axis (0 or 2+ candidates).
    *   - InternalStateActor.ReportConnectionStatus(Disconnected) handler — self-message
    *     after the connection field is updated.
-   *   - CommandHandlerActor.handleFaultReset when recovery fails.
+   *   - GalilHcd.handleFaultReset when recovery fails.
    *
    * Idempotent: if HcdState is already Faulted, the message still re-applies axis
    * state transitions (harmless) and the reason text (which may be updated). This
@@ -404,10 +404,11 @@ class InternalStateActor(
   private def handleEnterFaulted(reason: String): Unit =
     log.warn(s"EnterFaulted: $reason")
 
-    // HCD-level update
+    // HCD-level update.  Also clear initializingReason 
     val hcdUpdates: Map[String, Any] = Map(
       "state"              -> HcdStateEnum.Faulted,
-      "controllerErrorMsg" -> reason
+      "controllerErrorMsg" -> reason,
+      "initializingReason" -> ""
     )
     handleUpdateHcdState(hcdUpdates, context.system.ignoreRef)
 

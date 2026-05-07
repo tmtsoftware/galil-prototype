@@ -97,6 +97,7 @@ object HmiJsonProtocol {
       "timestamp"          -> hcdState.lastPollingTime.toString,
       "hcdState"           -> hcdState.state.toString,
       "controllerErrorMsg" -> hcdState.controllerErrorMsg,
+      "initializingReason" -> hcdState.initializingReason,
       "controllerAxisCount" -> hcdState.controllerAxisCount,
       "simulation"         -> hcdState.simulation,
       "pollingRateHz"      -> hcdState.currentPollingRateHz,

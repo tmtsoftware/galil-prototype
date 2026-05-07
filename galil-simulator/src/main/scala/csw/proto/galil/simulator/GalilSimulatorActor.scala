@@ -66,6 +66,8 @@ object GalilSimulatorActor {
   val StopMotion           = "ST"
   val UploadProgram        = "UL"
   val DownloadProgram      = "DL"
+  val BurnProgram          = "BP"
+  val ResetController      = "RS"
   val LimitDisable         = "LD"
   val ConfigureInputs      = "CN"
   val HomeVelocity         = "HV"
@@ -144,6 +146,10 @@ object GalilSimulatorActor {
    * @param errorStatus       Last error code (for TC command)
    * @param digitalOutputs    Simulated digital output bits
    * @param programText       Stored program text (for UL download)
+   * @param dlBuffer          When Some, simulator is in DL receive mode and is
+   *                          accumulating program lines into this StringBuilder.
+   *                          On `\` terminator the buffer is committed to
+   *                          programText and reset to None.  None outside DL.
    */
   case class SimState(
     axes: Map[Char, SimAxis] = Map.empty,
@@ -153,7 +159,8 @@ object GalilSimulatorActor {
     errorStatus: Int = 0,
     digitalOutputs: Array[Byte] = Array.fill(10)(0.toByte),
     digitalInputs: Array[Byte] = Array.fill(10)(0.toByte),
-    programText: String = ""
+    programText: String = "",
+    dlBuffer: Option[StringBuilder] = None
   )
 
   // ========================================
@@ -233,6 +240,30 @@ object GalilSimulatorActor {
 
     if (cmdString.isEmpty) {
       return (formatReply(None), state)
+    }
+
+    // ---- DL receive mode (Session 58) ----
+    // When state.dlBuffer is Some(...), the simulator is mid-DL upload — every
+    // incoming line is program text until we see the "\" terminator.  This is
+    // checked before the 2-char cmd dispatch so program lines like "JG 100"
+    // (which would normally match JogSpeed) don't get mis-dispatched.
+    state.dlBuffer match {
+      case Some(buf) =>
+        if (cmdString == "\\") {
+          // Terminator — commit accumulated text and exit DL mode.  Real Galil
+          // responds with ":" only on terminator (DL itself is silent).
+          val text = buf.toString
+          println(s"[SIM] DL complete: ${text.length} chars, ${text.linesIterator.size} lines")
+          return (formatReply(None), state.copy(programText = text, dlBuffer = None))
+        } else {
+          // Append this line + "\r\n" to the buffer.  No response — DL only
+          // ack's on terminator, not on intermediate lines.
+          buf.append(cmdString).append("\r\n")
+          // Returning empty bytes (no ":" prompt) so the IO layer doesn't see
+          // an unexpected ack between writeRaw program data writes.
+          return (ByteString.empty, state)
+        }
+      case None => // not in DL mode, fall through to normal dispatch
     }
 
     val cmd2 = cmdString.take(2)
@@ -355,8 +386,38 @@ object GalilSimulatorActor {
         (ByteString(programResponse), state)
 
       // ---- Download program (upload TO controller) ----
+      // Enter DL receive mode.  No ":" ack from DL itself — real Galil only
+      // ack's after the "\" terminator, by which point we'll have accumulated
+      // all program lines into dlBuffer (handled at the top of dispatch).
       case `DownloadProgram` =>
+        (ByteString.empty, state.copy(dlBuffer = Some(new StringBuilder)))
+
+      // ---- Burn program to EEPROM (Session 58) ----
+      // Real hardware: writes the volatile program (loaded via DL) to flash
+      // and ack's with ":".  Simulator has no flash to write to, so we just
+      // ack — programText is already persisted in SimState, which mirrors
+      // "burnt" state for the lifetime of the simulator process.
+      case `BurnProgram` =>
+        println("[SIM] BP: program (already in memory) treated as burnt")
         (formatReply(None), state)
+
+      // ---- Reset controller (Session 58) ----
+      // Real hardware: RS resets the controller and drops all TCP sessions.
+      // Simulator: reset state to fresh (re-init embedded vars, clear axes,
+      // clear thread status, clear errors) BUT preserve programText — the
+      // burnt program survives an RS because it lives in EEPROM, not RAM.
+      // We do NOT drop the TCP connection — the recovery code's reconnect
+      // path (MG 0 test) will simply succeed without a fresh socket, which
+      // is acceptable for simulator-mode tests.  Real-hardware reconnect
+      // behaviour is exercised on STB.
+      case `ResetController` =>
+        println("[SIM] RS: resetting simulator state (programText preserved)")
+        val freshState = SimState(
+          axes        = state.axes.map { case (c, _) => c -> SimAxis() },
+          programText = state.programText
+        )
+        val resetState = initializeEmbeddedVars(freshState)
+        (formatReply(None), resetState)
 
       // ---- Jog speed (used by tracking) ----
       case `JogSpeed` =>

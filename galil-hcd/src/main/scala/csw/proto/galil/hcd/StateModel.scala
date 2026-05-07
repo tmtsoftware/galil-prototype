@@ -515,6 +515,13 @@ case class HcdState(
   state: HcdStateEnum = HcdStateEnum.Uninitialized,
   controllerId: Int = 1,
   controllerErrorMsg: String = "",
+  // Free-form reason for the current Initializing state.  Populated by
+  // GalilHcd at startup ("startup") and by handleFaultReset during recovery
+  // ("faultReset Init", etc).  Cleared when the HCD transitions to Ready.
+  // Only meaningful when state == Initializing; HMI uses this to render
+  // a more descriptive banner during the otherwise-opaque Initializing
+  // window.  Internal-only — not published over CSW (not in ICD).
+  initializingReason: String = "",
   version: Int = 0,
   controllerAxisCount: Int = -1,
   activeAxes: Array[Boolean] = Array.fill(8)(false),
@@ -553,6 +560,7 @@ case class HcdState(
       case ("state", v: HcdStateEnum) => updated = updated.copy(state = v)
       case ("controllerId", v: Int) => updated = updated.copy(controllerId = v)
       case ("controllerErrorMsg", v: String) => updated = updated.copy(controllerErrorMsg = v)
+      case ("initializingReason", v: String) => updated = updated.copy(initializingReason = v)
       case ("version", v: Int) => updated = updated.copy(version = v)
       case ("controllerAxisCount", v: Int) => updated = updated.copy(controllerAxisCount = v)
       case ("activeAxes", v: Array[Boolean @unchecked]) => updated = updated.copy(activeAxes = v)

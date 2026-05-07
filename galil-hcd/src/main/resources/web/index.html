@@ -1153,21 +1153,67 @@ function LifecycleModal({open, kind, onConfirm, onCancel, busy, error}) {
           confirmLabel))));
 }
 
-function ErrorBanner({hcdState,controllerErrorMsg,onCommand}) {
+// Banner shown when HCD is not Ready, OR when there is a controller error
+// message that should be visible to the operator even in Ready (rare —
+// usually controllerErrorMsg only persists in Faulted/Uninitialized).
+//
+// Three rendering modes:
+//   - Faulted: red banner, severity dropdown + Clear Fault button.
+//     Severity choices are None/Init/Reset/Reload per ICD.
+//   - Uninitialized: amber banner, no buttons (HCD is busy initialising
+//     or recovering — operator just waits).  Shows initializingReason
+//     ("startup", "faultReset Init", etc) so the operator knows why.
+//   - Ready with non-empty controllerErrorMsg: rare; shown but no buttons.
+function ErrorBanner({hcdState,controllerErrorMsg,initializingReason,onCommand}) {
   if (hcdState==='Ready' && !controllerErrorMsg) return null;
-  const isFaulted = hcdState === 'Faulted';
-  return e('div',{style:{backgroundColor:'#7F1D1D',border:'1px solid #991B1B',borderRadius:6,
+
+  const isFaulted        = hcdState === 'Faulted';
+  const isUninitialized  = hcdState === 'Uninitialized';
+
+  // Severity selection state for the Clear Fault button.  Held locally in
+  // the banner — the user picks a severity, then clicks Clear Fault, then
+  // the dropdown resets to None on the next render after Faulted clears.
+  const [severity, setSeverity] = useState('None');
+
+  // Color scheme: red for Faulted, amber for Uninitialized.
+  const palette = isFaulted ? {
+    bg:'#7F1D1D', border:'#991B1B', titleColor:'#FCA5A5', msgColor:'#FECACA'
+  } : isUninitialized ? {
+    bg:'#78350F', border:'#92400E', titleColor:'#FCD34D', msgColor:'#FDE68A'
+  } : {
+    bg:'#7F1D1D', border:'#991B1B', titleColor:'#FCA5A5', msgColor:'#FECACA'
+  };
+
+  // Headline text varies by state.  Uninitialized gets a more informative
+  // message via initializingReason ("startup", "faultReset Init") if set.
+  const headline = isUninitialized
+    ? (initializingReason ? `Initializing — ${initializingReason}` : 'HCD State: Uninitialized')
+    : `HCD State: ${hcdState}`;
+
+  return e('div',{style:{backgroundColor:palette.bg,border:`1px solid ${palette.border}`,borderRadius:6,
     padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:10,fontFamily:'var(--mono)',fontSize:12}},
-    e('span',{style:{fontSize:18,lineHeight:1}},'⚠'),
+    e('span',{style:{fontSize:18,lineHeight:1}}, isUninitialized ? '⏳' : '⚠'),
     e('div',{style:{flex:1}},
-      e('div',{style:{color:'#FCA5A5',fontWeight:700}},'HCD State: '+hcdState),
-      controllerErrorMsg && e('div',{style:{color:'#FECACA',marginTop:2,fontSize:11}},controllerErrorMsg)),
-    isFaulted && e('button',{
-      onClick:()=>onCommand('faultReset',{severity:'None'}),
-      style:{padding:'4px 10px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#991B1B',
-        color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer',
-        flexShrink:0,whiteSpace:'nowrap'}},
-      'Clear Fault'));
+      e('div',{style:{color:palette.titleColor,fontWeight:700}},headline),
+      controllerErrorMsg && e('div',{style:{color:palette.msgColor,marginTop:2,fontSize:11}},controllerErrorMsg)),
+    isFaulted && e('div',{style:{display:'flex',alignItems:'center',gap:6,flexShrink:0}},
+      // Severity selector — small dropdown in the same color family as the banner
+      e('label',{style:{color:'#FCA5A5',fontSize:10,fontWeight:600}},'Severity:'),
+      e('select',{
+        value:severity,
+        onChange:(ev)=>setSeverity(ev.target.value),
+        title:'None: clear error.  Init: re-run controller init.  Reset: RS controller, then init.  Reload: upload fresh code, BP to EEPROM, RS, then init.',
+        style:{padding:'3px 6px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#7F1D1D',
+          color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer'}},
+        ['None','Init','Reset','Reload'].map(sev =>
+          e('option',{key:sev,value:sev,style:{backgroundColor:'#7F1D1D',color:'#FEE2E2'}},sev))),
+      e('button',{
+        onClick:()=>onCommand('faultReset',{severity}),
+        title:`Submit faultReset with severity=${severity}`,
+        style:{padding:'4px 10px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#991B1B',
+          color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer',
+          flexShrink:0,whiteSpace:'nowrap'}},
+        'Clear Fault')));
 }
 
 // ── Main App ──
@@ -1322,8 +1368,9 @@ function GalilHMI() {
           e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:connected?'#10B981':'#EF4444'}}),
           connected?'Connected':'Disconnected'))),
 
-    // Controller error banner
-    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg,onCommand:handleCommand}),
+    // Controller error / initialization-progress banner
+    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg,
+      initializingReason:state?.initializingReason,onCommand:handleCommand}),
 
     // Axis cards (fixed height)
     e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(285px, 1fr))',gap:10,marginBottom:10,flexShrink:0}},

@@ -110,11 +110,17 @@ abstract class GalilIo {
   /**
    * Sends a command and waits only for the acknowledgment prompt (:).
    * Used for commands that don't return data, just confirmation.
-   * 
+   *
+   * Drains the receive buffer before sending so the ":" we consume is
+   * unambiguously the ack for this command, not a stray byte left by a
+   * prior operation.  Short timeout — under normal operation the buffer
+   * is empty and this is a no-op.
+   *
    * @param cmd command to send
    * @throws RuntimeException if response is not ":" or command was rejected ("?")
    */
   def sendAndWaitForPrompt(cmd: String): Unit = {
+    drainAndShowBuffer(timeoutMs = 50)
     val responses = send(cmd)
     if (responses.size != 1) {
       throw new RuntimeException(s"Expected 1 response to '$cmd', got ${responses.size}")
@@ -152,22 +158,17 @@ abstract class GalilIo {
 
   /**
    * Uploads program to controller using DL command.
-   * Properly implements the DL protocol.
-   * 
-   * CRITICAL: DL does not respond until the program terminator (\) is sent.
-   * The controller waits for program data after receiving DL.
-   * 
+   *
+   * The controller is silent during DL streaming.  After the "\" terminator,
+   * two ":" acks arrive: first for "\", then DL's deferred completion ack.
+   *
    * @param program the program text to upload
    */
   def uploadProgram(program: String): Unit = {
-    // Step 1: Enter DL mode - controller does NOT respond yet, waits for data
     writeRaw("DL")
-    
-    // Step 2: Stream program data (no response expected per line)
     writeRaw(program)
-    
-    // Step 3: Send terminator - controller responds with ":" only now
-    sendAndWaitForPrompt("\\")
+    sendAndWaitForPrompt("\\")    // ack for "\"
+    drainAndShowBuffer(200)       // DL's deferred ack
   }
 
   // Receives multiple replies for a compound command (semicolon-separated).

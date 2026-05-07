@@ -53,7 +53,13 @@ class HmiServer(
   log: Logger,
   locationService: LocationService,
   componentInfo: ComponentInfo,
-  port: Int = 9090
+  port: Int = 9090,
+  // faultReset is dispatched directly to GalilHcd (Session 58) — it does not
+  // flow through CommandHandlerActor because it drives HCD-level lifecycle
+  // state and re-uses the shared init sequence.  GalilHcd provides this
+  // callback at construction time.  The callback is responsible for kicking
+  // off the recovery off-thread (it is not a blocking call).
+  onFaultReset: (Setup, Id) => Unit
 )(implicit system: ActorSystem[?]) {
 
   implicit val ec: ExecutionContext = system.executionContext
@@ -321,6 +327,17 @@ class HmiServer(
 
       // Build CSW Setup from JSON params using ICD key objects
       val setup = buildSetup(request.commandName, request.params, runId)
+
+      // faultReset is dispatched directly to GalilHcd (not CHA) because it
+      // drives HCD lifecycle state and re-uses the shared init sequence.
+      // The callback runs the recovery off-thread; we return Started here
+      // and the eventual Completed/Error arrives via the CRM (which the
+      // HMI doesn't currently observe — state changes are visible through
+      // the WebSocket stream as the recovery progresses).
+      if (request.commandName == "faultReset") {
+        onFaultReset(setup, runId)
+        return commandResponseJson(runId.id, "Started")
+      }
 
       // Submit to CommandHandlerActor (fire-and-forget from HMI perspective;
       // the WebSocket stream will show state changes as the command progresses)

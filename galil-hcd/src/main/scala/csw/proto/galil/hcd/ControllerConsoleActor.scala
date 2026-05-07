@@ -35,6 +35,15 @@ import scala.util.control.NonFatal
  *   On any connection failure the latch is also counted down, so the caller
  *   is never left blocking indefinitely; it logs a warning and continues.
  *
+ * Reconnect (Session 58):
+ *   Used by faultReset Reset and Reload severities — the controller's RS
+ *   command drops all TCP sessions, so we need to be able to re-establish
+ *   the console handle after the controller comes back.  The Reconnect
+ *   message stops the existing reader thread (closing its socket so the
+ *   in-progress read unblocks promptly), waits for it to terminate, then
+ *   starts a fresh connect + CF I + CW 2 sequence.  Replies success/failure
+ *   on a fresh CountDownLatch with a generous ReconnectTimeoutMs budget.
+ *
  * CF routing:
  *   Only one TCP handle receives MG output at a time (determined by CF I).
  *   On HCD shutdown this handle closes and CF reverts to the prior handle.
@@ -47,8 +56,48 @@ object ControllerConsoleActor:
   sealed trait Command
   case object Stop extends Command
 
+  /**
+   * Re-establish the console TCP handle.  Used by faultReset Reset and
+   * Reload severities (Session 58).  Stops any in-flight reader thread,
+   * waits briefly for it to terminate, then starts a fresh connect + CF I
+   * + CW 2 sequence.  Replies success/failure once the new handle is live
+   * (or has failed to come up).
+   *
+   * Console is informational and excluded from isOperational, so callers
+   * can choose to ignore failure here without losing operational status.
+   */
+  case class Reconnect(replyTo: ActorRef[ReconnectResult]) extends Command
+
+  /**
+   * Outcome of a Reconnect attempt.  success=true means the new handle is
+   * connected, CF I + CW 2 have been sent, and the reader thread is now
+   * looping for MG output.
+   */
+  case class ReconnectResult(success: Boolean, error: Option[String] = None)
+
+  /**
+   * Outcome the reader thread reports back to whoever asked it to start
+   * (initial setup or a Reconnect message).  Internal — not exposed.
+   */
+  private sealed trait ConnectOutcome
+  private case object ConnectSucceeded extends ConnectOutcome
+  private case class ConnectFailed(reason: String) extends ConnectOutcome
+
   private val ConnectTimeoutMs = 5000
   private val ReadTimeoutMs    = 3000
+
+  /** Maximum time to wait for a reconnect attempt to complete (open socket
+   *  + CF I + CW 2).  Generous compared to the 5s socket connect timeout
+   *  so an in-progress connect can finish.  Reset/Reload recovery uses
+   *  this; the existing first-connect latch is governed by ReadyTimeoutMs. */
+  val ReconnectTimeoutMs = 8000
+
+  /**
+   * Maximum time to wait for the previous reader thread to terminate before
+   * starting a new one on Reconnect.  Generous (5s) because the thread may
+   * be blocked in a socket read; we interrupt it and wait briefly.
+   */
+  val StopWaitMs = 5000
 
   /** CI actor waits at most this long for CF I + CW 2 to complete before
    *  proceeding with #Init. Well under the CSW 10s init timeout. */
@@ -76,19 +125,42 @@ object ControllerConsoleActor:
     @volatile var running           = false
     @volatile var connectionLostFlag = false
     @volatile var readerThread: Thread = null
+    @volatile var currentSocket: Socket = null
 
-    def startReading(): Unit =
-      if running then return
+    /**
+     * Start a reader thread.  onOutcome is called once per startReading
+     * call, when the thread either:
+     *   - completes the connect + CF I + CW 2 handshake (ConnectSucceeded)
+     *   - fails at any step before the handshake (ConnectFailed)
+     * The thread continues looping for MG output after success.
+     *
+     * Idempotent guard: if running is already true, onOutcome is invoked
+     * with ConnectSucceeded immediately (the existing thread is fine).
+     */
+    def startReading(onOutcome: ConnectOutcome => Unit): Unit =
+      if running then
+        onOutcome(ConnectSucceeded)
+        return
       running = true
+      connectionLostFlag = false
 
       readerThread = new Thread(
         () => {
           var socket: Socket = null
+          // Tracks whether onOutcome has already been invoked for this
+          // thread instance, so we don't double-fire on shutdown paths.
+          var outcomeReported = false
+          def report(outcome: ConnectOutcome): Unit =
+            if !outcomeReported then
+              outcomeReported = true
+              try onOutcome(outcome) catch case NonFatal(_) => ()
+
           try
             log.info(s"$logTag ControllerConsoleActor: connecting to $host:$port")
             socket = new Socket()
             socket.connect(new InetSocketAddress(InetAddress.getByName(host), port), ConnectTimeoutMs)
             socket.setSoTimeout(ReadTimeoutMs)
+            currentSocket = socket
             log.info(s"$logTag ControllerConsoleActor: connected")
 
             val buf = new Array[Byte](256)
@@ -130,7 +202,7 @@ object ControllerConsoleActor:
             internalStateActor ! InternalStateActor.ReportConnectionStatus(
               "consoleConnection", ConnectionStatus.Connected
             )
-            readyLatch.countDown()
+            report(ConnectSucceeded)
 
             // ── Read loop ────────────────────────────────────────────────────
             val readBuf    = new Array[Byte](4096)
@@ -161,6 +233,10 @@ object ControllerConsoleActor:
                   log.warn(s"$logTag ControllerConsoleActor: read error: ${e.getMessage}")
                   connectionLostFlag = true
                   running = false
+                case _: IOException =>
+                  // running is already false — we were asked to stop and the
+                  // socket was closed from stopReading() to unblock this read.
+                  // Loop will exit on the next iteration check.
 
             // If we exited the loop because of a connection loss (not a Stop command),
             // report Disconnected. This is informational only — consoleConnection is
@@ -174,14 +250,19 @@ object ControllerConsoleActor:
           catch
             case e: IOException =>
               log.error(s"$logTag ControllerConsoleActor: connection failed: ${e.getMessage}")
-              readyLatch.countDown() // never leave caller blocking
+              report(ConnectFailed(e.getMessage)) // never leave caller blocking
             case NonFatal(e) =>
               log.error(s"$logTag ControllerConsoleActor: unexpected error: ${e.getMessage}")
-              readyLatch.countDown() // never leave caller blocking
+              report(ConnectFailed(e.getMessage)) // never leave caller blocking
           finally
             if socket != null && !socket.isClosed then
               try socket.close() catch case NonFatal(_) => ()
+            currentSocket = null
             log.info(s"$logTag ControllerConsoleActor: stopped")
+            // Backstop: if the thread exited before the handshake completed
+            // (e.g. immediate IOException not caught by the outer try), still
+            // unblock any waiter.
+            report(ConnectFailed("reader thread exited before handshake"))
         },
         s"galil-console-${prefix.componentName}"
       )
@@ -191,16 +272,73 @@ object ControllerConsoleActor:
 
     def stopReading(): Unit =
       running = false
-      if readerThread != null then
-        readerThread.interrupt()
+      // Close the socket so any in-progress blocking read in the reader
+      // thread throws and the thread exits promptly.  setSoTimeout (3s)
+      // would also eventually unblock the read, but closing is faster.
+      val s = currentSocket
+      if s != null && !s.isClosed then
+        try s.close() catch case NonFatal(_) => ()
+      val t = readerThread
+      if t != null then
+        t.interrupt()
         readerThread = null
 
-    startReading()
+    /**
+     * Stop the existing reader thread and wait briefly for it to terminate
+     * before returning.  Used by Reconnect — we want the old socket/thread
+     * fully gone before starting a fresh one to avoid two threads reading
+     * the same (or different) sockets and racing on internalStateActor
+     * notifications.
+     */
+    def stopAndWait(): Unit =
+      val t = readerThread
+      stopReading()
+      if t != null then
+        try t.join(StopWaitMs.toLong) catch case _: InterruptedException => ()
+        if t.isAlive then
+          log.warn(s"$logTag ControllerConsoleActor: previous reader thread did not exit within ${StopWaitMs}ms")
+
+    // ── Initial start ────────────────────────────────────────────────────
+    // First connect — count down the readyLatch on outcome regardless of
+    // success or failure, mirroring the old behaviour where startReading
+    // unconditionally called readyLatch.countDown() to never leave the
+    // GalilHcd init waiter blocking.
+    startReading(_ => readyLatch.countDown())
 
     Behaviors
-      .receiveMessage[Command] { case Stop =>
-        stopReading()
-        Behaviors.stopped
+      .receiveMessage[Command] {
+        case Stop =>
+          stopReading()
+          Behaviors.stopped
+
+        case Reconnect(replyTo) =>
+          // Synchronous-style reconnect handled inside the actor message
+          // loop.  The reader thread does its work on its own thread; we
+          // just orchestrate stop → start and wait briefly for the new
+          // handshake to complete (or fail).
+          log.info(s"$logTag ControllerConsoleActor: Reconnect requested")
+          stopAndWait()
+
+          // CountDownLatch + outcome holder so we can deliver the result
+          // back from the reader thread to this actor message handler.
+          val latch  = new CountDownLatch(1)
+          @volatile var outcome: ConnectOutcome = ConnectFailed("no outcome reported")
+          startReading { o =>
+            outcome = o
+            latch.countDown()
+          }
+
+          val finished = latch.await(ReconnectTimeoutMs.toLong, java.util.concurrent.TimeUnit.MILLISECONDS)
+          if !finished then
+            log.warn(s"$logTag ControllerConsoleActor: Reconnect timed out after ${ReconnectTimeoutMs}ms")
+            replyTo ! ReconnectResult(success = false,
+              error = Some(s"Reconnect handshake did not complete within ${ReconnectTimeoutMs}ms"))
+          else outcome match
+            case ConnectSucceeded =>
+              replyTo ! ReconnectResult(success = true)
+            case ConnectFailed(reason) =>
+              replyTo ! ReconnectResult(success = false, error = Some(reason))
+          Behaviors.same
       }
       .receiveSignal { case (_, PostStop) =>
         stopReading()
