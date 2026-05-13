@@ -104,21 +104,84 @@ object ProgramFileManager {
    * Process DMC program text for upload:
    * - Strips REM comments (lines starting with REM)
    * - Removes empty lines
-   * - Preserves indentation (leading whitespace)
-   * - Preserves inline ' comments (controller accepts these)
-   * - Removes trailing whitespace
-   * - Ensures proper line endings
-   * 
+   * - Removes trailing whitespace per line
+   * - Compresses lines that exceed the 80-char DL parser limit by
+   *   stripping whitespace outside of string literals and comments
+   * - Throws if any line still exceeds 80 chars after compression.
+   * - Joins lines with CR+LF.
+   *
    * @param programText Raw program text (may include comments)
    * @return Cleaned program text ready for upload
+   * @throws RuntimeException if any line exceeds 80 chars after compression
    */
   def prepareProgramForUpload(programText: String): String = {
-    programText
+    val MaxLineLength = 80
+    val rawLines = programText
       .split("\n")
-      .map(_.replaceAll("\\s+$", ""))        // Remove TRAILING whitespace only
-      .filter(_.trim.nonEmpty)                // Remove blank lines
-      .filterNot(_.trim.startsWith("REM"))    // Remove REM comments
-      .mkString("\r\n")  // Galil expects CR+LF
+      .map(_.replaceAll("\\s+$", ""))         // Remove TRAILING whitespace only
+      .filter(_.trim.nonEmpty)                 // Remove blank lines
+      .filterNot(_.trim.startsWith("REM"))     // Remove REM comments
+
+    val processed = rawLines.map { line =>
+      if (line.length <= MaxLineLength) line
+      else compressLine(line)
+    }
+
+    // Validate: after compression, every line must fit
+    val overruns = processed.zipWithIndex.collect {
+      case (l, i) if l.length > MaxLineLength => (i + 1, l.length, l)
+    }
+    if (overruns.nonEmpty) {
+      val details = overruns.take(5).map { case (idx, len, l) =>
+        s"  cleaned-line $idx: $len chars: '$l'"
+      }.mkString("\n")
+      val more = if (overruns.length > 5) s"\n  ... and ${overruns.length - 5} more" else ""
+      throw new RuntimeException(
+        s"Program has ${overruns.length} line(s) over $MaxLineLength chars even after whitespace compression. " +
+        s"Galil DL parser silently rejects these. Shorten the offending lines (typically by trimming comments):\n$details$more"
+      )
+    }
+
+    processed.mkString("\r\n")
+  }
+
+  /**
+   * Compress a DMC program line by stripping whitespace outside of
+   * string literals ("...") and inline comments ('...).  Inside strings
+   * and comments, content is preserved verbatim. 
+   */
+  private[hcd] def compressLine(line: String): String = {
+    val sb = new StringBuilder(line.length)
+    var inString = false
+    var inComment = false
+    var i = 0
+    while (i < line.length) {
+      val c = line.charAt(i)
+      if (inComment) {
+        // Once in a comment, everything to end-of-line is preserved
+        sb.append(c)
+      } else if (inString) {
+        // Inside a "..." string literal, preserve verbatim
+        sb.append(c)
+        if (c == '"') inString = false
+      } else {
+        // Outside strings and comments: strip whitespace, watch for
+        // string/comment starts
+        if (c == '"') {
+          inString = true
+          sb.append(c)
+        } else if (c == '\'') {
+          inComment = true
+          sb.append(c)
+        } else if (Character.isWhitespace(c)) {
+          // Skip
+        } else {
+          sb.append(c)
+        }
+      }
+      i += 1
+    }
+    sb.toString
   }
   
   /**

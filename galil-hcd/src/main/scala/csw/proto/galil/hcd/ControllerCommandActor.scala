@@ -250,25 +250,43 @@ private[hcd] object ControllerCommandActor {
             }
             Behaviors.same
 
-          // Upload an embedded program to the controller (DL command).  Used
-          // by faultReset Reload severity (Session 58).  galilIo.uploadProgram
-          // implements the DL handshake: writeRaw "DL" → write program →
-          // send "\" terminator → consume "\"'s ":" ack → consume DL's
-          // deferred ":" ack.
+          // Upload an embedded program to the controller (DL command).
           //
-          // The controller is silent during DL streaming; it ends up emitting
-          // both acks after "\" is received.  The "\" ack arrives after the
-          // controller has parsed all program lines, which can take 3+ seconds
-          // for a full-size program — the default 3s socket read timeout cuts
-          // it close.  Extend to 10s for the upload and restore 3s afterward,
-          // mirroring the BP handler pattern below.
+          // Protocol (per Galil DL command reference):
+          //   1. Send "DL" — controller switches to download mode
+          //   2. Stream the program text (controller is silent if healthy)
+          //   3. Send "\" — controller commits the program and acks ":"
+
           case GalilCommandMessage.UploadProgram(program, replyTo) =>
             try {
               log.info(s"Uploading program to controller (DL): ${program.length} characters, ${program.linesIterator.size} lines")
               galilIo.synchronized {
                 galilIo.setReadTimeout(10000)
                 try {
-                  galilIo.uploadProgram(program)
+                  // Clean the socket of any stale bytes, then HX to halt
+                  // any running programs.  
+                  galilIo.drainAndShowBuffer(timeoutMs = 100)
+                  galilIo.send("HX")
+
+                  // Begin download.  Controller is silent until "\" arrives
+                  // if DL is healthy.  Any "?" in the response after the
+                  // program stream means the controller rejected something
+                  galilIo.writeRaw("DL")
+                  galilIo.writeRaw(program)
+                  val drained = galilIo.drainAndShowBuffer(timeoutMs = 50)
+                  if (drained.contains('?')) {
+                    val preview = drained.replace("\r", "\\r").replace("\n", "\\n").take(120)
+                    throw new RuntimeException(
+                      s"DL rejected ${drained.count(_ == '?')} line(s). Drain content: '$preview'"
+                    )
+                  }
+
+                  // Terminate the download.  sendAndWaitForPrompt throws on
+                  // a literal "?" response.  A deferred ":" may follow once
+                  // the controller finishes committing; drain it so it
+                  // doesn't confuse subsequent commands.
+                  galilIo.sendAndWaitForPrompt("\\")
+                  galilIo.drainAndShowBuffer(timeoutMs = 200)
                 } finally {
                   galilIo.setReadTimeout(3000)
                 }

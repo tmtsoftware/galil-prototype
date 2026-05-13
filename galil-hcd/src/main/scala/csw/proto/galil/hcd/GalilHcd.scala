@@ -1088,19 +1088,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
     // Step 1b: prepare the program text for DL upload.
     //
-    // The raw .dmc file contains REM comment lines, blank lines, and uses
-    // bare LF (\n) line endings.  The Galil controller in DL mode expects
-    // CR+LF (\r\n) line termination and rejects "REM" as an unrecognized
-    // command.  Without preparation the controller exits DL mode partway
-    // through (the bare-LF blob exceeds the 80-char parser line buffer or
-    // the REM token is rejected), which is why the post-DL `\` terminator
-    // comes back as `?` — the controller is no longer in DL mode by then.
-    //
     // prepareProgramForUpload strips REM lines and blank lines, removes
-    // trailing whitespace per line, and joins with \r\n.  Same preparation
-    // used by the original galil-client TestProgramUploadDownload path.
+    // trailing whitespace, compresses any line over 80 chars by stripping
+    // inter-token whitespace (matches GDK behavior; see Galil DL command
+    // reference: "If there are too many lines or too many characters per
+    // line, the controller will return a ?."), validates that every line
+    // is within the 80-char limit, and joins with CR+LF.
     val cleanedProgram = ProgramFileManager.prepareProgramForUpload(programText)
-    log.info(s"Prepared program for DL: ${cleanedProgram.length} chars (raw was ${programText.length}); REM/blank lines removed, line endings normalized to CRLF")
+    log.info(s"Prepared program for DL: ${cleanedProgram.length} chars (raw was ${programText.length})")
 
     // Step 2: upload to controller via DL (galilIo.uploadProgram)
     val uploadResult = Try {
