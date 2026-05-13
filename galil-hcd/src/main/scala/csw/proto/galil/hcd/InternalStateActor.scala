@@ -521,6 +521,13 @@ class InternalStateActor(
   /**
    * Update axis command state and notify command state subscribers.
    * Only notifies subscribers watching the specific axis that changed.
+   *
+   * Spontaneous-motion detection: when an UpdateAxisCmdState carries moving=true
+   * arriving while the axis is in a state where motion is unexpected (Idle/Lost)
+   * and the HCD is Ready, transition the axis to Error with axisErrorMsg
+   * "Spontaneous Motion". Suppressed when the
+   * HCD is not Ready (axes may legitimately move during init's BZ commutation or
+   * recovery sequences).
    */
   private def handleUpdateAxisCmdState(
     axis: Axis,
@@ -560,7 +567,18 @@ class InternalStateActor(
         newCmdState.foreach { cmdState =>
           notifyCmdSubscribers(axis, cmdState, actuallyChanged)
         }
-      
+
+      // Spontaneous-motion check. 
+      val movingIsTrue = newCmdState.exists(_.moving)
+      if movingIsTrue && currentState.state == HcdStateEnum.Ready then
+        currentState.getAxis(axis).foreach { axState =>
+          if axState.axisState == AxisStateEnum.Idle
+             || axState.axisState == AxisStateEnum.Lost then
+            log.warn(s"Spontaneous motion detected on axis $axis " +
+              s"(axisState=${axState.axisState}, moving=true) — transitioning to Error")
+            applySpontaneousMotion(axis)
+        }
+
       replyTo ! UpdateResponse(success = true)
       Behaviors.same
     catch
@@ -568,6 +586,24 @@ class InternalStateActor(
         log.error(s"Error updating axis $axis cmd state" + s": ${ex.getMessage}")
         replyTo ! UpdateResponse(success = false, message = ex.getMessage)
         Behaviors.same
+
+  /**
+   * Apply the Spontaneous-Motion error transition: set axisErrorMsg in
+   * AxisCmdState and axisState=Error in AxisState, notifying subscribers on
+   * both channels. 
+   */
+  private def applySpontaneousMotion(axis: Axis): Unit =
+    val msg = "Spontaneous Motion"
+
+    // AxisCmdState.axisErrorMsg
+    currentState = currentState.updateCmdState(axis, Map("axisErrorMsg" -> msg))
+    currentState.getCmdState(axis).foreach { cs =>
+      notifyCmdSubscribers(axis, cs, Set("axisErrorMsg"))
+    }
+
+    // AxisState.axisState → Error
+    currentState = currentState.updateAxis(axis, Map("axisState" -> AxisStateEnum.Error))
+    notifyStateSubscribers(Set("axisState"), Set(axis))
 
   /**
    * Register a thread as executing a command on behalf of an axis.

@@ -345,6 +345,10 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
   const [cfgAlgorithm,setCfgAlgorithm] = useState('shortest');
   const [cfgUpperLimit,setCfgUpperLimit] = useState('');
   const [cfgLowerLimit,setCfgLowerLimit] = useState('');
+  // Engineering jog speed (signed counts/s).  Bypasses CSW; sent via the
+  // HMI-internal engJog handler.  Persists across config-panel toggles so
+  // an engineer can refine speed between jogs without retyping.
+  const [jogSpeed,setJogSpeed] = useState('');
   // Last HMI-side command rejection for this axis (e.g. soft-limit violation
   // returned synchronously from POST /api/command).  Cleared on the next
   // command from this card.  Server-side axisErrorMsg from a genuine controller
@@ -682,7 +686,53 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
                 color: axState.softLimitsEnabled ? '#F59E0B' : '#10B981',
                 small: true,
                 onClick: () => onCommand('setSoftLimits',{axis,enabled:!axState.softLimitsEnabled})}))
-          : null
+          : null,
+
+        // ── ENGINEERING ──
+        // Low-level jog controls.  Bypasses CommandHandlerActor; issues SH/JG/BG/ST
+        // directly on the command connection via the HMI engJog/engStop handlers.
+        // Reserved for lab/test use (limit-switch checkout, motor smoke-test before
+        // homing).  Soft limits are NOT enforced — engineer takes responsibility.
+        //
+        // Jog buttons enabled when axis is in a jog-permissible state:
+        //   Idle, Lost                              — first jog from quiescent
+        //   Moving (with activeThread == 0)         — reentrant speed/direction update
+        //                                              (engineering jog already running)
+        // Stop is always enabled — fundamentally a safety command; works against
+        // spontaneous motion and externally-issued JGs as well as our own jogs.
+        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#F59E0B',marginBottom:6,letterSpacing:1,
+          fontFamily:'var(--mono)'}},'ENGINEERING'),
+        (() => {
+          const canJog =
+            axState.axisState === 'Idle'
+            || axState.axisState === 'Lost'
+            || (axState.axisState === 'Moving' && (cs.activeThread || 0) === 0);
+          const speedNum = parseInt(jogSpeed, 10);
+          const speedValid = !isNaN(speedNum) && speedNum > 0;
+          return e('div',{style:{fontFamily:'var(--mono)',fontSize:10.5}},
+            e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center'}},
+              e('span',{style:{color:'#9CA3AF'}},'Jog Spd'),
+              e(In,{value:jogSpeed,onChange:setJogSpeed,ph:'counts/s (magnitude)'})),
+            e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end',alignItems:'center'}},
+              e('span',{style:{flex:1,fontSize:9.5,color:'#6B7280'}},
+                canJog ? (speedValid ? '' : 'enter speed magnitude') : `jog blocked: ${axState.axisState}`),
+              e(Btn,{
+                label:'Jog \u2212',  // unicode minus
+                color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+                small:true,
+                onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:-speedNum}); }}),
+              e(Btn,{
+                label:'Jog +',
+                color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+                small:true,
+                onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:speedNum}); }}),
+              e(Btn,{
+                label:'Stop',
+                color:'#EF4444',
+                small:true,
+                onClick: () => onCommand('engStop',{axis})})));
+        })()
 
       ) : null));
 }

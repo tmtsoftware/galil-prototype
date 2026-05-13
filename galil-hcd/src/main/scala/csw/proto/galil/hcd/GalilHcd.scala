@@ -661,17 +661,18 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     try {
       val hmiPort = if (hcdConfig.simulate) 9090 else 9090 + hcdConfig.controller.id
       hmiServer = new hmi.HmiServer(
-        internalStateActor  = internalStateActor,
-        commandHandlerActor = commandHandlerActor,
-        hcdPrefix           = componentInfo.prefix,
-        log                 = log,
-        locationService     = locationService,
-        componentInfo       = componentInfo,
-        port                = hmiPort,
+        internalStateActor      = internalStateActor,
+        commandHandlerActor     = commandHandlerActor,
+        controllerCommandActor  = controllerCommandActor,
+        hcdPrefix               = componentInfo.prefix,
+        log                     = log,
+        locationService         = locationService,
+        componentInfo           = componentInfo,
+        port                    = hmiPort,
         // Route HMI-issued faultReset directly to handleFaultReset.  Runs
         // on the class-level execution context so the HMI HTTP handler
         // returns immediately (the recovery is long-running).
-        onFaultReset        = (setup, runId) => Future { handleFaultReset(setup, runId) }
+        onFaultReset            = (setup, runId) => Future { handleFaultReset(setup, runId) }
       )(ctx.system)
       hmiServer.start()
       log.info(s"HMI test console starting on port $hmiPort")

@@ -49,6 +49,12 @@ import scala.util.{Failure, Success}
 class HmiServer(
   internalStateActor: ActorRef[InternalStateActor.Command],
   commandHandlerActor: ActorRef[CommandHandlerActor.Command],
+  // Direct handle for HMI-internal engineering operations (engJog/engStop)
+  // that bypass CommandHandlerActor and the embedded-program path entirely.
+  // These low-level operations issue JG/BG/ST directly on the command
+  // connection — the engineer takes responsibility for soft-limit and
+  // tuning correctness. Reserved for lab/test use; not exposed via CSW.
+  controllerCommandActor: ActorRef[GalilCommandMessage],
   hcdPrefix: Prefix,
   log: Logger,
   locationService: LocationService,
@@ -314,6 +320,17 @@ class HmiServer(
       if request.commandName == "setSoftLimits" then
         return handleSetSoftLimits(request.params, runId)
 
+      // HMI-internal action: low-level engineering jog.  Issues SH;JG;BG directly
+      // on the command connection, bypassing CommandHandlerActor and any embedded
+      // program.  Reserved for lab/test use (limit-switch testing, motor checkout
+      // before homing).  Engineer takes responsibility for soft-limit and tuning
+      // correctness; the only HCD-side protection is the gating predicate (axis
+      // must be Idle, Lost, or already in an engineering jog).  See engJog handler.
+      if request.commandName == "engJog" then
+        return handleEngJog(request.params, runId, hcdState)
+      if request.commandName == "engStop" then
+        return handleEngStop(request.params, runId, hcdState)
+
       // Soft-limit check for positionAxis / offsetAxis.  The CSW path runs the
       // same check in validateCommand and would reject the command before
       // submitting it; the HMI bypasses that path so we must replicate it here.
@@ -377,6 +394,217 @@ class HmiServer(
     catch
       case ex: IllegalArgumentException =>
         commandResponseJson(runId.id, "Error", s"setSoftLimits: ${ex.getMessage}")
+  }
+
+  /**
+   * HMI-internal handler: low-level engineering jog.
+   *
+   * Issues JG/BG (with conditional SH if motor off) directly on the command
+   * connection via controllerCommandActor.SendCommand — bypassing
+   * CommandHandlerActor and the embedded-program path entirely.  No thread is
+   * allocated, no CommandWatcher is spawned; the engineer drives the motion
+   * with their own start/stop decisions.
+   *
+   * Frontend sends:
+   *   { commandName: "engJog", params: { axis: "A", speed: 30 } }
+   * where speed is signed counts/s (positive = forward, negative = reverse).
+   *
+   * Gating predicate (re-checked here against the live HcdState snapshot so
+   * a stale HMI cannot start a jog while an embedded program is running):
+   *   - HCD state == Ready
+   *   - Axis state ∈ {Idle, Lost}              ← first jog from a quiescent state
+   *     OR (Axis state == Moving && activeThread == 0)  ← reentrant speed update
+   *       (activeThread > 0 means an embedded motion program is running, which
+   *        we cannot interrupt without going through CommandHandlerActor.  The
+   *        engineer must issue a CSW stopAxis first.)
+   *
+   * On success, axisState is set to Moving so the existing CSW command
+   * machinery treats subsequent commands as interrupting motion (checkAndInterrupt
+   * will send ST to stop the jog when a positionAxis/offsetAxis/stopAxis arrives).
+   *
+   * Note: ControllerStatusActor's spontaneous-motion detector watches for
+   * moving=true while axisState ∈ {Idle, Lost}.  We deliberately update
+   * axisState=Moving BEFORE sending the JG;BG so the detector cannot fire on
+   * the first QR scan that sees our motion.  (If the JG itself fails we revert
+   * axisState in the error path so the detector also stays correct.)
+   */
+  private def handleEngJog(params: Map[String, JsValue], runId: Id, hcdState: HcdState): String = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+
+    // ─── Parse params ───
+    val axisChar = params.get("axis") match
+      case Some(JsString(s)) if s.length == 1 => s.head.toUpper
+      case _ =>
+        return commandResponseJson(runId.id, "Error", "engJog: missing or invalid 'axis' parameter")
+    val speed = params.get("speed") match
+      case Some(JsNumber(n)) => n.toLong
+      case Some(JsString(s)) =>
+        scala.util.Try(s.toLong).toOption match
+          case Some(v) => v
+          case None =>
+            return commandResponseJson(runId.id, "Error", s"engJog: invalid 'speed' parameter '$s'")
+      case _ =>
+        return commandResponseJson(runId.id, "Error", "engJog: missing or invalid 'speed' parameter")
+
+    val axis = try Axis.fromChar(axisChar) catch
+      case ex: IllegalArgumentException =>
+        return commandResponseJson(runId.id, "Error", s"engJog: ${ex.getMessage}")
+
+    // ─── Gating ─── (HCD lifecycle already vetted by the caller's Ready check;
+    // re-check here defensively in case future routing skips that path)
+    if hcdState.state != HcdStateEnum.Ready then
+      return commandResponseJson(runId.id, "Error",
+        s"engJog: HCD not Ready (state=${hcdState.state})")
+
+    val axState = hcdState.axes.get(axis) match
+      case Some(s) => s
+      case None =>
+        return commandResponseJson(runId.id, "Error", s"engJog: axis $axisChar not configured")
+    val cmdState = hcdState.cmdStates.getOrElse(axis, AxisCmdState())
+
+    val gatingOk = axState.axisState match
+      case AxisStateEnum.Idle | AxisStateEnum.Lost => true
+      case AxisStateEnum.Moving if cmdState.activeThread == 0 => true   // reentrant
+      case _ => false
+
+    if !gatingOk then
+      val reason = axState.axisState match
+        case AxisStateEnum.Moving =>  // activeThread > 0
+          s"axis $axisChar is executing an embedded program (thread ${cmdState.activeThread}) — issue stopAxis first"
+        case other =>
+          s"axis $axisChar is in $other state — engineering jog requires Idle, Lost, or active engineering jog"
+      log.warn(s"HMI engJog rejected: $reason")
+      return commandResponseJson(runId.id, "Error", reason)
+
+    // ─── Build command string ───
+    // SH only if motor currently off; on a reentrant speed update the motor is
+    // already energised so SH would be a no-op.  BG while already moving is
+    // harmless (empirically verified on hardware S61).
+    val needsSH = axState.motorOff
+    val cmdString =
+      if needsSH then s"SH$axisChar;JG$axisChar=$speed;BG$axisChar"
+      else            s"JG$axisChar=$speed;BG$axisChar"
+
+    log.info(s"HMI engJog axis=$axisChar speed=$speed (axisState=${axState.axisState}, " +
+      s"motorOff=${axState.motorOff}) → '$cmdString'")
+
+    // ─── Update axisState FIRST so the spontaneous-motion detector in
+    // InternalStateActor.handleUpdateAxisCmdState does not flag our own jog as
+    // unexplained motion.  Ordering: this UpdateAxisState message is enqueued
+    // to IS before we issue SendCommand to CCA; CS only sends its
+    // UpdateAxisCmdState(moving=true) after the next QR poll (which itself is
+    // sequenced after the JG;BG round-trip).  Pekko doesn't guarantee ordering
+    // across different senders, but the time from IS receiving our message to
+    // CS sending its update is at least one QR poll period (≥100ms), so the
+    // IS mailbox drains the axisState=Moving update first in practice.  If the
+    // controller rejects the JG;BG (e.g. axis hard-faulted between the gating
+    // check and the send), we revert to the prior axisState so the world
+    // stays consistent. ───
+    val priorState = axState.axisState
+    internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> AxisStateEnum.Moving),
+      system.ignoreRef)
+
+    // ─── Send via the command connection ───
+    try
+      val result = Await.result(
+        AskPattern.Askable(controllerCommandActor).ask[GalilCommandMessage.SendCommandResult](
+          ref => GalilCommandMessage.SendCommand(cmdString, ref)
+        )(timeout, system.scheduler),
+        timeout.duration
+      )
+      result.error match
+        case Some(err) =>
+          log.warn(s"HMI engJog axis=$axisChar: controller rejected '$cmdString' — $err")
+          // Revert axisState — we never actually started moving
+          internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+            Map("axisState" -> priorState),
+            system.ignoreRef)
+          commandResponseJson(runId.id, "Error", s"engJog: $err")
+        case None =>
+          commandResponseJson(runId.id, "Completed")
+    catch
+      case ex: Exception =>
+        log.error(s"HMI engJog axis=$axisChar failed: ${ex.getMessage}")
+        internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+          Map("axisState" -> priorState),
+          system.ignoreRef)
+        commandResponseJson(runId.id, "Error", s"engJog: ${ex.getMessage}")
+  }
+
+  /**
+   * HMI-internal handler: stop a low-level engineering jog.
+   *
+   * Issues ST<axis> directly on the command connection.  Sets axisState back
+   * to Idle or Lost (per stopCompletionState(homed)) so the HCD's worldview
+   * matches the physical state after the stop completes.
+   *
+   * Frontend sends:
+   *   { commandName: "engStop", params: { axis: "A" } }
+   *
+   * Permitted from any state — ST is fundamentally a safety command and the
+   * engineer may want to stop a jog they did not start (e.g. an externally-
+   * issued JG that triggered the spontaneous-motion detector).  The gating
+   * predicate here is intentionally minimal.
+   *
+   * For symmetry with CSW stopAxis, motor remains energised after engStop —
+   * the engineer can issue another jog or any other command without an
+   * intervening SH.
+   */
+  private def handleEngStop(params: Map[String, JsValue], runId: Id, hcdState: HcdState): String = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+
+    val axisChar = params.get("axis") match
+      case Some(JsString(s)) if s.length == 1 => s.head.toUpper
+      case _ =>
+        return commandResponseJson(runId.id, "Error", "engStop: missing or invalid 'axis' parameter")
+
+    val axis = try Axis.fromChar(axisChar) catch
+      case ex: IllegalArgumentException =>
+        return commandResponseJson(runId.id, "Error", s"engStop: ${ex.getMessage}")
+
+    if hcdState.state != HcdStateEnum.Ready then
+      return commandResponseJson(runId.id, "Error",
+        s"engStop: HCD not Ready (state=${hcdState.state})")
+
+    val axState = hcdState.axes.get(axis) match
+      case Some(s) => s
+      case None =>
+        return commandResponseJson(runId.id, "Error", s"engStop: axis $axisChar not configured")
+
+    // Compute completion state using the same rules as CSW stopAxis (SDD Fig 4-2).
+    // For engStop on a jog this will be Idle if homed, Lost if not.
+    val completionState = axState.axisState.stopCompletionState(axState.homed)
+    val cmdString = s"ST$axisChar"
+
+    log.info(s"HMI engStop axis=$axisChar (axisState=${axState.axisState}, homed=${axState.homed}) → '$cmdString' " +
+      s"→ completion state $completionState")
+
+    try
+      val result = Await.result(
+        AskPattern.Askable(controllerCommandActor).ask[GalilCommandMessage.SendCommandResult](
+          ref => GalilCommandMessage.SendCommand(cmdString, ref)
+        )(timeout, system.scheduler),
+        timeout.duration
+      )
+      result.error match
+        case Some(err) =>
+          log.warn(s"HMI engStop axis=$axisChar: controller rejected '$cmdString' — $err")
+          commandResponseJson(runId.id, "Error", s"engStop: $err")
+        case None =>
+          // ST succeeded — transition axisState.  The QR poll will follow with
+          // moving=false shortly; no need to also clear cmdStates.moving here
+          // (CS owns that field).
+          internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+            Map("axisState" -> completionState),
+            system.ignoreRef)
+          commandResponseJson(runId.id, "Completed")
+    catch
+      case ex: Exception =>
+        log.error(s"HMI engStop axis=$axisChar failed: ${ex.getMessage}")
+        commandResponseJson(runId.id, "Error", s"engStop: ${ex.getMessage}")
   }
 
   /**

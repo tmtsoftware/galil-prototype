@@ -277,8 +277,10 @@ class ControllerStatusActor(
   // values like POSERR/LIMSWI/MCTIME that persist across scans). Reset to "" on
   // axis state changes that imply error clearing (operator recovery via Home/Stop).
   private var lastReportedAxisError: Map[Axis, String] = Map.empty
-  
-  // Subscribe to IS axisState changes via message adapter
+
+  // Subscribe to IS axisState changes via message adapter.  Drives polling-rate
+  // adaptation (1Hz standby / 10Hz when any axis is Homing/Moving/Tracking) and
+  // dedupe-cache cleanup for lastReportedAxisError when an axis leaves Error.
   private val stateChangedAdapter = context.messageAdapter[InternalStateActor.StateChanged](
     sc => AxisStateChanged(sc)
   )
