@@ -7,7 +7,7 @@
 <style>
   :root { --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0B0F19; color: #F9FAFB; font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+  body { background: #0B0F19; color: #F9FAFB; font-family: system-ui, -apple-system, sans-serif; overflow-x: hidden; overflow-y: auto; }
   ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
   input::placeholder { color: #4B5563; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
@@ -26,7 +26,7 @@
 
 <script>
 'use strict';
-const { useState, useEffect, useRef, useCallback, memo } = React;
+const { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } = React;
 // Recharts may not load (CDN unavailable, air-gapped network, etc.)
 const hasRecharts = typeof Recharts !== 'undefined';
 const RC = hasRecharts ? Recharts : {};
@@ -329,48 +329,13 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
   const [trackPos,setTrackPos] = useState('');
   const [trackVel,setTrackVel] = useState('20');
   const [override,setOverride] = useState(false);
-  const [showConfig,setShowConfig] = useState(false);
-  const [showMechConfig,setShowMechConfig] = useState(false);
-  // Config fields — initialized from state on first open
-  const [cfgVel,setCfgVel] = useState('');
-  const [cfgAcc,setCfgAcc] = useState('');
-  const [cfgDec,setCfgDec] = useState('');
-  const [cfgIdxOfs,setCfgIdxOfs] = useState('');
-  const [cfgIdxSpd,setCfgIdxSpd] = useState('');
-  const [cfgThresh,setCfgThresh] = useState('');
-  const [cfgLoaded,setCfgLoaded] = useState(false);
   const [showDemand,setShowDemand] = useState(false);
   const [showTrk,setShowTrk] = useState(false);
-  // Mechanism config fields
-  const [cfgAlgorithm,setCfgAlgorithm] = useState('shortest');
-  const [cfgUpperLimit,setCfgUpperLimit] = useState('');
-  const [cfgLowerLimit,setCfgLowerLimit] = useState('');
-  // Engineering jog speed (signed counts/s).  Bypasses CSW; sent via the
-  // HMI-internal engJog handler.  Persists across config-panel toggles so
-  // an engineer can refine speed between jogs without retyping.
-  const [jogSpeed,setJogSpeed] = useState('');
   // Last HMI-side command rejection for this axis (e.g. soft-limit violation
   // returned synchronously from POST /api/command).  Cleared on the next
   // command from this card.  Server-side axisErrorMsg from a genuine controller
   // error takes precedence over this in the AxisErrorBar display.
   const [rejectMsg,setRejectMsg] = useState('');
-
-  // Populate config fields from current state when panel first opens
-  useEffect(() => {
-    if (showConfig && !cfgLoaded && axState) {
-      setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
-      setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
-      setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
-      setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
-      setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
-      setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
-      if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
-      setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
-      setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
-      setCfgLoaded(true);
-    }
-    if (!showConfig) setCfgLoaded(false);
-  }, [showConfig, cfgLoaded, axState]);
 
   if (!axState) return null;
   const enabled = active || override;
@@ -398,42 +363,6 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
         }
       });
     }
-  };
-
-  const sendConfig = () => {
-    const params = {};
-    if (cfgVel) params.velocity = cfgVel;
-    if (cfgAcc) params.acceleration = cfgAcc;
-    if (cfgDec) params.deceleration = cfgDec;
-    if (cfgIdxOfs) params.indexOffset = cfgIdxOfs;
-    if (cfgIdxSpd) params.indexSpeed = cfgIdxSpd;
-    if (cfgThresh) params.inPositionThreshold = cfgThresh;
-    if (Object.keys(params).length > 0) cmd('configAxis', params);
-  };
-
-  const sendRotatingConfig = () => {
-    cmd('configRotatingAxis', {algorithm: cfgAlgorithm});
-  };
-
-  const sendLinearConfig = () => {
-    const params = {};
-    if (cfgUpperLimit) params.upperLimit = cfgUpperLimit;
-    if (cfgLowerLimit) params.lowerLimit = cfgLowerLimit;
-    if (Object.keys(params).length > 0) cmd('configLinearAxis', params);
-  };
-
-  // Reload fields from live state
-  const reloadConfig = () => {
-    if (!axState) return;
-    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
-    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
-    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
-    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
-    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
-    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
-    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
-    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
-    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
   };
 
   // Collapsed view for inactive axes — just a slim header strip, click INACTIVE to expand
@@ -501,8 +430,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
         e('span',{style:{flex:1}}),
         enabled ? e('span',{style:{display:'flex',gap:4}},
           e(Btn,{label:'Home',color:'#3B82F6',small:true,onClick:()=>cmd('homeAxis')}),
-          e(Btn,{label:'Stop',color:'#EF4444',small:true,onClick:()=>cmd('stopAxis')}),
-          e(Btn,{label:showConfig?'Cfg\u2715':'Cfg',color:'#6B7280',small:true,onClick:()=>setShowConfig(!showConfig)}))
+          e(Btn,{label:'Stop',color:'#EF4444',small:true,onClick:()=>cmd('stopAxis')}))
         : null),
 
       // ── ROTATING: (telemetry + dial) left, commands right — mirrors linear layout ──
@@ -607,134 +535,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
             e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
             e(Btn,{label:'Go',color:'#06B6D4',small:true,
               onClick:()=>cmd('trackAxis',{target:trackPos,target2:trackVel})}))
-        : null,
-
-      // Config panel
-      showConfig && enabled ? e('div',{style:{marginTop:6,padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
-        border:'1px solid #1F2937'}},
-
-        // ── MOTION CONFIG ──
-        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
-          fontFamily:'var(--mono)'}},'MOTION CONFIG'),
-        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
-          fontFamily:'var(--mono)',fontSize:10.5}},
-          e('span',{style:{color:'#9CA3AF'}},'Speed'),
-          e(In,{value:cfgVel,onChange:setCfgVel,ph:'counts/s'}),
-          e('span',{style:{color:'#9CA3AF'}},'Accel'),
-          e(In,{value:cfgAcc,onChange:setCfgAcc,ph:'counts/s²'}),
-          e('span',{style:{color:'#9CA3AF'}},'Decel'),
-          e(In,{value:cfgDec,onChange:setCfgDec,ph:'counts/s²'}),
-          e('span',{style:{color:'#9CA3AF'}},'Idx Ofs'),
-          e(In,{value:cfgIdxOfs,onChange:setCfgIdxOfs,ph:'counts'}),
-          e('span',{style:{color:'#9CA3AF'}},'Idx Spd'),
-          e(In,{value:cfgIdxSpd,onChange:setCfgIdxSpd,ph:'counts/s'}),
-          e('span',{style:{color:'#9CA3AF'}},'Thresh'),
-          e(In,{value:cfgThresh,onChange:setCfgThresh,ph:'counts'})),
-        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
-          e(Btn,{label:'Reload',color:'#4B5563',small:true,onClick:reloadConfig}),
-          e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig})),
-
-        // ── ROTATING MECHANISM ──
-        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
-        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
-          fontFamily:'var(--mono)'}},'ROTATING MECHANISM'),
-        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
-          fontFamily:'var(--mono)',fontSize:10.5}},
-          e('span',{style:{color:'#9CA3AF'}},'Approach'),
-          e('select',{
-            value:cfgAlgorithm,
-            onChange:e=>setCfgAlgorithm(e.target.value),
-            style:{backgroundColor:'#1F2937',color:'#E5E7EB',border:'1px solid #374151',
-              borderRadius:3,padding:'2px 4px',fontSize:10.5,fontFamily:'var(--mono)',width:'100%'}},
-            e('option',{value:'shortest'},'shortest'),
-            e('option',{value:'forward'},'forward'),
-            e('option',{value:'reverse'},'reverse'))),
-        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
-          e(Btn,{label:'Apply Rotating',color:'#8B5CF6',small:true,onClick:sendRotatingConfig})),
-
-        // ── LINEAR MECHANISM ──
-        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
-        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
-          fontFamily:'var(--mono)'}},'LINEAR MECHANISM'),
-        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
-          fontFamily:'var(--mono)',fontSize:10.5}},
-          e('span',{style:{color:'#9CA3AF'}},'Upper Lim'),
-          e(In,{value:cfgUpperLimit,onChange:setCfgUpperLimit,ph:'counts'}),
-          e('span',{style:{color:'#9CA3AF'}},'Lower Lim'),
-          e(In,{value:cfgLowerLimit,onChange:setCfgLowerLimit,ph:'counts'})),
-        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
-          e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig})),
-
-        // Soft-limit enforcement toggle.  Operational state (not config), so
-        // takes effect immediately on click — no Apply.  Visible only on linear
-        // axes; meaningless for rotating mechanisms (no soft limits in play).
-        // Bypassing leaves the axis protected only by its hardware limit
-        // switches (#LIMSWI), which is the necessary condition for testing
-        // those switches.
-        axState.mechanismType === 'Linear'
-          ? e('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:8,paddingTop:6,
-              borderTop:'1px dashed #1F2937',fontFamily:'var(--mono)',fontSize:10.5}},
-              e('span',{style:{color:'#9CA3AF',width:70,flexShrink:0}},'Soft Lim'),
-              e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
-                color: axState.softLimitsEnabled ? '#6EE7B7' : '#FCD34D'}},
-                e('span',{style:{width:6,height:6,borderRadius:1.5,
-                  backgroundColor: axState.softLimitsEnabled ? '#10B981' : '#F59E0B'}}),
-                axState.softLimitsEnabled ? 'Enforced' : 'Bypassed'),
-              e('span',{style:{flex:1}}),
-              e(Btn,{
-                label: axState.softLimitsEnabled ? 'Bypass' : 'Enforce',
-                color: axState.softLimitsEnabled ? '#F59E0B' : '#10B981',
-                small: true,
-                onClick: () => onCommand('setSoftLimits',{axis,enabled:!axState.softLimitsEnabled})}))
-          : null,
-
-        // ── ENGINEERING ──
-        // Low-level jog controls.  Bypasses CommandHandlerActor; issues SH/JG/BG/ST
-        // directly on the command connection via the HMI engJog/engStop handlers.
-        // Reserved for lab/test use (limit-switch checkout, motor smoke-test before
-        // homing).  Soft limits are NOT enforced — engineer takes responsibility.
-        //
-        // Jog buttons enabled when axis is in a jog-permissible state:
-        //   Idle, Lost                              — first jog from quiescent
-        //   Moving (with activeThread == 0)         — reentrant speed/direction update
-        //                                              (engineering jog already running)
-        // Stop is always enabled — fundamentally a safety command; works against
-        // spontaneous motion and externally-issued JGs as well as our own jogs.
-        e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
-        e('div',{style:{fontSize:9.5,fontWeight:700,color:'#F59E0B',marginBottom:6,letterSpacing:1,
-          fontFamily:'var(--mono)'}},'ENGINEERING'),
-        (() => {
-          const canJog =
-            axState.axisState === 'Idle'
-            || axState.axisState === 'Lost'
-            || (axState.axisState === 'Moving' && (cs.activeThread || 0) === 0);
-          const speedNum = parseInt(jogSpeed, 10);
-          const speedValid = !isNaN(speedNum) && speedNum > 0;
-          return e('div',{style:{fontFamily:'var(--mono)',fontSize:10.5}},
-            e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center'}},
-              e('span',{style:{color:'#9CA3AF'}},'Jog Spd'),
-              e(In,{value:jogSpeed,onChange:setJogSpeed,ph:'counts/s (magnitude)'})),
-            e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end',alignItems:'center'}},
-              e('span',{style:{flex:1,fontSize:9.5,color:'#6B7280'}},
-                canJog ? (speedValid ? '' : 'enter speed magnitude') : `jog blocked: ${axState.axisState}`),
-              e(Btn,{
-                label:'Jog \u2212',  // unicode minus
-                color: (canJog && speedValid) ? '#F59E0B' : '#374151',
-                small:true,
-                onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:-speedNum}); }}),
-              e(Btn,{
-                label:'Jog +',
-                color: (canJog && speedValid) ? '#F59E0B' : '#374151',
-                small:true,
-                onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:speedNum}); }}),
-              e(Btn,{
-                label:'Stop',
-                color:'#EF4444',
-                small:true,
-                onClick: () => onCommand('engStop',{axis})})));
-        })()
-
-      ) : null));
+        : null));
 }
 
 function AxisVisual({axState, colors, showDemand}) {
@@ -1013,8 +814,277 @@ const IOPanel = memo(function IOPanel({state, onCommand}) {
 });
 
 
-function HcdLogPanel({lines}) {
-  const endRef = useRef(null);
+// ConfigPanel: per-axis configuration form (MOTION / ROTATING / LINEAR / soft-lim / ENGINEERING).
+//
+// Lifted out of AxisCard in S62 when the config UI moved from per-card expansion
+// into a permanent bottom-right bay.  Form-field state lives here and is
+// re-initialized whenever the `axis` prop changes — switching tabs in the bay
+// is therefore a state reset, not a preserve.  That matches the chosen UX
+// (simpler state model, single source of truth: the live axState).
+function ConfigPanel({axis, axState, cmdSt, onCommand}) {
+  const cs = cmdSt || {};
+
+  const [cfgVel, setCfgVel] = useState('');
+  const [cfgAcc, setCfgAcc] = useState('');
+  const [cfgDec, setCfgDec] = useState('');
+  const [cfgIdxOfs, setCfgIdxOfs] = useState('');
+  const [cfgIdxSpd, setCfgIdxSpd] = useState('');
+  const [cfgThresh, setCfgThresh] = useState('');
+  const [cfgAlgorithm, setCfgAlgorithm] = useState('shortest');
+  const [cfgUpperLimit, setCfgUpperLimit] = useState('');
+  const [cfgLowerLimit, setCfgLowerLimit] = useState('');
+  const [jogSpeed, setJogSpeed] = useState('');
+
+  // Populate form from current axState whenever the axis tab changes, and only
+  // then — subsequent axState polls would otherwise stomp on in-progress edits.
+  // The explicit `Reload` button below re-pulls from current axState on demand.
+  useEffect(() => {
+    if (!axState) return;
+    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
+    setJogSpeed('');
+  }, [axis]); // intentionally not [axState] — see comment above
+
+  if (!axState) {
+    return e('div',{style:{padding:8,fontFamily:'var(--mono)',fontSize:10.5,color:'#6B7280'}},
+      `Axis ${axis}: no state available`);
+  }
+
+  const sendConfig = () => {
+    const params = {};
+    if (cfgVel) params.velocity = cfgVel;
+    if (cfgAcc) params.acceleration = cfgAcc;
+    if (cfgDec) params.deceleration = cfgDec;
+    if (cfgIdxOfs) params.indexOffset = cfgIdxOfs;
+    if (cfgIdxSpd) params.indexSpeed = cfgIdxSpd;
+    if (cfgThresh) params.inPositionThreshold = cfgThresh;
+    if (Object.keys(params).length > 0) onCommand('configAxis', {axis, ...params});
+  };
+
+  const sendRotatingConfig = () => {
+    onCommand('configRotatingAxis', {axis, algorithm: cfgAlgorithm});
+  };
+
+  const sendLinearConfig = () => {
+    const params = {};
+    if (cfgUpperLimit) params.upperLimit = cfgUpperLimit;
+    if (cfgLowerLimit) params.lowerLimit = cfgLowerLimit;
+    if (Object.keys(params).length > 0) onCommand('configLinearAxis', {axis, ...params});
+  };
+
+  const reloadConfig = () => {
+    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
+  };
+
+  return e('div',{style:{padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
+    border:'1px solid #1F2937',boxSizing:'border-box'}},
+
+    // ── MOTION CONFIG ──
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'MOTION CONFIG'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Speed'),
+      e(In,{value:cfgVel,onChange:setCfgVel,ph:'counts/s'}),
+      e('span',{style:{color:'#9CA3AF'}},'Accel'),
+      e(In,{value:cfgAcc,onChange:setCfgAcc,ph:'counts/s²'}),
+      e('span',{style:{color:'#9CA3AF'}},'Decel'),
+      e(In,{value:cfgDec,onChange:setCfgDec,ph:'counts/s²'}),
+      e('span',{style:{color:'#9CA3AF'}},'Idx Ofs'),
+      e(In,{value:cfgIdxOfs,onChange:setCfgIdxOfs,ph:'counts'}),
+      e('span',{style:{color:'#9CA3AF'}},'Idx Spd'),
+      e(In,{value:cfgIdxSpd,onChange:setCfgIdxSpd,ph:'counts/s'}),
+      e('span',{style:{color:'#9CA3AF'}},'Thresh'),
+      e(In,{value:cfgThresh,onChange:setCfgThresh,ph:'counts'})),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Reload',color:'#4B5563',small:true,onClick:reloadConfig}),
+      e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig})),
+
+    // ── ROTATING MECHANISM ──
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'ROTATING MECHANISM'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Approach'),
+      e('select',{
+        value:cfgAlgorithm,
+        onChange:e=>setCfgAlgorithm(e.target.value),
+        style:{backgroundColor:'#1F2937',color:'#E5E7EB',border:'1px solid #374151',
+          borderRadius:3,padding:'2px 4px',fontSize:10.5,fontFamily:'var(--mono)',width:'100%'}},
+        e('option',{value:'shortest'},'shortest'),
+        e('option',{value:'forward'},'forward'),
+        e('option',{value:'reverse'},'reverse'))),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Apply Rotating',color:'#8B5CF6',small:true,onClick:sendRotatingConfig})),
+
+    // ── LINEAR MECHANISM ──
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'LINEAR MECHANISM'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Upper Lim'),
+      e(In,{value:cfgUpperLimit,onChange:setCfgUpperLimit,ph:'counts'}),
+      e('span',{style:{color:'#9CA3AF'}},'Lower Lim'),
+      e(In,{value:cfgLowerLimit,onChange:setCfgLowerLimit,ph:'counts'})),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig})),
+
+    // Soft-limit enforcement toggle.  Operational state (not config), so
+    // takes effect immediately on click — no Apply.  Visible only on linear
+    // axes; meaningless for rotating mechanisms (no soft limits in play).
+    // Bypassing leaves the axis protected only by its hardware limit
+    // switches (#LIMSWI), which is the necessary condition for testing
+    // those switches.
+    axState.mechanismType === 'Linear'
+      ? e('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:8,paddingTop:6,
+          borderTop:'1px dashed #1F2937',fontFamily:'var(--mono)',fontSize:10.5}},
+          e('span',{style:{color:'#9CA3AF',width:70,flexShrink:0}},'Soft Lim'),
+          e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
+            color: axState.softLimitsEnabled ? '#6EE7B7' : '#FCD34D'}},
+            e('span',{style:{width:6,height:6,borderRadius:1.5,
+              backgroundColor: axState.softLimitsEnabled ? '#10B981' : '#F59E0B'}}),
+            axState.softLimitsEnabled ? 'Enforced' : 'Bypassed'),
+          e('span',{style:{flex:1}}),
+          e(Btn,{
+            label: axState.softLimitsEnabled ? 'Bypass' : 'Enforce',
+            color: axState.softLimitsEnabled ? '#F59E0B' : '#10B981',
+            small: true,
+            onClick: () => onCommand('setSoftLimits',{axis,enabled:!axState.softLimitsEnabled})}))
+      : null,
+
+    // ── ENGINEERING ──
+    // Low-level jog controls.  Bypasses CommandHandlerActor; issues SH/JG/BG/ST
+    // directly on the command connection via the HMI engJog/engStop handlers.
+    // Reserved for lab/test use (limit-switch checkout, motor smoke-test before
+    // homing).  Soft limits are NOT enforced — engineer takes responsibility.
+    //
+    // Jog buttons enabled when axis is in a jog-permissible state:
+    //   Idle, Lost                              — first jog from quiescent
+    //   Moving (with activeThread == 0)         — reentrant speed/direction update
+    //                                              (engineering jog already running)
+    // Stop is always enabled — fundamentally a safety command; works against
+    // spontaneous motion and externally-issued JGs as well as our own jogs.
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#F59E0B',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'ENGINEERING'),
+    (() => {
+      const canJog =
+        axState.axisState === 'Idle'
+        || axState.axisState === 'Lost'
+        || (axState.axisState === 'Moving' && (cs.activeThread || 0) === 0);
+      const speedNum = parseInt(jogSpeed, 10);
+      const speedValid = !isNaN(speedNum) && speedNum > 0;
+      return e('div',{style:{fontFamily:'var(--mono)',fontSize:10.5}},
+        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center'}},
+          e('span',{style:{color:'#9CA3AF'}},'Jog Spd'),
+          e(In,{value:jogSpeed,onChange:setJogSpeed,ph:'counts/s (magnitude)'})),
+        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end',alignItems:'center'}},
+          e('span',{style:{flex:1,fontSize:9.5,color:'#6B7280'}},
+            canJog ? (speedValid ? '' : 'enter speed magnitude') : `jog blocked: ${axState.axisState}`),
+          e(Btn,{
+            label:'Jog \u2212',  // unicode minus
+            color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+            small:true,
+            onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:-speedNum}); }}),
+          e(Btn,{
+            label:'Jog +',
+            color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+            small:true,
+            onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:speedNum}); }}),
+          e(Btn,{
+            label:'Stop',
+            color:'#EF4444',
+            small:true,
+            onClick: () => onCommand('engStop',{axis})})));
+    })()
+  );
+}
+
+// ConfigBay: collapsible right-side region of the bottom row.  When collapsed,
+// just a thin vertical strip with an expand button.  When expanded, a tab bar
+// across the top (one tab per active axis) and the selected axis's ConfigPanel
+// below.  Tab switching resets the form (see ConfigPanel comment).
+function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelectAxis, onCommand, innerRef}) {
+  // Collapsed: thin strip with expand chevron.
+  if (!expanded) {
+    return e('div',{ref:innerRef, style:{flexShrink:0,width:24,height:'100%',backgroundColor:'#111827',
+        border:'1px solid #1F2937',borderRadius:8,marginLeft:8,
+        display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-start',
+        cursor:'pointer',userSelect:'none',padding:'8px 0'},
+        title:'Expand config bay', onClick:onToggle},
+      e('span',{style:{color:'#6B7280',fontFamily:'var(--mono)',fontSize:14,marginBottom:6}},'\u25C0'),
+      // Vertical "CONFIG" label, rotated.
+      e('span',{style:{color:'#4B5563',fontFamily:'var(--mono)',fontSize:9.5,fontWeight:700,
+          letterSpacing:1.2,writingMode:'vertical-rl',transform:'rotate(180deg)'}},'CONFIG'));
+  }
+
+  // Expanded: 340px wide column with tab bar on top and config below.
+  // No explicit height — the bay sizes to its natural content (tab bar +
+  // ConfigPanel).  GalilHMI measures this height in a useLayoutEffect and
+  // passes it as `panelHeight` to HcdLogPanel so the two stay aligned.
+  return e('div',{ref:innerRef, style:{flexShrink:0,width:340,
+      backgroundColor:'#111827',
+      border:'1px solid #1F2937',borderRadius:8,marginLeft:8,
+      display:'flex',flexDirection:'column'}},
+
+    // Tab bar.  overflowX:auto handles many tabs gracefully — STB has 7 active.
+    e('div',{style:{display:'flex',alignItems:'center',backgroundColor:'#0D1117',
+        borderBottom:'1px solid #1F2937',padding:'4px 4px 0 4px',flexShrink:0,gap:2,
+        overflowX:'auto'}},
+      // Collapse chevron on the far left — pinned, doesn't scroll with tabs.
+      e('span',{style:{color:'#6B7280',fontFamily:'var(--mono)',fontSize:14,
+          cursor:'pointer',userSelect:'none',padding:'2px 6px',flexShrink:0},
+          title:'Collapse config bay', onClick:onToggle}, '\u25B6'),
+      // One tab per active axis.
+      ...activeAxes.map(a => {
+        const isSel = a === selectedAxis;
+        return e('span',{
+          key:a,
+          onClick: () => onSelectAxis(a),
+          style:{cursor:'pointer',userSelect:'none',flexShrink:0,
+            padding:'4px 10px',marginBottom:-1,
+            fontFamily:'var(--mono)',fontSize:11,fontWeight:700,
+            color: isSel ? '#F9FAFB' : '#6B7280',
+            backgroundColor: isSel ? '#0D1117' : 'transparent',
+            border: isSel ? '1px solid #1F2937' : '1px solid transparent',
+            borderBottom: isSel ? '1px solid #0D1117' : '1px solid transparent',
+            borderTopLeftRadius:4,borderTopRightRadius:4}},
+          a);
+      })),
+
+    // Selected axis's ConfigPanel (or hint if nothing selected).
+    // Sized to ConfigPanel's natural content; the bay matches, the row
+    // matches via alignItems:stretch, and the log stretches to match.
+    e('div',{style:{padding:6,boxSizing:'border-box'}},
+      selectedAxis
+        ? e(ConfigPanel,{
+            axis:selectedAxis,
+            axState:state?.axes?.[selectedAxis],
+            cmdSt:state?.cmdState?.[selectedAxis],
+            onCommand})
+        : e('div',{style:{padding:8,fontFamily:'var(--mono)',fontSize:10.5,color:'#6B7280'}},
+            'Click an axis tab above to view its config.')));
+}
+
+
+function HcdLogPanel({lines, panelHeight, bayExpanded}) {
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [minLevel, setMinLevel] = useState('INFO');
@@ -1041,8 +1111,13 @@ function HcdLogPanel({lines}) {
   };
 
   useEffect(() => {
-    if (!minimized && autoScroll && endRef.current) {
-      endRef.current.scrollIntoView({behavior: 'auto'});
+    if (!minimized && autoScroll && containerRef.current) {
+      // Scroll the log container directly rather than scrollIntoView on the
+      // end marker — the latter walks up the DOM to find a scrollable ancestor
+      // and can scroll the page itself if the log container isn't currently
+      // overflowing.
+      const el = containerRef.current;
+      el.scrollTop = el.scrollHeight;
     }
   }, [lines.length, autoScroll, minimized]);
 
@@ -1060,8 +1135,14 @@ function HcdLogPanel({lines}) {
   const selectStyle = {backgroundColor:'#1F2937',color:'#9CA3AF',border:'1px solid #374151',
                        borderRadius:3,fontSize:9.5,padding:'1px 4px',cursor:'pointer'};
 
-  return e('div', {style:{display:'flex',flexDirection:'column',
-      ...(minimized ? {flexShrink:0} : {flex:1,minHeight:0}),
+  // Log height is set externally via the `panelHeight` prop, which is
+  // measured from the ConfigBay's natural content height by GalilHMI's
+  // useLayoutEffect.  This is necessary because flexbox `alignItems:stretch`
+  // alone cannot prevent the log's accumulating content from driving the
+  // row's max-content height upward — we need a definite pixel height to
+  // bound the log so its inner `flex:1, overflowY:auto` can scroll.
+  return e('div', {style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,
+      ...(minimized ? {} : {height: bayExpanded ? panelHeight : 500}),
       backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px',
       fontFamily:'var(--mono)',fontSize:11}},
     // Header row — always visible; click label area to toggle
@@ -1119,8 +1200,7 @@ function HcdLogPanel({lines}) {
           actor ? e('span', {style:{color:'#6B7280',flexShrink:0,fontSize:9.5,fontFamily:'var(--mono)',minWidth:140,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, `[${actor}]`) : null,
           e('span', {style:{color,flex:1}}, l.message || '')
         );
-      }),
-      e('div', {ref:endRef})
+      })
     )
   );
 }
@@ -1277,6 +1357,20 @@ function GalilHMI() {
   const [lifecycleKind, setLifecycleKind] = useState(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleError, setLifecycleError] = useState(null);
+  // Config bay (bottom-right region).  Collapsed by default.  When expanded,
+  // shows a tab bar across the top with one tab per active axis; selected
+  // axis's ConfigPanel below.  null = no tab selected; first toggle picks
+  // the first active axis.
+  const [configExpanded, setConfigExpanded] = useState(false);
+  const [selectedConfigAxis, setSelectedConfigAxis] = useState(null);
+  // Bottom-row height alignment: the ConfigBay sizes to its natural content
+  // (which varies by axis type — Linear has Soft Lim row, Rotating doesn't),
+  // and HcdLogPanel needs an explicit pixel height to match (flex stretch
+  // alone won't bound log-content-driven growth).  bayRef + useLayoutEffect
+  // measure the bay after each render and set panelHeight, which we then
+  // pass into HcdLogPanel as a definite cap on its column-direction size.
+  const bayRef = useRef(null);
+  const [panelHeight, setPanelHeight] = useState(300);
   const tickRef = useRef(0);
 
   // Open the modal in the requested mode, clearing any prior error from a
@@ -1346,10 +1440,51 @@ function GalilHMI() {
     return submitCommand(commandName, params);
   }, [submitCommand]);
 
+  // Toggle the config bay's collapsed/expanded state.  When transitioning
+  // from collapsed → expanded with no tab currently selected, auto-select
+  // the first active axis as a convenience.  Subsequent toggles preserve
+  // whatever tab was last selected.
+  const toggleConfigExpanded = useCallback(() => {
+    setConfigExpanded(prev => {
+      const next = !prev;
+      if (next && selectedConfigAxis === null && activeAxes.length > 0) {
+        setSelectedConfigAxis(activeAxes[0]);
+      }
+      return next;
+    });
+  }, [selectedConfigAxis, activeAxes]);
+
+  // Defensive: if the selected config axis is no longer active (config change
+  // dropped it from the active set), clear the selection so the tab bar and
+  // panel stay coherent with available axes.
+  useEffect(() => {
+    if (selectedConfigAxis !== null && activeAxes.length > 0
+        && !activeAxes.includes(selectedConfigAxis)) {
+      setSelectedConfigAxis(null);
+    }
+  }, [selectedConfigAxis, activeAxes.join(',')]);
+
+  // Measure ConfigBay's rendered height after every render and update
+  // panelHeight, which HcdLogPanel uses as its definite column-direction
+  // size.  We watch:
+  //   - configExpanded (bay shape changes — strip vs full panel)
+  //   - selectedConfigAxis (Linear vs Rotating content differs)
+  //   - mechanismType of the selected axis (rare runtime change)
+  //   - softLimitsEnabled (doesn't change content height, included for safety)
+  // Using useLayoutEffect (not useEffect) so the measurement and corresponding
+  // log-height update happen before paint, avoiding a one-frame flash where
+  // log and bay don't match.
+  useLayoutEffect(() => {
+    if (bayRef.current) {
+      const h = bayRef.current.getBoundingClientRect().height;
+      if (h > 0 && Math.abs(h - panelHeight) > 1) setPanelHeight(h);
+    }
+  });
+
   const hcdState = state?.hcdState || 'Unknown';
   const simulation = state?.simulation || false;
 
-  return e('div',{style:{padding:'10px 14px',height:'100vh',display:'flex',flexDirection:'column',
+  return e('div',{style:{padding:'10px 14px',display:'flex',flexDirection:'column',
     boxSizing:'border-box', borderTop: simulation ? '3px solid #F59E0B' : 'none'}},
 
     // Header
@@ -1433,8 +1568,17 @@ function GalilHMI() {
     // I/O panel — collapsed by default, full width
     e(IOPanel,{state, onCommand:handleCommand}),
 
-    // Unified HCD log: fills all remaining vertical space
-    e(HcdLogPanel,{lines:logLines}),
+    // Bottom row: HCD log (flex-fill) + collapsible config bay (right).
+    // ConfigBay sizes to its natural content; its height is measured into
+    // panelHeight and passed to HcdLogPanel so the two stay aligned.
+    e('div',{style:{display:'flex',alignItems:'stretch',flexShrink:0,minHeight:300}},
+      e(HcdLogPanel,{lines:logLines, panelHeight, bayExpanded:configExpanded}),
+      e(ConfigBay,{state, activeAxes, expanded:configExpanded,
+        onToggle:toggleConfigExpanded,
+        selectedAxis:selectedConfigAxis,
+        onSelectAxis:setSelectedConfigAxis,
+        onCommand:handleCommand,
+        innerRef:bayRef})),
 
     // Footer
     e('div',{style:{marginTop:6,display:'flex',justifyContent:'space-between',fontSize:9,color:'#374151',

@@ -252,44 +252,18 @@ private[hcd] object ControllerCommandActor {
 
           // Upload an embedded program to the controller (DL command).
           //
-          // Protocol (per Galil DL command reference):
-          //   1. Send "DL" — controller switches to download mode
-          //   2. Stream the program text (controller is silent if healthy)
-          //   3. Send "\" — controller commits the program and acks ":"
+          // The DL protocol mechanics (silent-during-stream, "?" detection
+          // before "\", two-ack consume after "\", read-timeout management)
+          // are encapsulated in GalilIo.uploadProgram.  This handler is
+          // responsible only for halting any running threads via HX first
+          // and surfacing the result back through the CSW reply protocol.
 
           case GalilCommandMessage.UploadProgram(program, replyTo) =>
             try {
               log.info(s"Uploading program to controller (DL): ${program.length} characters, ${program.linesIterator.size} lines")
               galilIo.synchronized {
-                galilIo.setReadTimeout(10000)
-                try {
-                  // Clean the socket of any stale bytes, then HX to halt
-                  // any running programs.  
-                  galilIo.drainAndShowBuffer(timeoutMs = 100)
-                  galilIo.send("HX")
-
-                  // Begin download.  Controller is silent until "\" arrives
-                  // if DL is healthy.  Any "?" in the response after the
-                  // program stream means the controller rejected something
-                  galilIo.writeRaw("DL")
-                  galilIo.writeRaw(program)
-                  val drained = galilIo.drainAndShowBuffer(timeoutMs = 50)
-                  if (drained.contains('?')) {
-                    val preview = drained.replace("\r", "\\r").replace("\n", "\\n").take(120)
-                    throw new RuntimeException(
-                      s"DL rejected ${drained.count(_ == '?')} line(s). Drain content: '$preview'"
-                    )
-                  }
-
-                  // Terminate the download.  sendAndWaitForPrompt throws on
-                  // a literal "?" response.  A deferred ":" may follow once
-                  // the controller finishes committing; drain it so it
-                  // doesn't confuse subsequent commands.
-                  galilIo.sendAndWaitForPrompt("\\")
-                  galilIo.drainAndShowBuffer(timeoutMs = 200)
-                } finally {
-                  galilIo.setReadTimeout(3000)
-                }
+                galilIo.send("HX")
+                galilIo.uploadProgram(program)
               }
               log.info("Upload complete")
               replyTo ! GalilCommandMessage.UploadProgramResult(success = true)

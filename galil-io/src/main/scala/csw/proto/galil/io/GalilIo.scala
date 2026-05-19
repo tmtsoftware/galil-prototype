@@ -58,6 +58,12 @@ abstract class GalilIo {
    */
   def setReadTimeout(timeoutMs: Int): Unit = ()
 
+  /**
+   * Returns the current socket read timeout in ms.
+   * Default implementation returns 0 (simulator); concrete TCP impl returns SO_TIMEOUT.
+   */
+  def getReadTimeout: Int = 0
+
 
 
   // From the Galil doc:
@@ -157,18 +163,62 @@ abstract class GalilIo {
   }
 
   /**
-   * Uploads program to controller using DL command.
+   * Uploads program to controller using the DL command.
    *
-   * The controller is silent during DL streaming.  After the "\" terminator,
-   * two ":" acks arrive: first for "\", then DL's deferred completion ack.
+   * Protocol mechanics (verified S59/S60 on lab DMC-50040 and STB DMC-4080):
+   *  - Controller is silent during DL reception and program streaming.
+   *  - After the "\" terminator, the controller emits TWO ":" acks:
+   *    first for "\" (exit DL mode), then a deferred ack for "DL" itself
+   *    (the DL command could not ack at its conventional moment because the
+   *    parser was held in DL-streaming mode).  Both must be consumed.
+   *  - If the DL parser rejects any line (e.g. line >80 chars), it emits "?"
+   *    after streaming completes but BEFORE "\" is sent.  We sample the
+   *    receive buffer for "?" between program streaming and "\" so we can
+   *    fail loudly with a useful diagnostic rather than silently committing
+   *    a truncated program.
    *
-   * @param program the program text to upload
+   * Internally manages a longer read timeout (10s) for the duration of the
+   * upload because large programs can race the default 3s timeout on the
+   * post-"\" ack; restored in finally.  Callers therefore don't need to know.
+   *
+   * Note: this is a pure protocol primitive.  Callers are responsible for
+   * halting running threads (HX) and any other higher-level coordination
+   * before invoking upload.
+   *
+   * @param program the program text to upload (already prepared / size-validated)
+   * @throws RuntimeException if the DL parser rejected any line (response contains "?")
+   * @throws RuntimeException if the final "\" ack is "?"
    */
   def uploadProgram(program: String): Unit = {
-    writeRaw("DL")
-    writeRaw(program)
-    sendAndWaitForPrompt("\\")    // ack for "\"
-    drainAndShowBuffer(200)       // DL's deferred ack
+    val oldTimeout = getReadTimeout
+    try {
+      setReadTimeout(10000)
+
+      // Buffer hygiene before DL: any stray byte left by a prior operation
+      // would otherwise be misread as part of the DL response stream.
+      drainAndShowBuffer(timeoutMs = 100)
+
+      // Begin download.  Controller is silent until "\" arrives if DL is
+      // healthy; any "?" in the post-stream drain means at least one line
+      // was rejected (typically a line >80 chars — see ProgramFileManager).
+      writeRaw("DL")
+      writeRaw(program)
+      val drained = drainAndShowBuffer(timeoutMs = 50)
+      if (drained.contains('?')) {
+        val preview = drained.replace("\r", "\\r").replace("\n", "\\n").take(120)
+        throw new RuntimeException(
+          s"DL rejected ${drained.count(_ == '?')} line(s). Drain content: '$preview'"
+        )
+      }
+
+      // Terminate the download.  sendAndWaitForPrompt throws on "?".  After
+      // it returns we drain the DL command's own deferred ack so subsequent
+      // commands don't misread it as their own response.
+      sendAndWaitForPrompt("\\")
+      drainAndShowBuffer(timeoutMs = 200)
+    } finally {
+      setReadTimeout(oldTimeout)
+    }
   }
 
   // Receives multiple replies for a compound command (semicolon-separated).
@@ -445,6 +495,8 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
   }
 
   override def setReadTimeout(timeoutMs: Int): Unit = socket.setSoTimeout(timeoutMs)
+
+  override def getReadTimeout: Int = socket.getSoTimeout
 
   override def close(): Unit = socket.close()
 }
