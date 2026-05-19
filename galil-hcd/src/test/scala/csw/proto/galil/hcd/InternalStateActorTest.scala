@@ -1025,3 +1025,182 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     completionNotification.cmdState.axisErrorMsg shouldBe ""
     completionNotification.cmdState.stopCode shouldBe 1  // Normal decel stop
   }
+
+  // ========================================
+  // EnterFaulted central fault transition (S53)
+  //
+  // Verifies that InternalStateActor.EnterFaulted atomically:
+  //   - transitions HCD state to Faulted (with reason message)
+  //   - applies per-axis state transitions: Homing→Lost, Moving→Error,
+  //     Tracking→Error, others unchanged
+  //   - clears activeCommand on any axis that had one
+  //   - is idempotent (calling twice doesn't break invariants)
+  //
+  // EnterFaulted is the single chokepoint for all fault paths (CS-detected
+  // controller error, connection loss, manually-triggered faults).  A
+  // regression here would silently mishandle every fault scenario.
+  // ========================================
+
+  // Build an HcdState with several axes in known motion-related states for
+  // EnterFaulted to act on.  Caller can specify each axis's state.
+  private def faultTestState(
+    axisStates: Map[Axis, AxisStateEnum],
+    withActiveCommand: Set[Axis] = Set.empty
+  ): HcdState =
+    var hcd = HcdState(state = HcdStateEnum.Ready)
+    axisStates.foreach { (axis, st) =>
+      hcd = hcd.initializeAxis(axis)
+      // Apply the desired starting axisState
+      val updatedAxis = hcd.axes(axis).copy(axisState = st)
+      hcd = hcd.copy(axes = hcd.axes + (axis -> updatedAxis))
+      // If requested, give the axis an active command
+      if withActiveCommand.contains(axis) then
+        val updatedCmd = hcd.cmdStates(axis).copy(
+          activeCommand = Some(ActiveCommand.Move),
+          activeThread = 1
+        )
+        hcd = hcd.copy(cmdStates = hcd.cmdStates + (axis -> updatedCmd))
+    }
+    hcd
+
+  test("EnterFaulted should transition HCD state to Faulted with reason") {
+    val initial = faultTestState(Map(Axis.A -> AxisStateEnum.Idle))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("Controller Error: 1 Unrecognized command")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(probe.ref)
+    val state = probe.receiveMessage()
+    state.state shouldBe HcdStateEnum.Faulted
+    state.controllerErrorMsg shouldBe "Controller Error: 1 Unrecognized command"
+  }
+
+  test("EnterFaulted should transition Homing axes to Lost (position unknown)") {
+    val initial = faultTestState(Map(Axis.A -> AxisStateEnum.Homing))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
+    probe.receiveMessage().get.axisState shouldBe AxisStateEnum.Lost
+  }
+
+  test("EnterFaulted should transition Moving axes to Error") {
+    val initial = faultTestState(Map(Axis.A -> AxisStateEnum.Moving))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
+    probe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("EnterFaulted should transition Tracking axes to Error") {
+    val initial = faultTestState(Map(Axis.A -> AxisStateEnum.Tracking))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
+    probe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("EnterFaulted should leave Idle, Lost, Error axes unchanged") {
+    val initial = faultTestState(Map(
+      Axis.A -> AxisStateEnum.Idle,
+      Axis.B -> AxisStateEnum.Lost,
+      Axis.C -> AxisStateEnum.Error
+    ))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probeA = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
+    probeA.receiveMessage().get.axisState shouldBe AxisStateEnum.Idle
+    val probeB = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.B, probeB.ref)
+    probeB.receiveMessage().get.axisState shouldBe AxisStateEnum.Lost
+    val probeC = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.C, probeC.ref)
+    probeC.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("EnterFaulted should transition mixed axes correctly in one call") {
+    // The fault scenario: Homing axis A, Moving axis B, Idle axis C, Lost axis D.
+    // After fault: A → Lost, B → Error, C unchanged, D unchanged.
+    val initial = faultTestState(Map(
+      Axis.A -> AxisStateEnum.Homing,
+      Axis.B -> AxisStateEnum.Moving,
+      Axis.C -> AxisStateEnum.Idle,
+      Axis.D -> AxisStateEnum.Lost
+    ))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probeA = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, probeA.ref)
+    probeA.receiveMessage().get.axisState shouldBe AxisStateEnum.Lost
+    val probeB = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.B, probeB.ref)
+    probeB.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+    val probeC = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.C, probeC.ref)
+    probeC.receiveMessage().get.axisState shouldBe AxisStateEnum.Idle
+    val probeD = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.D, probeD.ref)
+    probeD.receiveMessage().get.axisState shouldBe AxisStateEnum.Lost
+  }
+
+  test("EnterFaulted should clear activeCommand on axes that had one") {
+    // Axis A has an active Move command (e.g. positionAxis in flight) at fault time.
+    val initial = faultTestState(
+      Map(Axis.A -> AxisStateEnum.Moving),
+      withActiveCommand = Set(Axis.A)
+    )
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("test fault")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[Option[AxisCmdState]]()
+    actor ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
+    val cmdState = probe.receiveMessage().get
+    cmdState.activeCommand shouldBe None
+    // clearActiveCommand also zeroes activeThread per StateModel line 473
+    cmdState.activeThread shouldBe 0
+  }
+
+  test("EnterFaulted should be idempotent (second call doesn't break invariants)") {
+    val initial = faultTestState(Map(Axis.A -> AxisStateEnum.Moving))
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("first fault")
+    Thread.sleep(50)
+    actor ! InternalStateActor.EnterFaulted("second fault")
+    Thread.sleep(50)
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    val state = hcdProbe.receiveMessage()
+    state.state shouldBe HcdStateEnum.Faulted
+    // Second message overwrote the reason — acceptable behavior.
+    state.controllerErrorMsg shouldBe "second fault"
+    // Axis remains in Error (was Error after first fault; Error → unchanged).
+    val axisProbe = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(Axis.A, axisProbe.ref)
+    axisProbe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("EnterFaulted should clear initializingReason") {
+    // Faulting from Initializing state (or after a faultReset Init that
+    // populated initializingReason) should clear the reason field, since the
+    // HCD is no longer initializing.
+    val initial = HcdState(
+      state = HcdStateEnum.Uninitialized,
+      initializingReason = "startup"
+    ).initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initial))
+    actor ! InternalStateActor.EnterFaulted("init failed")
+    Thread.sleep(50)
+    val probe = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(probe.ref)
+    val state = probe.receiveMessage()
+    state.state shouldBe HcdStateEnum.Faulted
+    state.initializingReason shouldBe ""
+  }

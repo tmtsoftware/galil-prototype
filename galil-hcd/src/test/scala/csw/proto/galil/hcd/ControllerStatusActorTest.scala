@@ -76,6 +76,67 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
       override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
       override def close(): Unit = ()
     }
+
+  /**
+   * Like `stubIoWithLiveThreads` but also handles `MG ae[i]` queries from a
+   * caller-controlled map keyed by axis index (0=A, 1=B, ..., 7=H).  Unmapped
+   * axes return ae=0 (no error).  Also handles `TC 1` queries by returning a
+   * caller-controlled text — used by the controller-error attribution path.
+   *
+   * Usage:
+   *   val liveThreads = scala.collection.mutable.Set[Int](1)
+   *   val ae = scala.collection.mutable.Map[Int, Int](0 -> 1)  // axis A: program error
+   *   val io = stubIoWithThreadsAndAe(liveThreads, ae)
+   *   ... send QRResponse with errorCode=1, threadStatus 0x02 ...
+   *   liveThreads -= 1  // thread 1 stops → axis A error attributed
+   *   ... send next QRResponse with errorCode=1, threadStatus 0x00 ...
+   *
+   * The tcMessage parameter is the body of the response to `TC 1` (CS calls
+   * this when it consumes the controller error latch).  Default mimics the
+   * STB error "1 Unrecognized command".
+   */
+  private def stubIoWithThreadsAndAe(
+    liveThreads: scala.collection.mutable.Set[Int],
+    aeValues:    scala.collection.mutable.Map[Int, Int],
+    tcMessage:   String = "1 Unrecognized command"
+  ): csw.proto.galil.io.GalilIo =
+    new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      private var pendingResponse: ByteString = ByteString(":")
+      override protected def write(sendBuf: Array[Byte]): Unit = {
+        val cmd = new String(sendBuf).trim
+        if (cmd.startsWith("MG _XQ")) {
+          val args = cmd.drop(3).split(',').map(_.trim)
+          val values = args.map { arg =>
+            if (arg.startsWith("_XQ") && arg.length > 3)
+              scala.util.Try(arg.drop(3).toInt).toOption match
+                case Some(n) => if (liveThreads.contains(n)) "1.0000" else "-1.0000"
+                case None    => "-1.0000"
+            else "0.0000"
+          }
+          pendingResponse = ByteString(values.mkString(" ") + "\r\n:")
+        } else if (cmd.startsWith("MG ae[")) {
+          val args = cmd.drop(3).split(',').map(_.trim)
+          val values = args.map { arg =>
+            // Parse "ae[N]" → N (axis index)
+            val idx = arg.dropWhile(_ != '[').drop(1).takeWhile(_ != ']')
+            scala.util.Try(idx.toInt).toOption match
+              case Some(n) => f"${aeValues.getOrElse(n, 0).toDouble}%.4f"
+              case None    => "0.0000"
+          }
+          pendingResponse = ByteString(values.mkString(" ") + "\r\n:")
+        } else if (cmd.startsWith("TC")) {
+          // Controller error latch fetch.  Returns the caller-supplied text
+          // followed by the standard ":" ack.
+          pendingResponse = ByteString(s"$tcMessage\r\n:")
+        } else {
+          pendingResponse = ByteString(":")
+        }
+      }
+      override protected def read(): ByteString = pendingResponse
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
   
   override def afterAll(): Unit =
     testKit.shutdownTestKit()
@@ -564,4 +625,312 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     Thread.sleep(100)
     sm ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     statusProbe.receiveMessage().rateHz should be(1.0)  // Both idle now
+  }
+
+  // ========================================
+  // _XQ<n> per-thread status synthesis is authoritative over QR threadStatus (S53)
+  //
+  // The breakthrough that fixed CMDERR-mid-motion thread-status reporting.
+  // `MG _NO` and the QR `threadStatus` byte can remain stale for many seconds
+  // post-CMDERR while other threads are running.  `_XQ<n>` is queried per scan
+  // and is authoritative.  Regression here silently reintroduces the
+  // "thread reports active for many seconds after CMDERR" bug.
+  // ========================================
+
+  test("_XQ<n> synthesis overrides stale QR threadStatus byte (post-CMDERR regression case)") {
+    // The original S53 bug: CMDERR halts thread 1, but QR threadStatus byte's
+    // bit 1 remains set for many seconds because other threads keep _NO
+    // sticky.  _XQ1 returns -1 immediately, so the synthesized byte's bit 1
+    // is clear and CS reports activeThread=0.
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    // _XQ reports thread 1 has stopped (not in liveThreads), but the QR byte
+    // we inject will still claim bit 1 set — the bug scenario.
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // Send QR with stale-on threadStatus byte (bit 1 set) — the bug condition.
+    val dr = createExtendedDataRecord(threadStatus = 0x02.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(100)
+    // Authoritative result: _XQ1=-1 → synthesized byte 0x00 → activeThread=0.
+    val probe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
+    probe.receiveMessage().get.activeThread shouldBe 0
+  }
+
+  test("_XQ<n> synthesis falls back to QR byte when query result count is wrong (fail-closed)") {
+    // If readXqValues returns fewer values than expected (parse failure or
+    // simulator without _XQ support), the synthesized byte falls back to the
+    // raw QR byte.  This is the fail-closed branch — better to report "still
+    // running" than spuriously complete.  Test: stub returns empty result for
+    // _XQ (simulating a parse-fail in production), QR byte says thread 1
+    // active.  Expect activeThread=1 (fallback honored).
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    // Stub that returns ":" for any MG _XQ — simulating a parse failure.
+    val failingXqIo = new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      override protected def write(sendBuf: Array[Byte]): Unit = ()
+      override protected def read(): ByteString = ByteString(":")
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(failingXqIo,
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // QR byte says thread 1 active — expected to be honored as fallback.
+    val dr = createExtendedDataRecord(threadStatus = 0x02.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(100)
+    val probe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
+    // Fail-closed: trust the QR byte's "still running" claim.
+    probe.receiveMessage().get.activeThread shouldBe 1
+  }
+
+  test("_XQ<n> synthesis: registered thread running → bit set in synthesized byte") {
+    // Companion to the regression test above: when _XQ does report the thread
+    // running, the synthesized byte correctly reflects that.  Combined with
+    // the regression test, demonstrates _XQ is the source of truth.
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int](1)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithLiveThreads(liveThreads),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // Even if QR byte claims thread NOT active, _XQ is authoritative.
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(100)
+    val probe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
+    probe.receiveMessage().get.activeThread shouldBe 1
+  }
+
+  // ========================================
+  // ae[axis] embedded error code interpretation (S53)
+  //
+  // ae[] codes set by motion programs:
+  //   1 = generic program failure (entry-time flag never cleared — CMDERR
+  //       killed the program before it reached the success path).  Attributed
+  //       via TC fetch + axis match when an errorCode is also latched.
+  //   2 = #POSERR  ("Position error exceeded limit")
+  //   3 = #LIMSWI  ("Limit switch hit")
+  //   4 = #MCTIME  ("Motion timeout")
+  //
+  // Codes 2/3/4 are reported independently of errorCode (the embedded error
+  // handlers set ae[] but do not generate a controller error latch).  ae[]==1
+  // attribution requires errorCode != 0 and the thread to have just cleared.
+  // ========================================
+
+  test("ae[axis]==2 (POSERR) reports 'Position error exceeded limit' on the axis") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 2)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    // No latched controller error; ae[A]=2 alone should fire the per-axis path.
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe "Position error exceeded limit"
+    val stateProbe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, stateProbe.ref)
+    stateProbe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("ae[axis]==3 (LIMSWI) reports 'Limit switch hit'") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.B.index -> 3)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.B, cmdProbe.ref)
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe "Limit switch hit"
+  }
+
+  test("ae[axis]==4 (MCTIME) reports 'Motion timeout'") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 4)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe "Motion timeout"
+  }
+
+  test("ae[axis]==0 (no error) does NOT fire per-axis error path") {
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int]() // all zero
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe ""
+  }
+
+  test("ae[axis]==1 without thread clearing is ignored (in-flight program)") {
+    // ae[]==1 is the entry-time flag set by every motion program; it stays 1
+    // for the duration of the program.  We must NOT treat that as an error
+    // while the thread is still running.  Test: ae[A]=1, thread 1 still
+    // active for axis A, no errorCode.  Expect NO axis error.
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int](1)
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 1)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // QR byte and _XQ both report thread 1 still running.
+    val dr = createExtendedDataRecord(threadStatus = 0x02.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    // No error: program is in flight, ae==1 is the entry-time flag (normal).
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe ""
+  }
+
+  test("ae[axis]==1 with thread cleared and no errorCode → 'Embedded program ended unexpectedly'") {
+    // The Step-3 defensive edge case: thread exited without clearing ae[] and
+    // without any controller error.  This shouldn't happen with the
+    // documented #X.../#StopX convention, but is treated as a per-axis Error
+    // defensively (per the decideAxisAndControllerErrors code).
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]() // thread 1 stopped
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 1)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // Thread cleared, no errorCode, ae[A]=1 — the defensive case.
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe
+      "Embedded program ended unexpectedly without controller error"
+    val stateProbe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, stateProbe.ref)
+    stateProbe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("S55: NotifyAxisHalted pruning prevents spurious ae==1 error after CH-initiated HX") {
+    // The S55 edge case: CommandHandlerActor's checkAndInterrupt issues HX to
+    // stop a running axis program before launching a new one.  The next QR
+    // scan sees ae[axis]==1 (the entry-time flag from the halted program that
+    // never reached its success path).  Without pruning, CS would treat this
+    // as the defensive "program ended unexpectedly" Error.
+    //
+    // Fix: CH sends NotifyAxisHalted(axis) right after the HX, which prunes
+    // the axis from CS's axisThreads map.  Without the axis in axisThreads,
+    // axesWithClearedThread won't include it, and the defensive Step-3 check
+    // won't fire.
+    //
+    // Test: register axis A on thread 1, simulate halt via NotifyAxisHalted,
+    // then drive a scan where thread is cleared AND ae[A]==1.  Expect NO
+    // axis error.
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 1)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B))
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    internalState ! InternalStateActor.RegisterThread(1, Axis.A)
+    Thread.sleep(20)
+    // Simulate the post-HX prune — CH would send this synchronously after HX.
+    val ackProbe = testKit.createTestProbe[ControllerStatusActor.NotifyAxisHaltedAck]()
+    sm ! ControllerStatusActor.NotifyAxisHalted(Axis.A, ackProbe.ref)
+    ackProbe.receiveMessage(500.millis)
+    // Drive a scan: thread cleared, ae[A]==1 (residual entry-time flag).
+    val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
+    sm ! ControllerStatusActor.QRResponse(dr)
+    Thread.sleep(150)
+    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
+    // No error — the prune kept axis A out of axesWithClearedThread.
+    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe ""
   }
