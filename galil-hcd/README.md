@@ -544,8 +544,8 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusAct
 | Suite | Tests | Coverage |
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
-| InternalStateActorTest | 54 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, EnterFaulted |
-| ControllerStatusActorTest | 15 | QR polling, adaptive rate, analog input polling, `_XQ`/`ae[]` decoding |
+| InternalStateActorTest | 63 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, `EnterFaulted` transitions (Homing→Lost, Moving/Tracking→Error, activeCommand clearing, idempotency) |
+| ControllerStatusActorTest | 25 | QR polling, adaptive rate, analog input polling, `_XQ<n>` per-thread synthesis (authoritative over stale QR `threadStatus`), `ae[axis]` interpretation (codes 2/3/4 → POSERR/LIMSWI/MCTIME, S55 `NotifyAxisHalted` pruning) |
 | CommandHandlerActorTest | 16 | Immediate commands, validation, faultReset gating |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
 | LongRunningCommandTest | 29 | Motion command handlers |
@@ -587,8 +587,8 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | Suite | Tests | Dependencies |
 |-------|------:|-------------|
 | GalilHcdConfigTest | 9 | None |
-| InternalStateActorTest | 54 | None |
-| ControllerStatusActorTest | 15 | None |
+| InternalStateActorTest | 63 | None |
+| ControllerStatusActorTest | 25 | None |
 | CommandHandlerActorTest | 16 | None |
 | CommandWatcherActorTest | 15 | None |
 | LongRunningCommandTest | 29 | None |
@@ -599,4 +599,6 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
 | HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
 | GalilSimulatorActorTest | 73 | None |
-| **Total** | **306** | |
+| **Total** | **325** | |
+
+The HCD depends on `galil-io` for the controller wire protocol. That module has its own unit-test suite (`galil-io/GalilIoTest`, 45 tests) covering `writeRaw` / `send` (single + compound) / `sendAndWaitForPrompt` / `downloadProgram` / `uploadProgram` (including the DL `?`-rejection path and read-timeout save/restore) / `chunkCompound` and the 80-character line guard.  Run with `sbt "galil-io/test"`.
