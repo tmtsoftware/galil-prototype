@@ -148,6 +148,21 @@ object TrackInjectorApp {
     if cfg.leadMarginSec < 0.05 then
       Console.err.println(s"WARNING: lead-margin ${cfg.leadMarginSec}s is very small; " +
         s"underrun may fire from normal scheduler jitter.  0.1-0.5s is typical.")
+    // First-segment T cap: TrackInjector's first segment uses validTime = now +
+    // cadencePeriod + leadMargin.  The HCD enforces a 2.048s upper bound on
+    // PVA's T argument (Galil DMC-40x0 PV reference), so the sum here must
+    // fit under that.  We use 2.0s as the trigger threshold to leave headroom
+    // for clock skew and scheduling jitter; the HCD's own bound is the hard
+    // limit and will reject anything beyond 2.048s.  Reject at config time so
+    // the operator gets a clear error rather than an HCD rejection on the
+    // first segment.
+    val firstSegmentSec = (1.0 / cfg.cadenceHz) + cfg.leadMarginSec
+    require(firstSegmentSec <= 2.0,
+            s"First-segment validTime gap (1/cadenceHz + leadMargin) = " +
+            f"${firstSegmentSec}%.3fs exceeds the controller's 2.048s PVA T-bound. " +
+            f"With cadence-hz=${cfg.cadenceHz}%.3f and lead-margin=${cfg.leadMarginSec}%.3fs, " +
+            s"the first segment would be too long for the controller to accept. " +
+            s"Reduce lead-margin or increase cadence-hz so their sum stays under 2 seconds.")
   }
 
   private def printUsage(): Unit = {
@@ -311,16 +326,27 @@ object TrackInjectorApp {
         .add(TrackAxisCommand.validTimeKey.set(TAITime(validTimeInstant)))
 
       // Submit-and-forget: we don't await per-tick (would jitter the cadence).
-      // Track failures asynchronously so the loop keeps cadence even on the
-      // occasional Error.
+      // Track failures asynchronously so the loop keeps cadence on transient
+      // hiccups — but on any non-Completed response, halt the stream.  The HCD
+      // rejects (Error) for validation, bounds, or wire failures; once one has
+      // fired, continuing means submitting more segments that will fail the
+      // same way.  Set running := false so the next loop-condition check exits;
+      // the existing end-of-loop path then submits stopAxis to clean up.
       val submitted: Future[CommandResponse] = hcd.submitAndWait(setup)
+      val capturedTick = tickIdx
       submitted.foreach {
         case _: Completed => // happy path, nothing to log
         case other         =>
-          log.warn(s"tick=$tickIdx trackAxis response: $other")
+          log.warn(s"tick=$capturedTick trackAxis response: $other")
+          if running.compareAndSet(true, false) then
+            log.warn(s"tick=$capturedTick halting injection: first HCD rejection received; " +
+                     s"the loop will exit on next iteration and stopAxis will be submitted")
       }
       submitted.failed.foreach { ex =>
-        log.warn(s"tick=$tickIdx trackAxis future failed: ${ex.getMessage}")
+        log.warn(s"tick=$capturedTick trackAxis future failed: ${ex.getMessage}")
+        if running.compareAndSet(true, false) then
+          log.warn(s"tick=$capturedTick halting injection: trackAxis future failed; " +
+                   s"the loop will exit on next iteration and stopAxis will be submitted")
       }
 
       if tickIdx % math.max(1L, cfg.cadenceHz.toLong * 5L) == 0L then

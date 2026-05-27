@@ -1754,7 +1754,7 @@ object CommandHandlerActor {
       else
         math.round(value)
 
-    val positionCounts = userToCounts(positionUser)
+    val positionCounts0 = userToCounts(positionUser)
     val rateCountsPerSec: Long =
       if isRotating then math.round(rateUser * cprOpt.get / 360.0)
       else                math.round(rateUser)
@@ -1772,6 +1772,51 @@ object CommandHandlerActor {
         case Some(s) => (s.lastTargetCounts, s.lastValidTime, false)
         case None    => (math.round(axisState.position), nowInstant, true)
       }
+
+    // Rotating-axis wrap correction.
+    //
+    // The Assembly's trajectory frame is degrees in [0, 360); it has no concept of
+    // accumulated revolutions.  The controller frame is accumulated counts and can
+    // span many revolutions in either direction (encoder accumulates without wrap).
+    // `positionCounts0` is the literal counts-equivalent of `positionUser` in the
+    // current absolute frame (i.e. `positionUser × cpr / 360`, always near 0..cpr).
+    // If we used it directly as the segment endpoint, then for a mechanism that's
+    // accumulated several revolutions of count, `deltaP = positionCounts0 - prev`
+    // would unwind multiple revolutions to reach a far smaller absolute count value
+    // — visible to the operator as the motor doing an unexpected ~360° back-rotation.
+    //
+    // The intended behavior is: the Assembly says "go to physical angle θ"; the HCD
+    // chooses the equivalent absolute count nearest to where the motor currently is
+    // (so the motor moves the shortest arc to reach θ).  Equivalently: shift
+    // `positionCounts0` by the integer number of revolutions that minimizes
+    // `|positionCounts - prevEndpointCounts|`.
+    //
+    // Applies on every segment, not just the first.  Continuation segments encounter
+    // the same wrap when the trajectory's degrees crosses 0/360 (segment N at 359°,
+    // segment N+1 at 1°, both in 0..360) — the Assembly hands us 1° meaning "+2°
+    // ahead of where you are", not "-358° back".  The same logic resolves both.
+    //
+    // Non-rotating axes pass through unchanged: counts are already in absolute frame.
+    val positionCounts: Long =
+      if isRotating then
+        val cpr = cprOpt.get.toLong  // safe: cpr is set from controller as a positive integer count
+        // Diff in counts BEFORE wrap correction.  Can be ±many revolutions.
+        val rawDelta = positionCounts0 - prevEndpointCounts
+        // Reduce to the smallest-magnitude equivalent within ±cpr/2.  We compute
+        // `rawDelta mod cpr` with Euclidean modulo (always non-negative), then if
+        // that wraps past cpr/2 shift it into the negative half.  This puts
+        // shortestDelta in [-cpr/2, +cpr/2).
+        val mod          = Math.floorMod(rawDelta, cpr)
+        val shortestDelta = if mod > cpr / 2 then mod - cpr else mod
+        val adjusted     = prevEndpointCounts + shortestDelta
+        if adjusted != positionCounts0 then
+          val revShift = (adjusted - positionCounts0) / cpr
+          log.info(s"trackAxis $axis: wrap-corrected positionCounts $positionCounts0 → $adjusted " +
+                   s"(shift ${revShift} rev, rawDelta=$rawDelta → shortestDelta=$shortestDelta, " +
+                   s"prevEndpointCounts=$prevEndpointCounts, cpr=$cpr)")
+        adjusted
+      else
+        positionCounts0
 
     // Diagnostic dump (S65 bug hunt): when something downstream rejects, we need to
     // see EXACTLY what seeded the PVA math.  Prints once per trackAxis at INFO level.
@@ -1849,6 +1894,71 @@ object CommandHandlerActor {
       log.warn(msg)
       crm.updateCommand(Error(runId, msg))
       return
+
+    // Guard: per-axis velocity envelope (configured maxSpeed in counts/sec).
+    //
+    // Two distinct checks, both gated on the same axis maxSpeed:
+    //
+    //   (a) Requested rate.  |rateCountsPerSec| must be within maxSpeed.  Catches
+    //       Assembly-side miscalculation: a trajectory whose instantaneous-rate
+    //       sample exceeds what the mechanism is configured to do.
+    //
+    //   (b) Implied average velocity for this segment, |ΔP / T_seconds|.  This is
+    //       the velocity the mechanism would have to sustain to physically arrive
+    //       at the segment endpoint on time.  Catches the SEEDING-from-stale-
+    //       position failure mode: if axisState.position lags reality (or if the
+    //       Assembly's first target is far from where the mechanism actually is),
+    //       the first segment computes a small T and a huge ΔP — the controller
+    //       would dutifully slam toward the target at unsafe velocity.  Without
+    //       this guard, the only mitigation was to physically move the mechanism
+    //       to "near zero" before launching a TrackInjector run.
+    //
+    // maxSpeed = None ⇒ reject.  Tracking on an axis with no configured velocity
+    // envelope is not safe by default; the operator should configure the axis
+    // before tracking it.
+    //
+    // No safety margin: this is the configured envelope.  If the Assembly needs
+    // to operate up to that limit, it will; anything beyond is the right thing
+    // to refuse.  The error message includes both checks' values so the operator
+    // (and the Assembly developer) can see which one tripped and by how much.
+    axisState.maxSpeed match {
+      case None =>
+        val msg = s"trackAxis $axis: cannot start tracking — maxSpeed not configured " +
+                  s"for this axis (configure via configAxis before tracking)"
+        log.warn(msg)
+        crm.updateCommand(Error(runId, msg))
+        return
+
+      case Some(maxSpeedCountsPerSec) =>
+        // (a) Requested rate.
+        if math.abs(rateCountsPerSec) > maxSpeedCountsPerSec then
+          val msg = s"trackAxis $axis: requested rate ${rateCountsPerSec} counts/sec " +
+                    s"exceeds configured maxSpeed ${maxSpeedCountsPerSec.toLong} counts/sec"
+          log.warn(msg)
+          crm.updateCommand(Error(runId, msg))
+          return
+
+        // (b) Implied average velocity.  T_seconds = T_samples × samplePeriodMicros / 1e6.
+        // Using integer math to keep this exact:
+        //   |ΔP| × 1_000_000  vs  maxSpeed × T × samplePeriodMicros   (counts/sec)
+        val absDeltaP = math.abs(deltaP)
+        val impliedVelocityNumerator   = absDeltaP * 1_000_000L
+        val maxVelocityNumeratorDouble = maxSpeedCountsPerSec * tSamples.toDouble * samplePeriodMicros.toDouble
+        if impliedVelocityNumerator.toDouble > maxVelocityNumeratorDouble then
+          val impliedCountsPerSec = absDeltaP.toDouble * 1_000_000.0 / (tSamples * samplePeriodMicros)
+          val seedingSource =
+            if isFirstSegment then s"first segment SEEDed from axisState.position=${axisState.position}"
+            else                    s"continuation from trackingSession ledger"
+          val msg = s"trackAxis $axis: implied segment velocity " +
+                    s"${"%.0f".format(impliedCountsPerSec)} counts/sec " +
+                    s"(|ΔP|=$absDeltaP over ${tSamples * samplePeriodMicros / 1_000.0}ms) " +
+                    s"exceeds maxSpeed ${maxSpeedCountsPerSec.toLong} counts/sec — " +
+                    s"$seedingSource; the mechanism may need to be repositioned " +
+                    s"closer to the trajectory start point before tracking"
+          log.warn(msg)
+          crm.updateCommand(Error(runId, msg))
+          return
+    }
 
     // Guard: avoid the (0, 0, 0) terminator collision.  If a user-supplied segment
     // legitimately has zero delta AND zero rate AND we round T to anything, the PVA

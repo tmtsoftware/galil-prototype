@@ -510,49 +510,62 @@ class InternalStateActor(
     readings.foreach { case (axis, (freeSlots, segmentsExecuted)) =>
       currentState.axes.get(axis).foreach { axisState =>
         if axisState.axisState == AxisStateEnum.Tracking then
-          axisState.trackingSession match
-            case Some(session) =>
-              if observedAt.isAfter(session.lastValidTime) then
-                val lateMicros =
-                  java.time.Duration.between(session.lastValidTime, observedAt).toNanos / 1_000L
-                log.warn(s"PVT underrun detected on axis $axis: TAI now $observedAt is " +
-                         s"${lateMicros}µs past lastValidTime ${session.lastValidTime} " +
-                         s"(_PV=$freeSlots free slots, _BT=$segmentsExecuted executed, " +
-                         s"${session.segmentsSubmitted} submitted)")
-                handleUpdateAxisState(axis,
-                  Map(
-                    "axisState"          -> AxisStateEnum.Error,
-                    "axisError"          -> "Tracking stream underrun",
-                    "trackingSession"    -> None,
-                    "pvFreeSlots"        -> freeSlots,
-                    "btSegmentsExecuted" -> segmentsExecuted
-                  ),
-                  context.system.ignoreRef
-                )
-                // Clear activeCommand so HMI/subscribers see no command in flight.
-                handleUpdateAxisCmdState(axis,
-                  Map("clearActiveCommand" -> true),
-                  context.system.ignoreRef
-                )
-              else
-                log.debug(s"PVT monitor axis $axis: _PV=$freeSlots, _BT=$segmentsExecuted, " +
-                         s"${session.segmentsSubmitted} submitted, lastValidTime=${session.lastValidTime}")
-                // Store the readings so the HMI tracking telemetry panel reflects
-                // live buffer state.  Only updates if values changed (handleUpdateAxisState
-                // change detection prevents redundant subscriber notifications).
-                if axisState.pvFreeSlots != freeSlots || axisState.btSegmentsExecuted != segmentsExecuted then
+          // Suppress underrun detection when a stop is in flight.  There is a
+          // ~10–20ms race window between #StopX physically halting the motor
+          // and the IS state update that transitions axisState from Tracking
+          // to Idle: a CS poll inside this window sees Tracking + Some(session)
+          // + observedAt past lastValidTime, which looks like an underrun but
+          // is actually the expected end-of-session FIFO drainage.  Gating on
+          // activeCommand catches it: stopAxis is already in flight (HCD set
+          // activeCommand=Stop at dispatch), so the FIFO running out is OK.
+          val stopInFlight = currentState.getCmdState(axis).exists(_.activeCommand.contains(ActiveCommand.Stop))
+          if stopInFlight then
+            log.debug(s"PVT monitor axis $axis: stop in flight; suppressing underrun check " +
+                     s"(_PV=$freeSlots, _BT=$segmentsExecuted)")
+          else
+            axisState.trackingSession match
+              case Some(session) =>
+                if observedAt.isAfter(session.lastValidTime) then
+                  val lateMicros =
+                    java.time.Duration.between(session.lastValidTime, observedAt).toNanos / 1_000L
+                  log.warn(s"PVT underrun detected on axis $axis: TAI now $observedAt is " +
+                           s"${lateMicros}µs past lastValidTime ${session.lastValidTime} " +
+                           s"(_PV=$freeSlots free slots, _BT=$segmentsExecuted executed, " +
+                           s"${session.segmentsSubmitted} submitted)")
                   handleUpdateAxisState(axis,
                     Map(
+                      "axisState"          -> AxisStateEnum.Error,
+                      "axisError"          -> "Tracking stream underrun",
+                      "trackingSession"    -> None,
                       "pvFreeSlots"        -> freeSlots,
                       "btSegmentsExecuted" -> segmentsExecuted
                     ),
                     context.system.ignoreRef
                   )
-            case None =>
-              // axisState=Tracking but no session — invariant violation.  Log and let
-              // the next stopAxis / fault clean up.
-              log.warn(s"PVT monitor axis $axis: axisState=Tracking but no trackingSession " +
-                       s"(invariant violation); ignoring reading")
+                  // Clear activeCommand so HMI/subscribers see no command in flight.
+                  handleUpdateAxisCmdState(axis,
+                    Map("clearActiveCommand" -> true),
+                    context.system.ignoreRef
+                  )
+                else
+                  log.debug(s"PVT monitor axis $axis: _PV=$freeSlots, _BT=$segmentsExecuted, " +
+                           s"${session.segmentsSubmitted} submitted, lastValidTime=${session.lastValidTime}")
+                  // Store the readings so the HMI tracking telemetry panel reflects
+                  // live buffer state.  Only updates if values changed (handleUpdateAxisState
+                  // change detection prevents redundant subscriber notifications).
+                  if axisState.pvFreeSlots != freeSlots || axisState.btSegmentsExecuted != segmentsExecuted then
+                    handleUpdateAxisState(axis,
+                      Map(
+                        "pvFreeSlots"        -> freeSlots,
+                        "btSegmentsExecuted" -> segmentsExecuted
+                      ),
+                      context.system.ignoreRef
+                    )
+              case None =>
+                // axisState=Tracking but no session — invariant violation.  Log and let
+                // the next stopAxis / fault clean up.
+                log.warn(s"PVT monitor axis $axis: axisState=Tracking but no trackingSession " +
+                         s"(invariant violation); ignoring reading")
         // else: axis no longer Tracking by IS's authoritative view — CS's cache is
         // stale by one StateChanged delivery; ignore.
       }
