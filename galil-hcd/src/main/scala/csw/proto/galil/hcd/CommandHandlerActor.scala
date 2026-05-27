@@ -71,6 +71,27 @@ object CommandHandlerActor {
   def isLongRunning(commandName: String): Boolean = longRunningCommands.contains(commandName)
 
   // ========================================
+  // PVA argument bounds (Galil DMC-40x0 Command Reference, "PV PVT Data")
+  // ========================================
+  // The Galil controller imposes per-argument bounds on PVA that are MUCH
+  // tighter than the universal Galil4.2 signed-int32 range.  Sending a
+  // PVA wire command outside these bounds yields ':?' rejection followed
+  // by 'TC 6 Number out of range', which faults the HCD.  Per the spec:
+  //
+  //   n0 (ΔP, counts):       -44,000,000  ..  +44,000,000
+  //   n1 (V,  counts/sec):   -22,000,000  ..  +22,000,000
+  //   n2 (T,  samples):                0  ..        2,048      (0 exits PVT mode)
+  //
+  // At TM = 1000 µs, the n2 cap means MAX_PER_SEGMENT_DURATION ≈ 2.048 sec.
+  // Any latency that pushes (validTime - prev_lastValidTime) past ~2 seconds
+  // produces an out-of-range T and a controller-side reject — so this guard
+  // catches BOTH wild HCD math (e.g. stale TrackingSession reference times)
+  // AND legitimate but excessive validTime gaps from the client.
+  val PvaMaxDeltaPosition: Long = 44_000_000L
+  val PvaMaxVelocity:      Long = 22_000_000L
+  val PvaMaxTSamples:      Long =      2_048L
+
+  // ========================================
   // Factory
   // ========================================
 
@@ -1752,6 +1773,26 @@ object CommandHandlerActor {
         case None    => (math.round(axisState.position), nowInstant, true)
       }
 
+    // Diagnostic dump (S65 bug hunt): when something downstream rejects, we need to
+    // see EXACTLY what seeded the PVA math.  Prints once per trackAxis at INFO level.
+    // Specifically tracks `trackingSession` ledger state and the "now vs prevValidTime"
+    // relationship, since the STB axis D failure showed a 52,814,381,000µs delta that
+    // could only come from a stale Some(_) ledger.
+    axisState.trackingSession match {
+      case Some(s) =>
+        val ageSec = java.time.Duration.between(s.lastValidTime, nowInstant).toNanos / 1e9
+        log.info(s"trackAxis $axis: SEEDING from trackingSession ledger — " +
+                 s"lastTargetCounts=${s.lastTargetCounts}, " +
+                 s"lastValidTime=${s.lastValidTime} (age ${"%.3f".format(ageSec)}s vs now $nowInstant), " +
+                 s"btFiredAt=${s.btFiredAt}, segmentsSubmitted=${s.segmentsSubmitted}; " +
+                 s"axisState.position=${axisState.position}")
+      case None =>
+        log.info(s"trackAxis $axis: SEEDING from polled position (first segment) — " +
+                 s"axisState.position=${axisState.position} → counts=$prevEndpointCounts; " +
+                 s"prevValidTime=nowInstant=$nowInstant; " +
+                 s"new validTimeInstant=$validTimeInstant")
+    }
+
     // Monotonic-validTime guard.  Strictly increasing is required so T_samples is positive.
     if !validTimeInstant.isAfter(prevValidTime) then
       val msg = s"trackAxis $axis: validTime $validTimeInstant not after prev " +
@@ -1770,6 +1811,41 @@ object CommandHandlerActor {
       val msg = s"trackAxis $axis: validTime delta ${deltaMicros}µs is shorter than " +
                 s"one controller sample period (${samplePeriodMicros}µs) — segment " +
                 s"too short to express"
+      log.warn(msg)
+      crm.updateCommand(Error(runId, msg))
+      return
+
+    // Guard: PVA argument bounds (Galil DMC-40x0 Command Reference, "PV PVT Data").
+    // The controller rejects out-of-range arguments with ':?', and the subsequent
+    // 'TC 6 Number out of range' faults the HCD.  Reject BEFORE the wire write so
+    // the failure surfaces as a clean command error with diagnostic text instead
+    // of as a fault.  The T cap (2,048 samples ≈ 2.048s @ TM=1000) is the
+    // binding constraint for normal tracking — a validTime gap > ~2s exceeds it.
+    //   ΔP: ±44,000,000 counts
+    //   V : ±22,000,000 counts/sec
+    //   T :   1..2,048 samples
+    if math.abs(deltaP) > PvaMaxDeltaPosition then
+      val msg = s"trackAxis $axis: ΔP=$deltaP counts exceeds PVA position bound " +
+                s"(±$PvaMaxDeltaPosition); validTime gap likely too large or " +
+                s"prev-endpoint state stale"
+      log.warn(msg)
+      crm.updateCommand(Error(runId, msg))
+      return
+
+    if math.abs(rateCountsPerSec) > PvaMaxVelocity then
+      val msg = s"trackAxis $axis: V=$rateCountsPerSec counts/sec exceeds PVA " +
+                s"velocity bound (±$PvaMaxVelocity)"
+      log.warn(msg)
+      crm.updateCommand(Error(runId, msg))
+      return
+
+    if tSamples > PvaMaxTSamples then
+      val gapSec = deltaMicros.toDouble / 1_000_000.0
+      val msg = s"trackAxis $axis: T=$tSamples samples exceeds PVA time bound " +
+                s"($PvaMaxTSamples samples ≈ ${PvaMaxTSamples * samplePeriodMicros / 1_000_000.0}s " +
+                s"at TM=$samplePeriodMicros); validTime gap was ${"%.3f".format(gapSec)}s — " +
+                s"either prev-endpoint state is stale or the gap between successive " +
+                s"trackAxis calls is too long for the controller"
       log.warn(msg)
       crm.updateCommand(Error(runId, msg))
       return

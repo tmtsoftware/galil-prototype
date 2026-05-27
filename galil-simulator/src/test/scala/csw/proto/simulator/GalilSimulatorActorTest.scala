@@ -1056,4 +1056,327 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(tokens(1) == "1.0000", s"_LDB expected 1.0000, got: '${tokens(1)}'")
     assert(tokens(2) == "3.0000", s"_LDC expected 3.0000, got: '${tokens(2)}'")
   }
+
+  // ==========================================================================
+  // PVT tracking (Session 65)
+  //
+  // These tests exercise the simulator's emulation of Galil PVT (Position-
+  // Velocity-Time) streaming.  The HCD's tracking pipeline (handleTrackAxis +
+  // ControllerStatusActor's _PV/_BT polling + IS preemptive underrun detection)
+  // is verified against this simulator before lab-controller integration.
+  //
+  // Wire format reminder (the S64 lesson): `PV<axis>=ΔP,V,T` — the third letter
+  // of the wire command IS the axis designator.  `PVA=10,5,100` queues a segment
+  // for axis A; `PVB=10,5,100` queues for axis B.
+  // ==========================================================================
+
+  test("PVA segment write should be accepted with prompt ack") {
+    val sim = spawnSimulator()
+    val response = send(sim, "PVA=1000,500,100").utf8String
+    assert(response == ":", s"PVA accept should return ':', got: '$response'")
+  }
+
+  test("malformed PVA (wrong arg count) should return ? error") {
+    val sim = spawnSimulator()
+    val r1 = send(sim, "PVA=1000,500").utf8String
+    assert(r1 == "?", s"PVA with 2 args should return '?', got: '$r1'")
+    val r2 = send(sim, "PVA=1000,500,100,200").utf8String
+    assert(r2 == "?", s"PVA with 4 args should return '?', got: '$r2'")
+  }
+
+  test("malformed PVA (non-numeric args) should return ? error") {
+    val sim = spawnSimulator()
+    val response = send(sim, "PVA=foo,bar,baz").utf8String
+    assert(response == "?", s"PVA with non-numeric args should return '?', got: '$response'")
+  }
+
+  test("_PVA on empty FIFO should return 255 (max free slots)") {
+    val sim = spawnSimulator()
+    val response = sendText(sim, "MG _PVA")
+    assert(response == "255.0000", s"_PVA on empty FIFO should be 255.0000, got: '$response'")
+  }
+
+  test("_PVA should decrease as PVA segments are queued") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,10")
+    val r1 = sendText(sim, "MG _PVA")
+    assert(r1 == "254.0000", s"After 1 segment _PVA should be 254.0000, got: '$r1'")
+    send(sim, "PVA=200,75,10")
+    send(sim, "PVA=300,100,10")
+    val r3 = sendText(sim, "MG _PVA")
+    assert(r3 == "252.0000", s"After 3 segments _PVA should be 252.0000, got: '$r3'")
+  }
+
+  test("_BTA on fresh state should be 0") {
+    val sim = spawnSimulator()
+    val response = sendText(sim, "MG _BTA")
+    assert(response == "0.0000", s"_BTA on fresh state should be 0.0000, got: '$response'")
+  }
+
+  test("compound MG _PVA,_BTA should return two space-separated values (CS-side query form)") {
+    // This is the wire form the HCD's ControllerStatusActor uses to monitor
+    // tracking axes.  Format must match: tokens separated by whitespace, two
+    // tokens per axis (interleaved _PV<x>,_BT<x>).
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,10")
+    send(sim, "PVA=200,75,10")
+    val response = sendText(sim, "MG _PVA,_BTA")
+    val tokens = response.trim.split("\\s+").filter(_.nonEmpty)
+    assert(tokens.length == 2, s"Compound MG _PVA,_BTA should return 2 tokens, got ${tokens.length}: '$response'")
+    assert(tokens(0) == "253.0000", s"_PVA expected 253.0000, got: '${tokens(0)}'")
+    assert(tokens(1) == "0.0000",   s"_BTA expected 0.0000, got: '${tokens(1)}'")
+  }
+
+  test("compound MG _PVA,_BTA,_PVB,_BTB (multi-axis) should return four interleaved values") {
+    // CS-side wire form when multiple axes are tracking.  Order matches
+    // sortedAxes.flatMap(a => Seq(_PV<x>, _BT<x>)) — stride 2 per axis.
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,10")
+    send(sim, "PVB=200,75,10")
+    send(sim, "PVB=300,100,10")
+    val response = sendText(sim, "MG _PVA,_BTA,_PVB,_BTB")
+    val tokens = response.trim.split("\\s+").filter(_.nonEmpty)
+    assert(tokens.length == 4, s"Expected 4 tokens, got ${tokens.length}: '$response'")
+    assert(tokens(0) == "254.0000", s"_PVA expected 254.0000, got: '${tokens(0)}'")
+    assert(tokens(1) == "0.0000",   s"_BTA expected 0.0000, got: '${tokens(1)}'")
+    assert(tokens(2) == "253.0000", s"_PVB expected 253.0000, got: '${tokens(2)}'")
+    assert(tokens(3) == "0.0000",   s"_BTB expected 0.0000, got: '${tokens(3)}'")
+  }
+
+  test("PVA queuing should be independent across axes") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,10")
+    send(sim, "PVA=200,75,10")
+    send(sim, "PVB=300,100,10")
+    val pvA = sendText(sim, "MG _PVA")
+    val pvB = sendText(sim, "MG _PVB")
+    val pvC = sendText(sim, "MG _PVC")
+    assert(pvA == "253.0000", s"_PVA with 2 queued should be 253.0000, got: '$pvA'")
+    assert(pvB == "254.0000", s"_PVB with 1 queued should be 254.0000, got: '$pvB'")
+    assert(pvC == "255.0000", s"_PVC with 0 queued should be 255.0000, got: '$pvC'")
+  }
+
+  test("BTA should begin trajectory and reset _BTA counter") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,200")  // T=200 samples = 200ms — long enough to observe
+    val response = send(sim, "BTA").utf8String
+    assert(response == ":", s"BTA should ack with ':', got: '$response'")
+
+    // After BTA, the active segment is dequeued from the FIFO immediately, so
+    // _PVA should rise back to 255 (queue is empty, the segment is now active
+    // not queued).  _BTA reset to 0.
+    val pv = sendText(sim, "MG _PVA")
+    val bt = sendText(sim, "MG _BTA")
+    assert(pv == "255.0000", s"After BTA dequeues active segment, _PVA should be 255.0000, got: '$pv'")
+    assert(bt == "0.0000",   s"_BTA reset on BT, got: '$bt'")
+  }
+
+  test("BTA on empty FIFO should ack but not begin motion") {
+    val sim = spawnSimulator()
+    send(sim, "BTA")  // No segments queued
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"BTA on empty FIFO should not start motion, status=0x${hex(status)}")
+  }
+
+  test("PVT motion: position advances, _BTA increments as segments execute") {
+    // Single segment: ΔP=500, V=5000, T=100 samples (= 100 ms at _TM=1000µs).
+    // At our motion tick of 10ms, one segment = 10 ticks.  After ~150ms the
+    // segment should be complete, position at 500, _BTA=1.
+    val sim = spawnSimulator()
+    send(sim, "PVA=500,5000,100")
+    send(sim, "BTA")
+
+    Thread.sleep(300)  // generous: segment is 100ms, ramp + idle time
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 500,
+      s"After segment complete position should be 500, got: ${dr.axisStatuses(0).auxiliaryPosition}")
+    val bt = sendText(sim, "MG _BTA").toDouble.toInt
+    assert(bt == 1, s"_BTA should be 1 after one segment executed, got: $bt")
+  }
+
+  test("PVT motion: status word bit 15 set during segment, bit 14 (PA/PR) clear") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=2000,5000,500")  // 500ms segment
+    send(sim, "BTA")
+
+    Thread.sleep(50)  // Mid-segment
+
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) != 0, s"Bit 15 (moving) should be set during PVT, status=0x${hex(status)}")
+    assert((status & (1 << 14)) == 0, s"Bit 14 (PA/PR mode) should be clear during PVT, status=0x${hex(status)}")
+  }
+
+  test("PVT motion: motor turned on implicitly by BTA") {
+    val sim = spawnSimulator()
+    // Don't issue SH.  PVT segments + BT should energize the motor.
+    send(sim, "PVA=500,5000,100")
+    send(sim, "BTA")
+
+    Thread.sleep(20)
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    // bit 0 = Motor Off; should be CLEAR after BTA implicitly energizes
+    assert((status & (1 << 0)) == 0, s"Bit 0 (motorOff) should be clear after BTA, status=0x${hex(status)}")
+  }
+
+  test("PVT multi-segment: continuous execution advances through FIFO") {
+    val sim = spawnSimulator()
+    // 3 segments × 100ms each = 300ms total trajectory.
+    // Total ΔP = 100 + 200 + 300 = 600 counts.
+    send(sim, "PVA=100,1000,100")
+    send(sim, "PVA=200,2000,100")
+    send(sim, "PVA=300,3000,100")
+    send(sim, "BTA")
+
+    Thread.sleep(500)
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 600,
+      s"After 3 segments position should be 600, got: ${dr.axisStatuses(0).auxiliaryPosition}")
+    val bt = sendText(sim, "MG _BTA").toDouble.toInt
+    assert(bt == 3, s"_BTA should be 3 after 3 segments, got: $bt")
+  }
+
+  test("PVT (0,0,0) terminator stops trajectory and discards trailing segments") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,1000,100")
+    send(sim, "PVA=0,0,0")              // terminator
+    send(sim, "PVA=999,9999,100")        // should be discarded
+    send(sim, "BTA")
+
+    Thread.sleep(300)
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 100,
+      s"After terminator at seg 2, position should stop at 100, got: ${dr.axisStatuses(0).auxiliaryPosition}")
+    // Trailing segment discarded → motion stopped
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"Bit 15 (moving) should be clear after terminator, status=0x${hex(status)}")
+    // FIFO drained
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "255.0000", s"FIFO should be empty (255 free) after terminator, got: '$pv'")
+  }
+
+  test("STA drains PVT FIFO and stops tracking") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=1000,1000,500")   // long segment
+    send(sim, "PVA=2000,2000,500")
+    send(sim, "BTA")
+
+    Thread.sleep(50)  // partway through first segment
+
+    send(sim, "STA")
+
+    Thread.sleep(50)  // give the motion tick a chance to settle
+
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"Bit 15 (moving) should be clear after ST, status=0x${hex(status)}")
+    // FIFO drained
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "255.0000", s"FIFO should be empty after ST, got: '$pv'")
+  }
+
+  test("PVT underrun (empty FIFO without terminator) stops motor silently — no error code") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=500,5000,50")  // 50ms segment
+    send(sim, "BTA")
+
+    Thread.sleep(300)  // Well past the segment end, no more segments arrive
+
+    // Underrun: motion stopped, but no error code latched (TC remains 0)
+    val tc = sendText(sim, "TC0")
+    assert(tc == "0", s"TC should remain 0 on underrun (silent), got: '$tc'")
+
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"Bit 15 (moving) should be clear after underrun, status=0x${hex(status)}")
+  }
+
+  test("MO drains PVT FIFO and clears tracking state") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=1000,1000,500")
+    send(sim, "PVA=2000,2000,500")
+    send(sim, "BTA")
+
+    Thread.sleep(50)
+
+    send(sim, "MOA")
+
+    Thread.sleep(50)
+
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"Bit 15 (moving) should be clear after MO, status=0x${hex(status)}")
+    assert((status & (1 << 0))  != 0, s"Bit 0 (motorOff) should be set after MO, status=0x${hex(status)}")
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "255.0000", s"FIFO should be empty after MO, got: '$pv'")
+  }
+
+  test("#StopA program drains PVT FIFO (HCD trackAxis→stopAxis recovery path)") {
+    // The HCD's handleStopAxis Tracking branch goes through executeProgramAndWatch(#StopX)
+    // rather than direct STx.  The embedded #StopX program begins with STx so we must
+    // model that the XQ #StopX path also drains PVT state.
+    val sim = spawnSimulator()
+    send(sim, "PVA=1000,1000,500")
+    send(sim, "BTA")
+    Thread.sleep(50)
+
+    send(sim, "XQ #StopA,2")
+    Thread.sleep(150)
+
+    val dr = sendQR(sim)
+    val status = dr.axisStatuses(0).status
+    assert((status & (1 << 15)) == 0, s"Bit 15 (moving) should be clear after #StopA, status=0x${hex(status)}")
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "255.0000", s"FIFO should be empty after #StopA, got: '$pv'")
+  }
+
+  test("RS preserves PVT capability — fresh FIFO after reset") {
+    val sim = spawnSimulator()
+    send(sim, "PVA=100,50,100")
+    send(sim, "PVA=200,75,100")
+    send(sim, "RS")
+    // Post-reset, FIFO should be empty (255 free) and a fresh BTA should still work.
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "255.0000", s"After RS, _PVA should be back to 255.0000, got: '$pv'")
+    val r = send(sim, "PVA=300,100,10").utf8String
+    assert(r == ":", s"PVA after RS should still be accepted, got: '$r'")
+  }
+
+  test("PVT FIFO at capacity rejects further segments with ?") {
+    // Fill the FIFO to capacity (255 segments queued) and verify the 256th
+    // is rejected.  We don't issue BT — segments stay queued.
+    val sim = spawnSimulator()
+    for (_ <- 1 to 255) {
+      send(sim, "PVA=1,1,10")
+    }
+    val pv = sendText(sim, "MG _PVA")
+    assert(pv == "0.0000", s"After 255 queued, _PVA should be 0.0000 (FIFO full), got: '$pv'")
+    val response = send(sim, "PVA=999,999,10").utf8String
+    assert(response == "?", s"PVA on full FIFO should return '?', got: '$response'")
+  }
+
+  test("PVT for axis B works alongside PA motion on axis A (axes are independent)") {
+    val sim = spawnSimulator()
+    // Axis A: classic PA motion via embedded #MoveA
+    send(sim, "dmd[0]=400")
+    send(sim, "speed[0]=10000")
+    send(sim, "XQ #MoveA,1")
+
+    // Axis B: PVT segment
+    send(sim, "PVB=500,5000,100")
+    send(sim, "BTB")
+
+    Thread.sleep(300)
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 400,
+      s"Axis A PA should reach 400, got: ${dr.axisStatuses(0).auxiliaryPosition}")
+    assert(dr.axisStatuses(1).auxiliaryPosition == 500,
+      s"Axis B PVT should reach 500, got: ${dr.axisStatuses(1).auxiliaryPosition}")
+  }
 }

@@ -45,7 +45,7 @@ REM Check each axis
 ~a=0; ' axis designator
 b=0;  ' array index
 #pe_h
-IF (@ABS[_TE~a]>=_ER~a)
+IF ((@ABS[_TE~a]>=_ER~a) & (_ER~a<>-1))
   MG "Position Error ",_TE~a, " occured on ",~a{F1.0}," axis "
   ae[b]=2
 ENDIF

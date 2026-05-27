@@ -326,11 +326,8 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
   const [offTarget,setOffTarget] = useState('');
   const [wheelPos,setWheelPos] = useState('');
   const [angPos,setAngPos] = useState('');
-  const [trackPos,setTrackPos] = useState('');
-  const [trackVel,setTrackVel] = useState('20');
   const [override,setOverride] = useState(false);
   const [showDemand,setShowDemand] = useState(false);
-  const [showTrk,setShowTrk] = useState(false);
   // Last HMI-side command rejection for this axis (e.g. soft-limit violation
   // returned synchronously from POST /api/command).  Cleared on the next
   // command from this card.  Server-side axisErrorMsg from a genuine controller
@@ -513,33 +510,106 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
         e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.forwardLimitEnabled}),
         e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.reverseLimitEnabled})),
 
-      // CmdState bar + Tracking toggle at right end
+      // CmdState bar (no longer carries Trk toggle — telemetry below is auto-shown when Tracking)
       e('div',{style:{marginTop:4,padding:'3px 7px',backgroundColor:'#1F2937',borderRadius:4,
           fontSize:10.5,color:'#9CA3AF',display:'flex',gap:8,alignItems:'center'}},
         e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
         e('span',{style:{color:'#374151'}},'\u2502'),
         e('span',null,'Mov: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Y':'N')),
         e('span',{style:{color:'#374151'}},'\u2502'),
-        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—')),
-        e('span',{style:{flex:1}}),
-        enabled ? e('span',{onClick:()=>setShowTrk(!showTrk),
-            style:{cursor:'pointer',userSelect:'none',fontSize:9.5,display:'flex',alignItems:'center',gap:2,
-              color:showTrk?'#06B6D4':'#4B5563'}},
-          e('span',{style:{fontSize:8}},showTrk?'\u25be':'\u25b8'),'Trk') : null),
+        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
 
-      // Tracking inputs
-      showTrk && enabled
-        ? e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:3}},
-            e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},'Trk'),
-            e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
-            e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
-            e(Btn,{label:'Go',color:'#06B6D4',small:true,
-              onClick:()=>cmd('trackAxis',{
-                position:trackPos,
-                rate:trackVel,
-                validTime:new Date(Date.now()+2000).toISOString()
-              })}))
+      // Tracking telemetry panel — auto-shown when axisState === Tracking and
+      // a trackingSession is present.  Surfaces live PVT-mode internals so an
+      // operator can verify that a remote tracking client (TrackInjector or the
+      // APS-ICS Assembly) is keeping the controller's PVT FIFO fed.
+      //
+      //   • session ledger: lastTargetCounts, lastValidTime age, btFiredAt elapsed,
+      //                     segmentsSubmitted
+      //   • controller FIFO: _PV<x> free slots out of 255, _BT<x> segments executed,
+      //                      (submitted − executed) depth
+      //   • lastValidTime age is the heartbeat — green near zero, yellow > 1.0s,
+      //     red approaching the 2.048s per-segment hard cap.
+      (axState.axisState === 'Tracking' && axState.trackingSession)
+        ? e(TrackingTelemetry, {axState})
         : null));
+}
+
+// ── Tracking Telemetry Panel ─────────────────────────────────────────
+// Renders when axisState === Tracking.  Self-updating 4Hz via state push.
+function TrackingTelemetry({axState}) {
+  const ts = axState.trackingSession;
+  if (!ts) return null;
+
+  // Compute age of lastValidTime vs now (negative when lastValidTime is in the future,
+  // which is the normal case for a fresh trackAxis — validTime is ~1 sec ahead).
+  // Display sign-corrected: positive means "past", negative means "future".
+  const now = Date.now();
+  const lvtMs = new Date(ts.lastValidTime).getTime();
+  const btMs  = new Date(ts.btFiredAt).getTime();
+  const ageSec = (now - lvtMs) / 1000;
+  const elapsedSec = (now - btMs) / 1000;
+
+  // Heartbeat color: green within ±1.5s of zero, yellow approaching 2s, red past 2s.
+  // The hard controller cap is T ≤ 2,048 samples ≈ 2.048s at TM=1000.
+  const ageAbs = Math.abs(ageSec);
+  const ageColor = ageAbs < 1.5 ? '#10B981' : ageAbs < 2.0 ? '#F59E0B' : '#EF4444';
+
+  // FIFO occupancy: _PV is free slots (255 = empty buffer); occupancy = 255 - _PV.
+  // _BT is segments executed since the last BT.
+  const fifoUsed = 255 - (axState.pvFreeSlots ?? 255);
+  const depth    = (ts.segmentsSubmitted ?? 0) - (axState.btSegmentsExecuted ?? 0);
+
+  // Format helpers — keep numbers compact in the row.
+  const fmtSec = s => (s >= 0 ? '+' : '') + s.toFixed(2) + 's';
+  const fmtElapsed = s => {
+    if (s < 60) return s.toFixed(1) + 's';
+    const m = Math.floor(s / 60), r = s % 60;
+    return m + 'm' + r.toFixed(0) + 's';
+  };
+
+  const rowStyle = {display:'flex',gap:10,alignItems:'baseline',fontSize:10.5,
+                   fontFamily:'var(--mono)',color:'#9CA3AF'};
+  const labelStyle = {color:'#6B7280',fontSize:9.5};
+  const valStyle = {color:'#E5E7EB'};
+
+  return e('div',{style:{marginTop:3,padding:'4px 7px',backgroundColor:'#0B2738',
+                         borderRadius:4,borderLeft:'2px solid #06B6D4',
+                         display:'flex',flexDirection:'column',gap:2}},
+    // Row 1: session ledger (submitted, target, age)
+    e('div',{style:rowStyle},
+      e('span',{style:labelStyle},'TRK'),
+      e('span',null,
+        e('span',{style:labelStyle},'seg '),
+        e('span',{style:valStyle}, ts.segmentsSubmitted)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'tgt '),
+        e('span',{style:valStyle}, ts.lastTargetCounts)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'age '),
+        e('span',{style:{color:ageColor,fontWeight:600}}, fmtSec(ageSec))),
+      e('span',{style:{flex:1}}),
+      e('span',null,
+        e('span',{style:labelStyle},'run '),
+        e('span',{style:valStyle}, fmtElapsed(elapsedSec)))),
+    // Row 2: controller FIFO (_PV, _BT, depth)
+    e('div',{style:rowStyle},
+      e('span',{style:labelStyle},'FIFO'),
+      e('span',null,
+        e('span',{style:labelStyle},'used '),
+        e('span',{style:valStyle}, fifoUsed),
+        e('span',{style:labelStyle}, '/255')),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'exec '),
+        e('span',{style:valStyle}, axState.btSegmentsExecuted ?? 0)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'depth '),
+        e('span',{style:{color: depth <= 0 ? '#EF4444' : depth < 2 ? '#F59E0B' : '#10B981'}},
+          depth))));
 }
 
 function AxisVisual({axState, colors, showDemand}) {

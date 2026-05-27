@@ -290,7 +290,27 @@ case class AxisState(
    * Invariant: axisState == Tracking ⇔ trackingSession.isDefined.  Any code path that
    * transitions axisState into or out of Tracking is responsible for keeping this in sync.
    */
-  trackingSession: Option[TrackingSession] = None
+  trackingSession: Option[TrackingSession] = None,
+  /**
+   * Live readings from the Galil PVT monitoring path.  Populated by IS from
+   * `ReportPvtMonitoring` messages CS sends during action-rate polling when this
+   * axis is Tracking.  Held at default values (`pvFreeSlots = 255`,
+   * `btSegmentsExecuted = 0`) outside of Tracking sessions — the controller
+   * resets `_BT<x>` to 0 each BT, and an empty FIFO reports 255 free slots.
+   *
+   * Surfaced to the HMI tracking telemetry panel; not part of the CSW ICD.
+   *
+   *   pvFreeSlots         _PV<x>: free segment slots in the controller's PVT buffer.
+   *                       Range 0..255 (buffer capacity 255 segments; active
+   *                       segment isn't counted as queued).
+   *   btSegmentsExecuted  _BT<x>: count of PVT segments the controller has executed
+   *                       since the most recent `BT<x>`.  Combined with
+   *                       `trackingSession.segmentsSubmitted`, the difference
+   *                       gives a real-time measure of FIFO depth from the
+   *                       HCD-vs-controller perspective.
+   */
+  pvFreeSlots: Int = 255,
+  btSegmentsExecuted: Int = 0
 ):
   /**
    * Calculate inPosition based on position, demand, and threshold.
@@ -433,6 +453,12 @@ case class AxisState(
         updated = updated.copy(trackingSession = None)
       case ("trackingSession", v: Option[?]) =>
         updated = updated.copy(trackingSession = v.asInstanceOf[Option[TrackingSession]])
+      // PVT monitoring readings — written by IS.handleReportPvtMonitoring when the
+      // axis is Tracking.  Outside Tracking, defaults apply (255 free / 0 executed).
+      case ("pvFreeSlots", v: Int) =>
+        updated = updated.copy(pvFreeSlots = v)
+      case ("btSegmentsExecuted", v: Int) =>
+        updated = updated.copy(btSegmentsExecuted = v)
       case (key, value) => 
         // Log unknown keys but don't fail
         println(s"Warning: Unknown axis state field: $key = $value")

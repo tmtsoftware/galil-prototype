@@ -102,6 +102,19 @@ object GalilSimulatorActor {
   // ========================================
 
   /**
+   * One Galil PVT (Position-Velocity-Time) segment as queued in the per-axis FIFO.
+   *
+   * Wire form: `PV<axis>=deltaP,vEnd,tSamples`
+   *   - `deltaP`    : signed position change in counts over this segment
+   *   - `vEnd`      : signed velocity in counts/sec to be reached at segment END
+   *   - `tSamples`  : segment duration measured in controller sample periods (`_TM`)
+   *
+   * The active end-of-trajectory marker is `PvtSegment(0, 0, 0)` — when dequeued for
+   * execution it stops the trajectory and discards any trailing queued segments.
+   */
+  case class PvtSegment(deltaP: Long, vEnd: Long, tSamples: Long)
+
+  /**
    * Simulated state for one axis.
    *
    * @param motorOn       SH has been issued (motor enabled)
@@ -117,6 +130,24 @@ object GalilSimulatorActor {
    * @param stopCode      Last stop code (0=running, 1=normal stop)
    * @param homed         Axis has been homed (TS bit 1)
    * @param settings      Catch-all for other axis settings (legacy generic commands)
+   *
+   * --- PVT tracking fields (Session 65) ---
+   * @param pvtFifo         Queued PVT segments waiting to execute (FIFO).  Max capacity 255
+   *                        segments (matches hw `_PV<x>` reporting free slots 0..255).
+   *                        `_PV<x>` reports `255 - pvtFifo.size`; the active segment is
+   *                        NOT counted as queued.
+   * @param pvtActive       Segment currently executing (Some) or none. Distinct from the queue
+   *                        so `_PV<x>` reports queued-only depth, matching hw convention.
+   * @param pvtSegStartPos  Position at the moment `pvtActive` began executing — used to compute
+   *                        instantaneous position during linear-ramp interpolation.
+   * @param pvtSegStartVel  Velocity at the moment `pvtActive` began executing — feeds the linear
+   *                        velocity ramp from `pvtSegStartVel` to `pvtActive.vEnd`.
+   * @param pvtSamplesElapsed  Samples elapsed since `pvtActive` began (0 .. pvtActive.tSamples).
+   * @param btCounter        `_BT<x>` value: count of segments executed since the last `BT<x>`.
+   *                        Reset to 0 on each new `BT<x>` (matches hw, NOT cumulative across BTs).
+   * @param tracking         Axis is in PVT execution mode (BT has been issued since last drain).
+   *                        Distinct from `moving`/`jogging` so the QR status bit and motion
+   *                        branch are unambiguous.
    */
   case class SimAxis(
     motorOn: Boolean = false,
@@ -133,7 +164,15 @@ object GalilSimulatorActor {
     homed: Boolean = false,
     forwardLimitHit: Boolean = false,  // simulated physical limit; reflected in switches byte
     reverseLimitHit: Boolean = false,
-    settings: Map[String, Double] = Map.empty
+    settings: Map[String, Double] = Map.empty,
+    // PVT (Session 65)
+    pvtFifo: Vector[PvtSegment] = Vector.empty,
+    pvtActive: Option[PvtSegment] = None,
+    pvtSegStartPos: Double = 0.0,
+    pvtSegStartVel: Double = 0.0,
+    pvtSamplesElapsed: Long = 0L,
+    btCounter: Int = 0,
+    tracking: Boolean = false
   )
 
   /**
@@ -174,6 +213,15 @@ object GalilSimulatorActor {
 
   /** Threshold below which we snap to target (counts) */
   private val SnapThreshold = 0.5
+
+  /**
+   * PVT per-axis FIFO capacity. Matches hardware: `_PV<x>` reports free slots
+   * with maximum 255 when empty (per Galil REPL characterization, S63 design).
+   * Capacity-in-flight (queued + active) is 255; `_PV<x> = 255 - queuedDepth`
+   * where the active segment is NOT counted as queued (it has already been
+   * dequeued for execution).
+   */
+  private val PvtFifoCapacity = 255
 
   /** Axes modeled by the simulator — always 8 regardless of how many are active in HCD config */
   private val SimulatedAxes = Seq('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H')
@@ -279,10 +327,11 @@ object GalilSimulatorActor {
       // ---- QR DataRecord (binary) ----
       case `GetDataRecord` =>
         // Log QR state when anything interesting is happening
-        val anyMoving = state.axes.exists { case (_, ax) => ax.moving || ax.jogging }
+        val anyMoving = state.axes.exists { case (_, ax) => ax.moving || ax.jogging || ax.tracking }
         if (anyMoving || state.threadStatus != 0) {
           val axSummary = state.axes.toSeq.sortBy(_._1).map { case (c, ax) =>
-            s"$c:pos=${ax.position.toInt},mov=${ax.moving},jog=${ax.jogging},mot=${ax.motorOn}"
+            val pvt = if (ax.tracking) s",trk(act=${ax.pvtActive.isDefined},q=${ax.pvtFifo.size},bt=${ax.btCounter})" else ""
+            s"$c:pos=${ax.position.toInt},mov=${ax.moving},jog=${ax.jogging},mot=${ax.motorOn}$pvt"
           }.mkString(" ")
           println(s"[SIM] QR: threads=0x${state.threadStatus.toHexString} $axSummary")
         }
@@ -422,6 +471,25 @@ object GalilSimulatorActor {
       // ---- Jog speed (used by tracking) ----
       case `JogSpeed` =>
         handleJG(state, cmdString)
+
+      // ---- PVT segment write: PV<axis>=ΔP,V,T  (Session 65) ----
+      // The third letter of the wire command IS the axis designator — `PVA=...` is
+      // a PVT segment for axis A, `PVB=...` for axis B, etc.  This was the key
+      // wire-format lesson from S64 (initial HCD code wrote `PVAA=...,B=...,...`
+      // treating PVA as the command name).  The simulator must accept the same
+      // form to be a faithful target for `TrackInjectorApp`.  Match `cmd2 == "PV"`
+      // and parse the third char as the axis, leaving the rest to handlePvtSegment.
+      case "PV" if cmdString.length >= 4 && cmdString(2).isLetter && cmdString(3) == '=' =>
+        handlePvtSegment(state, cmdString)
+
+      // ---- BT<axis>: Begin Trajectory (Session 65) ----
+      // Starts execution of any queued PVT segments on the named axis.  `BT` with
+      // no axis suffix would begin all axes with pending segments — not used in
+      // this project (HCD always operates per-axis).  Reset `_BT<x>` counter to 0
+      // and mark the axis tracking; motion advance moves the first queued segment
+      // to `pvtActive` on the next tick.
+      case "BT" if cmdString.length >= 3 && cmdString(2).isLetter =>
+        handleBT(state, timer, cmdString)
 
       // ---- Configure inputs (CN) — just acknowledge ----
       case `ConfigureInputs` =>
@@ -578,13 +646,27 @@ object GalilSimulatorActor {
       case s if s.startsWith("Stop") =>
         val axis = s.last
         val idx = axis - 'A'
-        val ax = getAxis(newState, axis).copy(
-          moving = false,
-          jogging = false,
-          velocity = 0.0,
-          stopCode = 4
+        // The embedded `#StopX` program begins with `STx`, which on real hw drains
+        // any active PVT FIFO and stops the motor.  Mirror that here: clear PVT
+        // state alongside the PA/JG moving flags.  This is the only end-of-tracking
+        // path the HCD currently uses (its handleStopAxis Tracking branch bypasses
+        // checkAndInterrupt and goes straight to executeProgramAndWatch(#StopX)).
+        val curAx = getAxis(newState, axis)
+        val wasTracking = curAx.tracking
+        val ax = curAx.copy(
+          moving             = false,
+          jogging            = false,
+          tracking           = false,
+          velocity           = 0.0,
+          stopCode           = 4,
+          pvtActive          = None,
+          pvtFifo            = Vector.empty,
+          pvtSamplesElapsed  = 0L
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))
+        if (wasTracking) {
+          println(s"[SIM] #Stop$axis: drained PVT FIFO (was tracking)")
+        }
 
         // Clear the thread that was driving motion on this axis (if any).
         // Without this, the move thread leaks forever since advanceMotion
@@ -766,6 +848,26 @@ object GalilSimulatorActor {
         val ld = getAxis(state, axis).settings.getOrElse("LD", 0.0)
         f"$ld%.4f"
 
+      case s if s.length == 4 && s.startsWith("_PV") =>
+        // _PV<x>: per-axis PVT FIFO free-slots count.  255 when empty, 0 when full.
+        // The active (executing) segment is NOT counted as queued — only the
+        // pending segments in `pvtFifo`.  Matches hw: `BT<x>` dequeues the head
+        // into execution immediately, so a single segment + BT shows _PV=255 (queue
+        // empty), not 254 (queue has one waiting to dequeue).  This is the value
+        // the IS-side underrun detector compares against when freshSlots == 255
+        // and the segment is still active.
+        val axis = s.last
+        val ax = getAxis(state, axis)
+        f"${(PvtFifoCapacity - ax.pvtFifo.size).toDouble}%.4f"
+
+      case s if s.length == 4 && s.startsWith("_BT") =>
+        // _BT<x>: count of PVT segments executed since the most recent `BT<x>`.
+        // Resets to 0 on each new `BT<x>` (matches hw — NOT cumulative across
+        // BT invocations).  Drives the CS-side polling and is forwarded to IS
+        // for diagnostic correlation with `TrackingSession.segmentsSubmitted`.
+        val axis = s.last
+        f"${getAxis(state, axis).btCounter.toDouble}%.4f"
+
       case s if s.startsWith("@AN") =>
         // Single channel (compound is now handled by the top-level split in handleMG)
         "2.5000"
@@ -800,8 +902,18 @@ object GalilSimulatorActor {
     cmdString: String
   ): (ByteString, SimState) = {
     val axis = cmdString.drop(2).headOption.getOrElse('A')
+    // MO de-energizes the motor and aborts any motion in progress, including
+    // any active PVT trajectory.  Drain the FIFO and clear tracking state in
+    // the same operation — matches hw behavior of MO during PVT execution.
     val ax = getAxis(state, axis).copy(
-      motorOn = false, moving = false, jogging = false, velocity = 0.0
+      motorOn            = false,
+      moving             = false,
+      jogging            = false,
+      tracking           = false,
+      velocity           = 0.0,
+      pvtActive          = None,
+      pvtFifo            = Vector.empty,
+      pvtSamplesElapsed  = 0L
     )
     var newState = state.copy(axes = state.axes + (axis -> ax))
     // Clear any move thread driving this axis
@@ -838,11 +950,29 @@ object GalilSimulatorActor {
     var newThreadStatus = state.threadStatus
     for (axis <- axesToStop) {
       val ax = getAxis(state, axis)
-      if (ax.moving || ax.jogging) {
+      if (ax.moving || ax.jogging || ax.tracking) {
+        // ST drains the PVT FIFO immediately and leaves the controller "ready
+        // for next trajectory" (S64).  We clear pvtActive and pvtFifo, reset
+        // the BT counter (next BT will start fresh), and exit tracking mode.
+        // The motor stops with stopCode=4 to mirror the ST-initiated stop, same
+        // as for PA/JG motion.
+        val wasTracking = ax.tracking
         newAxes = newAxes + (axis -> ax.copy(
-          moving = false, jogging = false, velocity = 0.0, stopCode = 4
+          moving             = false,
+          jogging            = false,
+          tracking           = false,
+          velocity           = 0.0,
+          stopCode           = 4,
+          pvtActive          = None,
+          pvtFifo            = Vector.empty,
+          pvtSamplesElapsed  = 0L
         ))
-        // Clear the thread that was driving motion on this axis
+        if (wasTracking) {
+          println(s"[SIM] ST$axis: drained PVT FIFO (active=${ax.pvtActive.isDefined}, " +
+                  s"queued=${ax.pvtFifo.size})")
+        }
+        // Clear the thread that was driving motion on this axis (only relevant
+        // for PA/JG motion; PVT has no embedded thread)
         val idx = axis - 'A'
         val moveThreadKey = s"_axisThread[$idx]"
         newVars.get(moveThreadKey).foreach { moveThreadNum =>
@@ -902,6 +1032,140 @@ object GalilSimulatorActor {
       val newAx = ax.copy(settings = ax.settings + (JogSpeed -> value))
       (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
     }
+  }
+
+  // ========================================
+  // PV<axis>=ΔP,V,T  — PVT segment write (Session 65)
+  // ========================================
+
+  /**
+   * Append one PVT segment to the per-axis FIFO.
+   *
+   * Wire form: `PV<axis>=ΔP,V,T` — the third letter is the axis designator (the
+   * key wire-format lesson from S64).  ΔP and V are signed integers; T is a
+   * positive integer count of `_TM` sample periods.
+   *
+   * Behavior:
+   *   - `(0, 0, 0)` is the active end-of-trajectory marker.  Real hw accepts it
+   *     into the FIFO and, when dequeued for execution, stops the trajectory and
+   *     discards any trailing queued segments.  We honor this by queuing it
+   *     normally; `advancePvtAxis` handles the truncation when it dequeues
+   *     the terminator.
+   *   - FIFO overflow (depth already == capacity) is rejected with `?`.  Real
+   *     hw behavior is to drop the segment; we treat it as a command error so
+   *     misbehaving clients are surfaced rather than silently misbehaving.
+   *   - Parse failure (non-numeric or wrong arity) also returns `?`.
+   *
+   * Storage only — does NOT begin motion.  `BT<axis>` is the trigger.  This
+   * matches hw: segments accumulate in the FIFO until BT is issued.
+   */
+  private def handlePvtSegment(state: SimState, cmdString: String): (ByteString, SimState) = {
+    val axis = cmdString(2)
+    val args = cmdString.drop(4).trim   // skip "PV<x>="
+    val parts = args.split(",").map(_.trim)
+    if (parts.length != 3) {
+      println(s"[SIM] PV$axis: malformed segment (expected 3 args, got ${parts.length}): '$args'")
+      return (formatReply(None, isError = true), state)
+    }
+    val parsed = try {
+      Some(PvtSegment(parts(0).toLong, parts(1).toLong, parts(2).toLong))
+    } catch {
+      case _: NumberFormatException =>
+        println(s"[SIM] PV$axis: non-numeric segment args: '$args'")
+        None
+    }
+    parsed match {
+      case None =>
+        (formatReply(None, isError = true), state)
+      case Some(seg) =>
+        val ax = getAxis(state, axis)
+        if (ax.pvtFifo.size >= PvtFifoCapacity) {
+          println(s"[SIM] PV$axis: FIFO full (${ax.pvtFifo.size}/$PvtFifoCapacity) — rejecting")
+          return (formatReply(None, isError = true), state)
+        }
+        // Guard: T must be non-negative (T==0 only valid as part of the 0,0,0 terminator).
+        // The HCD's handleTrackAxis guards against tSamples < 1 except for the terminator
+        // case, so any (0, 0, 0) reaching us is intentional.
+        if (seg.tSamples < 0) {
+          println(s"[SIM] PV$axis: negative T=${seg.tSamples} rejected")
+          return (formatReply(None, isError = true), state)
+        }
+        val newAx = ax.copy(pvtFifo = ax.pvtFifo :+ seg)
+        println(s"[SIM] PV$axis: queued segment ΔP=${seg.deltaP} V=${seg.vEnd} T=${seg.tSamples} " +
+                s"(depth ${newAx.pvtFifo.size}/$PvtFifoCapacity, free ${PvtFifoCapacity - newAx.pvtFifo.size})")
+        (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
+    }
+  }
+
+  // ========================================
+  // BT<axis> — Begin Trajectory (Session 65)
+  // ========================================
+
+  /**
+   * Begin PVT trajectory execution for the named axis.
+   *
+   * Real hw: `BT<x>` starts consuming queued segments on axis x.  Bare `BT`
+   * (no suffix) begins all axes with pending segments — we don't currently
+   * support that form since the HCD never uses it.
+   *
+   * Semantics on receipt:
+   *   - Reset `_BT<x>` counter to 0 (segments-since-last-BT).
+   *   - Mark axis `tracking = true` and `moving = true` (so QR status word
+   *     reflects motion in progress).
+   *   - Turn motor on implicitly (matches hw — PVT motion does not require
+   *     a separate SH; the FIFO segments drive the servo loop).
+   *   - Dequeue the first segment into `pvtActive` and stamp the start
+   *     position/velocity so the velocity ramp has a reference.
+   *   - Start the motion timer.
+   *
+   * BT issued while already tracking is permitted but unusual; we re-arm
+   * (reset counter, re-dequeue if FIFO has segments) without disrupting any
+   * currently-executing segment.  Matches hw's "BT begins execution of
+   * whatever's in the FIFO" semantics.
+   */
+  private def handleBT(
+    state: SimState,
+    timer: TimerScheduler[GalilSimulatorCommand],
+    cmdString: String
+  ): (ByteString, SimState) = {
+    val axis = cmdString(2)
+    val ax = getAxis(state, axis)
+    println(s"[SIM] BT$axis: begin trajectory (FIFO depth=${ax.pvtFifo.size}, " +
+            s"active=${ax.pvtActive.isDefined}, motorOn=${ax.motorOn})")
+
+    // If a segment is already actively executing (re-BT during a session), leave
+    // it alone; just reset the counter.  Otherwise dequeue the first segment.
+    val (newActive, newFifo, newStartPos, newStartVel, newSamplesElapsed) =
+      if (ax.pvtActive.isDefined) {
+        (ax.pvtActive, ax.pvtFifo, ax.pvtSegStartPos, ax.pvtSegStartVel, ax.pvtSamplesElapsed)
+      } else if (ax.pvtFifo.nonEmpty) {
+        val (head, tail) = (ax.pvtFifo.head, ax.pvtFifo.tail)
+        (Some(head), tail, ax.position, ax.velocity, 0L)
+      } else {
+        // BT with empty FIFO — hw still arms the system but motion only begins
+        // once a segment arrives.  We mirror by marking tracking and waiting.
+        (None, ax.pvtFifo, ax.position, ax.velocity, 0L)
+      }
+
+    val newAx = ax.copy(
+      pvtActive          = newActive,
+      pvtFifo            = newFifo,
+      pvtSegStartPos     = newStartPos,
+      pvtSegStartVel     = newStartVel,
+      pvtSamplesElapsed  = newSamplesElapsed,
+      btCounter          = 0,
+      tracking           = true,
+      moving             = newActive.isDefined,
+      jogging            = false,
+      motorOn            = true,
+      stopCode           = 0
+    )
+    // Start the motion timer.  Even if FIFO is empty at the moment of BT, we
+    // want the tick to fire so a segment arriving later via PV<x>= can be
+    // dequeued by advancePvtAxis on the next tick.  ensureMotionTicking is
+    // idempotent (startTimerAtFixedRate with the same key replaces).
+    ensureMotionTicking(timer)
+    (formatReply(None), state.copy(axes = state.axes + (axis -> newAx)))
   }
 
   // ========================================
@@ -1083,6 +1347,9 @@ object GalilSimulatorActor {
    *
    * For position moves (PA/dmd), moves toward demand at configured speed.
    * For jog moves (JG/tracking), moves continuously at jog velocity.
+   * For PVT (tracking via `BT<x>`), executes the active segment with a linear
+   * velocity ramp from segment-start velocity to segment-end velocity, dequeuing
+   * the next FIFO segment when the active one completes.
    *
    * When a position move reaches its target:
    *   - Sets moving=false, velocity=0, stopCode=1
@@ -1096,8 +1363,16 @@ object GalilSimulatorActor {
     var newState = state
     var anyMoving = false
 
-    for ((axisChar, ax) <- state.axes if ax.moving || ax.jogging) {
-      if (ax.jogging) {
+    for ((axisChar, ax) <- state.axes if ax.moving || ax.jogging || ax.tracking) {
+      if (ax.tracking) {
+        // PVT execution branch — independent of PA/JG paths.  The `moving` flag
+        // is true while a segment is active so QR status word bit 15 is correct,
+        // but the motion math is driven entirely by the segment ramp, not by
+        // demand-vs-position.
+        val (updatedAx, stillMoving) = advancePvtAxis(ax)
+        newState = newState.copy(axes = newState.axes + (axisChar -> updatedAx))
+        if (stillMoving) anyMoving = true
+      } else if (ax.jogging) {
         // Jog mode — move at constant velocity
         val newPos = ax.position + ax.velocity * dt
         val newAx = ax.copy(position = newPos)
@@ -1157,6 +1432,143 @@ object GalilSimulatorActor {
 
     simulate(timer, newState)
   }
+
+  /**
+   * Advance a single PVT-tracking axis by one motion tick.
+   *
+   * Time accounting: one motion tick is `MotionTickIntervalMs` of wall time.
+   * In controller-sample units that's `(MotionTickIntervalMs * 1000) / _TM`
+   * samples per tick.  We use the hardcoded `_TM = 1000 µs` (matches what `MG _TM`
+   * returns above; both lab and STB run at 1 kHz servo) so one tick = 10 samples.
+   *
+   * Linear-velocity-ramp model: within an active segment of duration `T_samples`
+   * the velocity ramps linearly from `pvtSegStartVel` to `segment.vEnd`.  Position
+   * is the integral, evaluated at the current samples-elapsed.  The math:
+   *
+   *   frac        = pvtSamplesElapsed / segment.tSamples           ∈ [0, 1]
+   *   v(frac)     = pvtSegStartVel + (segment.vEnd - pvtSegStartVel) * frac     (counts/sec)
+   *   ∫₀^frac     = pvtSegStartVel * (frac * T_sec)
+   *                 + (segment.vEnd - pvtSegStartVel) * (frac² / 2) * T_sec    (counts)
+   *
+   * where `T_sec = segment.tSamples * _TM / 1e6`.  When frac == 1, the integral
+   * equals `((pvtSegStartVel + segment.vEnd) / 2) * T_sec` which matches the
+   * caller-supplied segment ΔP only if the HCD's PVA write picked V consistent
+   * with ΔP/T.  We do NOT try to force the integral to exactly ΔP — that would
+   * mask HCD bugs where V and ΔP disagree.  Position is computed from the ramp;
+   * segment-end position is committed at completion.
+   *
+   * Returns (updated SimAxis, stillMoving) where stillMoving=true while either a
+   * segment is active OR the FIFO has more segments to dequeue.
+   */
+  private def advancePvtAxis(ax: SimAxis): (SimAxis, Boolean) = {
+    val samplePeriodMicros = 1000L  // _TM = 1000 µs — matches resolveMgArg's "_TM" branch
+    val samplesPerTick = (MotionTickIntervalMs.toLong * 1000L) / samplePeriodMicros
+
+    ax.pvtActive match {
+      case None =>
+        // Tracking-armed but no active segment.  Try to dequeue from FIFO; if
+        // empty, we're underrun (silent — no error code, just stop moving).
+        if (ax.pvtFifo.isEmpty) {
+          // Silent underrun: motor stops cleanly.  Real hw stays "tracking-armed"
+          // (ready for a fresh PV+BT), but for the simulator we clear `tracking`
+          // here so the motion-tick loop doesn't re-fire this branch every tick
+          // (avoiding log spam and wasted work).  Re-issuing PV<x>+BT<x> after
+          // underrun still works because BT unconditionally re-arms tracking.
+          println(s"[SIM] PVT underrun (no segments, no terminator) — motor stopped")
+          (ax.copy(moving = false, tracking = false, velocity = 0.0, stopCode = 1), false)
+        } else {
+          // Dequeue and start the next segment without advancing time this tick —
+          // simpler than partial-tick handling.  The first sample lands next tick.
+          val (head, tail) = (ax.pvtFifo.head, ax.pvtFifo.tail)
+          val started = ax.copy(
+            pvtActive          = Some(head),
+            pvtFifo            = tail,
+            pvtSegStartPos     = ax.position,
+            pvtSegStartVel     = ax.velocity,
+            pvtSamplesElapsed  = 0L,
+            moving             = true,    // segment now executing — surface in QR
+            stopCode           = 0
+          )
+          (started, true)
+        }
+
+      case Some(seg) =>
+        // Terminator (0, 0, 0): on dequeue, drain trailing FIFO and stop the
+        // trajectory.  Real hw: PVA=0,0,0 is the active end-of-trajectory marker
+        // — segments AFTER it are discarded (`_BT` counts the terminator as one
+        // executed segment per S64 line 1036).
+        if (seg.deltaP == 0L && seg.vEnd == 0L && seg.tSamples == 0L) {
+          println(s"[SIM] PVT terminator dequeued — stopping trajectory, " +
+                  s"discarding ${ax.pvtFifo.size} trailing segments")
+          return (ax.copy(
+            pvtActive    = None,
+            pvtFifo      = Vector.empty,  // discard trailing segments
+            btCounter    = ax.btCounter + 1,  // terminator counts as executed
+            tracking     = false,
+            moving       = false,
+            velocity     = 0.0,
+            stopCode     = 1
+          ), false)
+        }
+
+        // Advance within the active segment by `samplesPerTick` (or fewer if we
+        // would overshoot the segment boundary).
+        val remainingInSeg = seg.tSamples - ax.pvtSamplesElapsed
+        val advance = math.min(samplesPerTick, remainingInSeg)
+        val newElapsed = ax.pvtSamplesElapsed + advance
+
+        if (newElapsed >= seg.tSamples) {
+          // Segment completes this tick.  Commit segment-end position/velocity
+          // exactly so accumulated rounding error doesn't drift.  segmentEndPos
+          // = pvtSegStartPos + deltaP.
+          //
+          // Inter-segment gap: we clear pvtActive here and let the NEXT tick
+          // dequeue the next segment (via the `None` branch above).  This
+          // introduces a one-tick (10 ms) gap between segments where velocity
+          // holds at endVel and position holds at endPos.  For the HCD's typical
+          // ~1 Hz cadence with ~1000 ms segments this is negligible (1% of segment
+          // duration); we don't try to handle the cross-segment continuity
+          // partial-tick case here because doing so doesn't change correctness
+          // of the FIFO accounting (which is what IS-side underrun detection and
+          // _BT monitoring care about).
+          val endPos = ax.pvtSegStartPos + seg.deltaP.toDouble
+          val endVel = seg.vEnd.toDouble
+          val nextBt = ax.btCounter + 1
+          println(s"[SIM] PVT seg complete: ΔP=${seg.deltaP} V=${seg.vEnd} T=${seg.tSamples} " +
+                  s"end pos=${endPos.toLong} vel=${endVel.toLong}, _BT=$nextBt, " +
+                  s"FIFO depth=${ax.pvtFifo.size}")
+          // Snap to the segment endpoint and clear active.  Next tick will try
+          // to dequeue the next FIFO segment via the None branch above.
+          val updated = ax.copy(
+            position           = endPos,
+            velocity           = endVel,
+            pvtActive          = None,
+            pvtSegStartPos     = endPos,
+            pvtSegStartVel     = endVel,
+            pvtSamplesElapsed  = 0L,
+            btCounter          = nextBt
+          )
+          (updated, true)  // stillMoving — next tick will check FIFO for more
+        } else {
+          // Mid-segment advance: linear velocity ramp, position from integral.
+          val frac = newElapsed.toDouble / seg.tSamples.toDouble
+          val v0 = ax.pvtSegStartVel
+          val v1 = seg.vEnd.toDouble
+          val tSec = seg.tSamples.toDouble * samplePeriodMicros.toDouble / 1_000_000.0
+          val currentVel = v0 + (v1 - v0) * frac
+          // Position integral from segment start:
+          //   ∫₀^frac (v0 + (v1-v0)·u) du · tSec = (v0·frac + (v1-v0)·frac²/2) · tSec
+          val posDelta = (v0 * frac + (v1 - v0) * frac * frac / 2.0) * tSec
+          val newPos = ax.pvtSegStartPos + posDelta
+          (ax.copy(
+            position           = newPos,
+            velocity           = currentVel,
+            pvtSamplesElapsed  = newElapsed
+          ), true)
+        }
+    }
+  }
+
 
   // ========================================
   // Thread completion
@@ -1286,8 +1698,14 @@ object GalilSimulatorActor {
     val ax = getAxis(state, axisChar)
 
     var statusWord: Int = 0
+    // Bit 15 = Move in Progress.  For PVT we use `moving` (set by BT when a
+    // segment is dequeued for execution and cleared on terminator/underrun/ST);
+    // we do NOT use `tracking` alone, because tracking-armed-but-FIFO-empty is
+    // not motion.  `moving || jogging` covers all motion sources.
     if (ax.moving || ax.jogging) statusWord |= (1 << 15)
-    if (!ax.jogging && ax.moving) statusWord |= (1 << 14)
+    // Bit 14 = PA/PR mode of motion.  Only set for profiled position moves —
+    // NOT for JG (`jogging`) and NOT for PVT (`tracking`).
+    if (!ax.jogging && !ax.tracking && ax.moving) statusWord |= (1 << 14)
     if (ax.velocity < 0) statusWord |= (1 << 7)
     if (!ax.motorOn) statusWord |= (1 << 0)
 

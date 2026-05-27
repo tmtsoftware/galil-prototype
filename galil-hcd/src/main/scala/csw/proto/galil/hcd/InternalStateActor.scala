@@ -521,9 +521,11 @@ class InternalStateActor(
                          s"${session.segmentsSubmitted} submitted)")
                 handleUpdateAxisState(axis,
                   Map(
-                    "axisState"       -> AxisStateEnum.Error,
-                    "axisError"       -> "Tracking stream underrun",
-                    "trackingSession" -> None
+                    "axisState"          -> AxisStateEnum.Error,
+                    "axisError"          -> "Tracking stream underrun",
+                    "trackingSession"    -> None,
+                    "pvFreeSlots"        -> freeSlots,
+                    "btSegmentsExecuted" -> segmentsExecuted
                   ),
                   context.system.ignoreRef
                 )
@@ -535,6 +537,17 @@ class InternalStateActor(
               else
                 log.debug(s"PVT monitor axis $axis: _PV=$freeSlots, _BT=$segmentsExecuted, " +
                          s"${session.segmentsSubmitted} submitted, lastValidTime=${session.lastValidTime}")
+                // Store the readings so the HMI tracking telemetry panel reflects
+                // live buffer state.  Only updates if values changed (handleUpdateAxisState
+                // change detection prevents redundant subscriber notifications).
+                if axisState.pvFreeSlots != freeSlots || axisState.btSegmentsExecuted != segmentsExecuted then
+                  handleUpdateAxisState(axis,
+                    Map(
+                      "pvFreeSlots"        -> freeSlots,
+                      "btSegmentsExecuted" -> segmentsExecuted
+                    ),
+                    context.system.ignoreRef
+                  )
             case None =>
               // axisState=Tracking but no session — invariant violation.  Log and let
               // the next stopAxis / fault clean up.
@@ -600,11 +613,49 @@ class InternalStateActor(
       if leavingError && !updates.contains("axisError") then
         currentState = currentState.updateAxis(axis, Map("axisError" -> ""))
 
+      // Invariant: trackingSession is meaningful only while axisState == Tracking.
+      // The session ledger (lastTargetCounts, lastValidTime, btFiredAt) is the
+      // anchor for computing the NEXT PVA segment's ΔP and T; if axisState leaves
+      // Tracking (via stopAxis, fault, underrun, spontaneous motion, embedded
+      // program error like #POSERR/#LIMSWI/#MCTIME, XQ communication failure, or
+      // faultReset Init re-initialization), the ledger MUST be cleared.
+      //
+      // Historically this was enforced at each call site (stopAxis success path,
+      // EnterFaulted, underrun detector).  But other transition paths
+      // (CS.reportAxisError, CHA.setErrorState, IS.applySpontaneousMotion,
+      // GalilHcd.applyAxisConfig) did not clear it.  Worse, EnterFaulted itself
+      // only clears trackingSession when the prior axisState was Tracking — so a
+      // sequence like "underrun fires → Error (clears session)" works, but
+      // "embedded error fires → Error (does NOT clear session)" followed by a
+      // later fault leaves a stale Some(_) indefinitely because EnterFaulted's
+      // Tracking branch never fires.  The next trackAxis on that axis would then
+      // SEED from the stale ledger, producing wild ΔP/T values that the controller
+      // rejects with 'Number out of range', faulting the HCD.
+      //
+      // Make the invariant declarative: "axisState != Tracking ⇒
+      // trackingSession == None".  If a caller has explicitly set trackingSession
+      // in the same update (only handleTrackAxis does so, and only with axisState
+      // = Tracking), that wins — the auto-clear only fires on transitions OUT.
+      val leavingTracking =
+        oldAxisState.exists(_.axisState == AxisStateEnum.Tracking) &&
+        currentState.getAxis(axis).exists(_.axisState != AxisStateEnum.Tracking)
+      if leavingTracking && !updates.contains("trackingSession") then
+        currentState = currentState.updateAxis(axis, Map("trackingSession" -> None))
+      // Also reset PVT monitoring readings to defaults so the HMI telemetry
+      // panel shows clean values on the next session rather than the last-known
+      // mid-session readings.  pvFreeSlots = 255 (empty buffer), btSegmentsExecuted = 0
+      // (BT resets counter on next session start).
+      if leavingTracking then
+        if !updates.contains("pvFreeSlots") then
+          currentState = currentState.updateAxis(axis, Map("pvFreeSlots" -> 255))
+        if !updates.contains("btSegmentsExecuted") then
+          currentState = currentState.updateAxis(axis, Map("btSegmentsExecuted" -> 0))
+
       // Get new axis state
       val newAxisState = currentState.getAxis(axis)
       
       // Detect ALL changed fields (including auto-calculated ones like inPosition
-      // and the auto-cleared axisError above)
+      // and the auto-cleared axisError / trackingSession above)
       val allChangedFields = (oldAxisState, newAxisState) match
         case (Some(oldAxis), Some(newAxis)) =>
           var changed = updates.keySet
@@ -612,6 +663,12 @@ class InternalStateActor(
             changed = changed + "inPosition"
           if oldAxis.axisError != newAxis.axisError then
             changed = changed + "axisError"
+          if oldAxis.trackingSession != newAxis.trackingSession then
+            changed = changed + "trackingSession"
+          if oldAxis.pvFreeSlots != newAxis.pvFreeSlots then
+            changed = changed + "pvFreeSlots"
+          if oldAxis.btSegmentsExecuted != newAxis.btSegmentsExecuted then
+            changed = changed + "btSegmentsExecuted"
           changed
         case _ =>
           updates.keySet

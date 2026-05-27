@@ -15,45 +15,67 @@ object HmiJsonProtocol {
 
   // ── AxisState → JSON ──────────────────────────────────────────────────
 
-  private def axisStateToJson(s: AxisState): JsObject = Json.obj(
-    // Wrapped position in encoder counts [0, cpr) for rotating axes; equals raw position for linear.
-    // Matches the demand space used by positionAxis/offsetAxis commands — no confusing wrap offsets.
-    "position"           -> s.motorPosition,
-    // Raw accumulated encoder counts from controller (accumulates across revolutions for rotating axes).
-    // Useful for diagnostics and verifying the wrapping logic.
-    "rawMotorPosition"   -> s.position,
-    "velocity"     -> s.velocity,
-    "axisState"    -> s.axisState.toString,
-    "inPosition"   -> s.inPosition,
-    // Wrapped demand [0, cpr) for rotating axes — matches motorPosition frame for HMI display.
-    "demand"       -> s.motorDemand,
-    "axisErrorMsg" -> s.axisError,
-    "forwardLimit" -> s.forwardLimit,
-    "reverseLimit" -> s.reverseLimit,
-    "forwardLimitEnabled" -> s.forwardLimitEnabled,
-    "reverseLimitEnabled" -> s.reverseLimitEnabled,
-    "homeSwitch"   -> s.homeSwitch,
-    "isStepper"    -> s.isStepper,
-    "motorOff"     -> s.motorOff,
-    // Mechanism configuration
-    "mechanismType" -> s.mechanismType.toString,
-    "algorithm"     -> s.algorithm.map(_.toString).getOrElse(""),
-    // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
-    "angularPosition"  -> s.angularPosition.getOrElse(0.0),
-    "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
-    // Soft limits (linear axes only)
-    "upperLimit" -> s.upperLimit.getOrElse[Double](0.0),
-    "lowerLimit" -> s.lowerLimit.getOrElse[Double](0.0),
-    "softLimitsEnabled" -> s.softLimitsEnabled,
-    // Motion configuration (from readMotionConfig + configAxis updates)
-    "maxSpeed"            -> s.maxSpeed.getOrElse[Double](0.0),
-    "acceleration"        -> s.acceleration.getOrElse[Double](0.0),
-    "deceleration"        -> s.deceleration.getOrElse[Double](0.0),
-    "indexOffset"          -> s.indexOffset.getOrElse[Double](0.0),
-    "indexSpeed"           -> s.indexSpeed.getOrElse[Double](0.0),
-    "inPositionThreshold" -> s.inPositionThreshold,
-    "axisName"            -> s.axisName.getOrElse("")
-  )
+  private def axisStateToJson(s: AxisState): JsObject = {
+    // Tracking-session ledger: serialize as a nested object when present so the
+    // HMI telemetry panel can render fields directly.  ISO-8601 timestamps are
+    // formatted UTC; the HMI computes "age vs now" client-side.  Outside of
+    // Tracking, this serializes as JsNull so the HMI can detect "no session".
+    val trackingSessionJson: JsValue = s.trackingSession match {
+      case Some(ts) => Json.obj(
+        "lastTargetCounts"   -> ts.lastTargetCounts,
+        "lastValidTime"      -> ts.lastValidTime.toString,
+        "btFiredAt"          -> ts.btFiredAt.toString,
+        "segmentsSubmitted"  -> ts.segmentsSubmitted
+      )
+      case None => JsNull
+    }
+
+    Json.obj(
+      // Wrapped position in encoder counts [0, cpr) for rotating axes; equals raw position for linear.
+      // Matches the demand space used by positionAxis/offsetAxis commands — no confusing wrap offsets.
+      "position"           -> s.motorPosition,
+      // Raw accumulated encoder counts from controller (accumulates across revolutions for rotating axes).
+      // Useful for diagnostics and verifying the wrapping logic.
+      "rawMotorPosition"   -> s.position,
+      "velocity"     -> s.velocity,
+      "axisState"    -> s.axisState.toString,
+      "inPosition"   -> s.inPosition,
+      // Wrapped demand [0, cpr) for rotating axes — matches motorPosition frame for HMI display.
+      "demand"       -> s.motorDemand,
+      "axisErrorMsg" -> s.axisError,
+      "forwardLimit" -> s.forwardLimit,
+      "reverseLimit" -> s.reverseLimit,
+      "forwardLimitEnabled" -> s.forwardLimitEnabled,
+      "reverseLimitEnabled" -> s.reverseLimitEnabled,
+      "homeSwitch"   -> s.homeSwitch,
+      "isStepper"    -> s.isStepper,
+      "motorOff"     -> s.motorOff,
+      // Mechanism configuration
+      "mechanismType" -> s.mechanismType.toString,
+      "algorithm"     -> s.algorithm.map(_.toString).getOrElse(""),
+      // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
+      "angularPosition"  -> s.angularPosition.getOrElse(0.0),
+      "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
+      // Soft limits (linear axes only)
+      "upperLimit" -> s.upperLimit.getOrElse[Double](0.0),
+      "lowerLimit" -> s.lowerLimit.getOrElse[Double](0.0),
+      "softLimitsEnabled" -> s.softLimitsEnabled,
+      // Motion configuration (from readMotionConfig + configAxis updates)
+      "maxSpeed"            -> s.maxSpeed.getOrElse[Double](0.0),
+      "acceleration"        -> s.acceleration.getOrElse[Double](0.0),
+      "deceleration"        -> s.deceleration.getOrElse[Double](0.0),
+      "indexOffset"          -> s.indexOffset.getOrElse[Double](0.0),
+      "indexSpeed"           -> s.indexSpeed.getOrElse[Double](0.0),
+      "inPositionThreshold" -> s.inPositionThreshold,
+      "axisName"            -> s.axisName.getOrElse(""),
+      // PVT tracking telemetry — populated by IS from CS's _PV/_BT readings during
+      // Tracking.  pvFreeSlots = 255 and btSegmentsExecuted = 0 outside of Tracking
+      // (auto-reset on transition out).  trackingSession is null outside Tracking.
+      "trackingSession"     -> trackingSessionJson,
+      "pvFreeSlots"         -> s.pvFreeSlots,
+      "btSegmentsExecuted"  -> s.btSegmentsExecuted
+    )
+  }
 
   // ── AxisCmdState → JSON ───────────────────────────────────────────────
 
