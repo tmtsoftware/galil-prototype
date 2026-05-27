@@ -738,8 +738,15 @@ class HmiServer(
 
       case "trackAxis" =>
         stringParam("axis").foreach(a => setup = setup.add(TrackAxisCommand.axisKey.set(a)))
-        numericParam("target").foreach(t => setup = setup.add(TrackAxisCommand.target1Key.set(t.toFloat)))
-        numericParam("target2").foreach(t => setup = setup.add(TrackAxisCommand.target2Key.set(t.toFloat)))
+        numericParam("position").foreach(p => setup = setup.add(TrackAxisCommand.positionKey.set(p.toFloat)))
+        numericParam("rate").foreach(r => setup = setup.add(TrackAxisCommand.rateKey.set(r.toFloat)))
+        // validTime: HMI sends an ISO-8601 UTC string (e.g. "2026-05-26T19:30:00Z") which we
+        // interpret as a TAI instant. (For HMI engineering use the UTC/TAI distinction is not
+        // important — real consumers go via the Assembly with its own time source.)
+        stringParam("validTime").foreach { s =>
+          val instant = java.time.Instant.parse(s)
+          setup = setup.add(TrackAxisCommand.validTimeKey.set(csw.time.core.models.TAITime(instant)))
+        }
 
       case "configAxis" =>
         stringParam("axis").foreach(a => setup = setup.add(ConfigAxisCommand.axisKey.set(a)))

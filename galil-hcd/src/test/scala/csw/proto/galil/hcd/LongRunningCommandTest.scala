@@ -145,15 +145,19 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
       case ("distance", v: Double) =>
         setup = setup.add(OffsetAxisCommand.distanceKey.set(v.toFloat))
       case ("position", v: Int) =>
+        // Int → SelectWheelCommand.positionKey (filter-wheel slot index)
         setup = setup.add(SelectWheelCommand.positionKey.set(v))
-      case ("target1", v: Float) =>
-        setup = setup.add(TrackAxisCommand.target1Key.set(v))
-      case ("target1", v: Double) =>
-        setup = setup.add(TrackAxisCommand.target1Key.set(v.toFloat))
-      case ("target2", v: Float) =>
-        setup = setup.add(TrackAxisCommand.target2Key.set(v))
-      case ("target2", v: Double) =>
-        setup = setup.add(TrackAxisCommand.target2Key.set(v.toFloat))
+      case ("position", v: Float) =>
+        // Float → TrackAxisCommand.positionKey (degrees rotating / counts linear)
+        setup = setup.add(TrackAxisCommand.positionKey.set(v))
+      case ("position", v: Double) =>
+        setup = setup.add(TrackAxisCommand.positionKey.set(v.toFloat))
+      case ("rate", v: Float) =>
+        setup = setup.add(TrackAxisCommand.rateKey.set(v))
+      case ("rate", v: Double) =>
+        setup = setup.add(TrackAxisCommand.rateKey.set(v.toFloat))
+      case ("validTime", v: csw.time.core.models.TAITime) =>
+        setup = setup.add(TrackAxisCommand.validTimeKey.set(v))
       case (key, value) =>
         fail(s"Unknown extra parameter: $key=$value")
     }
@@ -428,7 +432,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     MockCIActor.commands should contain("XQ #StopA,1")
   }
 
-  test("stopAxis should NOT signal commandHalted — interruption is handled by checkAndInterrupt before stopAxis runs") {
+  test("stopAxis from Tracking should NOT signal commandHalted — no embedded thread to interrupt under PVT") {
     val (handler, isActor, _) = createTestActors()
     setAxisTracking(isActor, Axis.A)
 
@@ -442,9 +446,10 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val setup = makeSetup("stopAxis", "A")
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
 
-    // stopAxis from Tracking does NOT signal commandHalted — #TrackX ends with EN so
-    // the thread has already released. checkAndInterrupt is only called from Moving/Homing.
-    // This test confirms the Tracking case runs #StopX directly without any interruption signal.
+    // Under PVT, Tracking has no embedded thread (no #TrackX program — segments run
+    // FIFO-driven on the controller).  handleStopAxis skips checkAndInterrupt for
+    // Tracking entirely and goes straight to #StopX, so commandHalted is never set.
+    // checkAndInterrupt is only invoked for Moving and Homing axes.
     var sawHalted = false
     val deadline = System.currentTimeMillis() + 500
     while (System.currentTimeMillis() < deadline) {
@@ -784,57 +789,34 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   // Section 7: trackAxis
   // ========================================
 
-  /**
-   * Simulate ControllerStatusActor QR updates for a completed track program.
-   * The #TrackX program sets JG velocity + IP, then ENDs.
-   * After program ends: thread is released BUT motor is still jogging (moving=true).
-   * The axis should remain in Tracking state after completion.
-   */
-  private def simulateTrackComplete(
-    isActor: ActorRef[InternalStateActor.Command],
-    axis: Axis,
-    delay: FiniteDuration = 50.millis
-  ): Unit =
-    Thread.sleep(delay.toMillis)
-
-    // SM sees thread active, motor moving (JG + BG has started)
-    val thread = axis.index + 1
-    isActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("activeThread" -> thread, "moving" -> true),
-      testKit.system.ignoreRef)
-    Thread.sleep(50)
-
-    // SM sees thread released (program ENDed), but motor is STILL jogging
-    // trackAxis mask: activeThread==0, axisErrorMsg=="" (moving NOT checked)
-    isActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("activeThread" -> 0),
-      testKit.system.ignoreRef)
-
-  test("trackAxis should send correct Galil commands") {
-    val (handler, isActor, _) = createTestActors()
-    val runId = Id()
-
-    setAxisIdle(isActor, Axis.A)
-    val setup = makeSetup("trackAxis", "A", Map("target1" -> 1000.0, "target2" -> 20.0))
-    handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
-    Thread.sleep(200)
-
-    val cmds = MockCIActor.commands
-    cmds should contain("Atarget[0]=1000.0;Atarget[1]=20.0")
-    cmds should contain("XQ #TrackA,1")
-
-    // Verify targets set before XQ
-    val tgtIdx = cmds.indexWhere(_.contains("Atarget"))
-    val xqIdx = cmds.indexOf("XQ #TrackA,1")
-    tgtIdx should be < xqIdx
-  }
+  // ============================================================================
+  // trackAxis tests
+  //
+  // Tests for the new ICD (position/rate/validTime).  This is currently a thin
+  // smoke test for the state-machine transition; the broader PVT behaviors
+  // (PVA wire format, T_samples math, FIFO acceptance Completion semantics,
+  // underrun preemption, multi-segment ledger evolution, deg→counts conversion
+  // on rotating axes) deserve dedicated coverage and don't have it yet.
+  // ============================================================================
 
   test("trackAxis should transition axisState to Tracking") {
     val (handler, isActor, _) = createTestActors()
     val runId = Id()
 
     setAxisIdle(isActor, Axis.A)
-    val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
+    // The handleTrackAxis PVT path requires HcdState.controllerSamplePeriodMicros > 0
+    // (this is read from the controller's `MG _TM` during HCD init in production;
+    // the mock-IS test fixture defaults to 0).  Without this seed the handler
+    // Errors with "controller sample period not yet known" before touching axisState.
+    isActor ! InternalStateActor.UpdateHcdState(
+      Map("controllerSamplePeriodMicros" -> 1000),  // standard 1 kHz servo loop
+      testKit.system.ignoreRef
+    )
+    Thread.sleep(50)
+
+    val vt = csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(2))
+    val setup = makeSetup("trackAxis", "A",
+      Map("position" -> 500.0, "rate" -> 10.0, "validTime" -> vt))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
     Thread.sleep(200)
 
@@ -843,83 +825,4 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     val axisState = probe.receiveMessage().get
     axisState.axisState should be(AxisStateEnum.Tracking)
     axisState.demand should be(500.0)
-  }
-
-  test("trackAxis should set activeCommand to Track then clear on completion") {
-    val (handler, isActor, _) = createTestActors()
-    val runId = Id()
-
-    setAxisIdle(isActor, Axis.A)
-    val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
-    handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
-    Thread.sleep(200)
-
-    // Verify activeCommand is Track while command is active
-    val probe1 = testKit.createTestProbe[Option[AxisCmdState]]()
-    isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe1.ref)
-    probe1.receiveMessage().get.activeCommand should be(Some(ActiveCommand.Track))
-
-    // Simulate: #TrackA program runs and ends
-    simulateTrackComplete(isActor, Axis.A)
-    Thread.sleep(300)
-
-    val probe = testKit.createTestProbe[Option[AxisCmdState]]()
-    isActor ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
-    val cmdState = probe.receiveMessage().get
-    cmdState.activeCommand should be(None)
-  }
-
-  test("trackAxis should complete but leave axis in Tracking state (not Idle)") {
-    val (handler, isActor, _) = createTestActors()
-    val runId = Id()
-
-    setAxisIdle(isActor, Axis.A)
-    val setup = makeSetup("trackAxis", "A", Map("target1" -> 500.0, "target2" -> 10.0))
-    handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
-    Thread.sleep(200)
-
-    // Simulate: #TrackA program runs and ends
-    simulateTrackComplete(isActor, Axis.A)
-    Thread.sleep(300)
-
-    // activeCommand should be cleared
-    val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
-    isActor ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
-    cmdProbe.receiveMessage().get.activeCommand should be(None)
-
-    // CRITICAL: axisState should remain Tracking, NOT Idle
-    val stateProbe = testKit.createTestProbe[Option[AxisState]]()
-    isActor ! InternalStateActor.GetAxisState(Axis.A, stateProbe.ref)
-    stateProbe.receiveMessage().get.axisState should be(AxisStateEnum.Tracking)
-  }
-
-  test("trackAxis with target2 omitted should only send position target") {
-    val (handler, isActor, _) = createTestActors()
-    val runId = Id()
-
-    setAxisIdle(isActor, Axis.A)
-    // Only provide target1, no target2
-    val setup = makeSetup("trackAxis", "A", Map("target1" -> 800.0))
-    handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
-    Thread.sleep(200)
-
-    val cmds = MockCIActor.commands
-    // Should only set Atarget[0], NOT Atarget[1] — preserves previous velocity
-    cmds should contain("Atarget[0]=800.0")
-    cmds.exists(_.contains("Atarget[1]")) should be(false)
-    cmds should contain("XQ #TrackA,1")
-  }
-
-  test("trackAxis on axis B should use correct target variable and thread") {
-    val (handler, isActor, _) = createTestActors(axes = Seq(Axis.A, Axis.B))
-    val runId = Id()
-
-    setAxisIdle(isActor, Axis.B)
-    val setup = makeSetup("trackAxis", "B", Map("target1" -> 200.0, "target2" -> 15.0))
-    handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
-    Thread.sleep(200)
-
-    val cmds = MockCIActor.commands
-    cmds should contain("Btarget[0]=200.0;Btarget[1]=15.0")
-    cmds.exists(_.startsWith("XQ #TrackB,")) should be(true)  // Thread is pool-allocated
   }

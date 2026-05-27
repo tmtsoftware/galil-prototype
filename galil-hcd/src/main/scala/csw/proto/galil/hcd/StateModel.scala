@@ -280,7 +280,17 @@ case class AxisState(
   indexSpeed: Option[Double] = None,
   motionDelay: Option[Double] = None,
   countsPerRevolution: Option[Double] = None,  // rotating axes only; read from embedded cpd[]
-  axisName: Option[String] = None              // human-readable mechanism name from config
+  axisName: Option[String] = None,             // human-readable mechanism name from config
+  /**
+   * Live PVT tracking-session ledger.  Some(_) iff axisState == Tracking; None otherwise.
+   * Created on the first trackAxis arriving in Idle (StartTracking → axisState Tracking).
+   * Updated on each subsequent trackAxis (ContinueTracking).  Cleared on stopAxis, fault,
+   * homeAxis, or MarkUnderrun.  See `TrackingSession` for field semantics.
+   *
+   * Invariant: axisState == Tracking ⇔ trackingSession.isDefined.  Any code path that
+   * transitions axisState into or out of Tracking is responsible for keeping this in sync.
+   */
+  trackingSession: Option[TrackingSession] = None
 ):
   /**
    * Calculate inPosition based on position, demand, and threshold.
@@ -413,6 +423,16 @@ case class AxisState(
         if v.nonEmpty then updated = updated.copy(axisName = Some(v))
       case ("axisName", v: Option[?]) =>
         updated = updated.copy(axisName = v.asInstanceOf[Option[String]])
+      // Tracking-session ledger.  Some(TrackingSession) sets/replaces the session;
+      // None clears it.  Whoever sets axisState = Tracking is responsible for also
+      // setting trackingSession in the same update map; whoever sets axisState to
+      // anything else is responsible for clearing it.
+      case ("trackingSession", v: TrackingSession) =>
+        updated = updated.copy(trackingSession = Some(v))
+      case ("trackingSession", None) =>
+        updated = updated.copy(trackingSession = None)
+      case ("trackingSession", v: Option[?]) =>
+        updated = updated.copy(trackingSession = v.asInstanceOf[Option[TrackingSession]])
       case (key, value) => 
         // Log unknown keys but don't fail
         println(s"Warning: Unknown axis state field: $key = $value")
@@ -423,6 +443,61 @@ case class AxisState(
       updated.copy(inPosition = updated.calculateInPosition)
     else
       updated
+
+// ========================================
+// Per-Axis Tracking Session State
+// ========================================
+
+/**
+ * Per-axis runtime state for an active PVT tracking session.
+ *
+ * Lifecycle:
+ *   - Created by InternalStateActor on the first `trackAxis` command arriving on an
+ *     axis in `axisState = Idle` (StartTracking message).  AxisState transitions to
+ *     Tracking simultaneously.
+ *   - Updated on each subsequent `trackAxis` command (ContinueTracking message):
+ *     `lastTargetCounts` and `lastValidTime` advance, `segmentsSubmitted` increments.
+ *   - Cleared by `stopAxis` (→ Idle), `EnterFaulted` (→ Error/Lost), `homeAxis`
+ *     (→ Homing), and `MarkUnderrun` (→ Error).  Holding axisState = Tracking with
+ *     no TrackingSession is an invariant violation.
+ *
+ * The session is the HCD-side ledger that lets us compute ΔP and T_samples for each
+ * outgoing PVA write from the absolute targets the Assembly supplies.  The Assembly
+ * cannot keep this state itself — its notion of "last sent" can diverge from what
+ * the HCD actually queued (HCD rejection, controller fault, mid-stream restart).
+ * The HCD is the only layer that knows both what the Assembly asked for and what
+ * the controller actually has.
+ *
+ * @param lastTargetCounts Encoder counts of the last segment endpoint successfully
+ *   written to the controller's PVT FIFO.  For rotating axes this is in raw motor
+ *   counts (unwrapped — accumulates across revolutions); the Assembly supplies
+ *   degrees, the HCD converts via `countsPerRevolution`.  For linear axes this is
+ *   the absolute target counts (passthrough — HCD is unit-blind for linear).  Used
+ *   as the prev-endpoint for the next segment's ΔP calculation.
+ *
+ * @param lastValidTime TAI instant at which the last submitted segment is supposed
+ *   to end (the `validTime` carried on the trackAxis that placed it in the FIFO).
+ *   Used for: (a) computing T_samples = (newValidTime - lastValidTime) × samples/sec
+ *   for the next segment, (b) underrun pre-detection in IS — when TAI now exceeds
+ *   `lastValidTime` and no new segment has arrived, the controller will subsequently
+ *   underrun silently, so IS transitions the axis to Error proactively.
+ *
+ * @param btFiredAt TAI instant when `BT<axis>` was sent to start trajectory execution.
+ *   Diagnostic only — useful for correlating HCD log timing with controller `_BT<x>`
+ *   segment-completion counter.
+ *
+ * @param segmentsSubmitted Monotonic count of PVA segments accepted into the FIFO
+ *   during this session.  Diagnostic only — for cross-checking against `_BT<x>` and
+ *   for log forensics if a session ends unexpectedly.  Resets to zero on session
+ *   start (it counts within a single BT epoch, parallel to how `_BT<x>` resets on
+ *   each new BT).
+ */
+case class TrackingSession(
+  lastTargetCounts: Long,
+  lastValidTime: Instant,
+  btFiredAt: Instant,
+  segmentsSubmitted: Long
+)
 
 // ========================================
 // Per-Axis Command State (CommandStateAxis)
@@ -539,7 +614,22 @@ case class HcdState(
   statusConnection:  ConnectionStatus = ConnectionStatus.Disconnected,
   consoleConnection: ConnectionStatus = ConnectionStatus.Disconnected,
   axes: Map[Axis, AxisState] = Map.empty,
-  cmdStates: Map[Axis, AxisCmdState] = Map.empty
+  cmdStates: Map[Axis, AxisCmdState] = Map.empty,
+  /**
+   * Controller servo-loop sample period in microseconds, read from the `_TM` operand
+   * during HCD initialization.  The default Galil servo loop runs at 1 kHz (TM=1000
+   * µs/sample); both lab DMC-50040 and STB DMC-4080 are configured this way and the
+   * PVT design assumes this value, but it can be reconfigured per-controller, so we
+   * read rather than hardcode.
+   *
+   * Used by `handleTrackAxis` to convert a delta in TAI time into the integer
+   * `T_samples` argument of `PVA<x>=ΔP,V,T`:
+   *     T_samples = round((newValidTime - prevValidTime) × 1e6 / controllerSamplePeriodMicros)
+   *
+   * Default 0 means "not yet read" — handleTrackAxis must check for this and
+   * complete Invalid (the HCD hasn't finished initializing) rather than divide by zero.
+   */
+  controllerSamplePeriodMicros: Int = 0
 ):
   /**
    * True when both command and status connections are established.
@@ -577,6 +667,7 @@ case class HcdState(
       case ("commandConnection", v: ConnectionStatus) => updated = updated.copy(commandConnection = v)
       case ("statusConnection",  v: ConnectionStatus) => updated = updated.copy(statusConnection = v)
       case ("consoleConnection", v: ConnectionStatus) => updated = updated.copy(consoleConnection = v)
+      case ("controllerSamplePeriodMicros", v: Int) => updated = updated.copy(controllerSamplePeriodMicros = v)
       case (key, value) => 
         println(s"Warning: Unknown HCD state field: $key = $value")
     }

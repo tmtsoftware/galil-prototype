@@ -198,14 +198,16 @@ class HcdIntegrationTest
           setup = setup.add(PositionAxisCommand.targetKey.set(d.toFloat))
         case d: Double if key == "distance" =>
           setup = setup.add(OffsetAxisCommand.distanceKey.set(d.toFloat))
-        case f: Float if key == "target1" =>
-          setup = setup.add(TrackAxisCommand.target1Key.set(f))
-        case d: Double if key == "target1" =>
-          setup = setup.add(TrackAxisCommand.target1Key.set(d.toFloat))
-        case f: Float if key == "target2" =>
-          setup = setup.add(TrackAxisCommand.target2Key.set(f))
-        case d: Double if key == "target2" =>
-          setup = setup.add(TrackAxisCommand.target2Key.set(d.toFloat))
+        case f: Float if key == "position" =>
+          setup = setup.add(TrackAxisCommand.positionKey.set(f))
+        case d: Double if key == "position" =>
+          setup = setup.add(TrackAxisCommand.positionKey.set(d.toFloat))
+        case f: Float if key == "rate" =>
+          setup = setup.add(TrackAxisCommand.rateKey.set(f))
+        case d: Double if key == "rate" =>
+          setup = setup.add(TrackAxisCommand.rateKey.set(d.toFloat))
+        case t: csw.time.core.models.TAITime if key == "validTime" =>
+          setup = setup.add(TrackAxisCommand.validTimeKey.set(t))
         case _ =>
           // Ignore unknown params
       }
@@ -973,113 +975,6 @@ class HcdIntegrationTest
     assert(pos == target.toDouble, s"Position should be $target, was: $pos")
   }
 
-  // ==========================================================================
-  // Test: trackAxis -- start tracking, verify state, stop
-  // Tracking is only implemented for axis A on the test bench.
-  // The #TrackA program expects Atarget[0] (position) and Atarget[1] (velocity).
-  // It sets JG at the target velocity, applies IP position correction, then ENDs.
-  // The motor continues jogging until stopAxis is issued.
-  // ==========================================================================
-
-  test("trackAxis should enter Tracking state and stopAxis should return to Idle") {
-    val commandService = getCommandService
-
-    // First, read the current position of axis A so we can start tracking near it
-    val initProbe = TestProbe[CurrentState]()
-    val initSub = commandService.subscribeCurrentState(
-      Set(StateName(CurrentStateAxisACurrentState.eventKey.eventName.name)),
-      cs => initProbe.ref ! cs
-    )
-    val initState = initProbe.receiveMessage(stateTimeout)
-    val currentPos = initState(CurrentStateAxisACurrentState.positionKey).head
-    initSub.cancel()
-    println(s"  trackAxis: current A position = $currentPos")
-
-    // Start tracking: position near current, slow rotation rate
-    val trackSetup = makeSetup("trackAxis", "axis" -> "A",
-      "target1" -> currentPos.toFloat, "target2" -> 20.0f)
-    val trackResponse = Await.result(commandService.submit(trackSetup), 5.seconds)
-    println(s"  trackAxis submit: $trackResponse")
-    assert(trackResponse.isInstanceOf[Started],
-      s"trackAxis should return Started, got: $trackResponse")
-
-    // The trackAxis command should complete (the #TrackA program runs and ENDs)
-    val trackResult = Await.result(
-      commandService.queryFinal(trackResponse.runId)(Timeout(commandTimeout)),
-      commandTimeout
-    )
-    println(s"  trackAxis final: $trackResult")
-    assert(trackResult.isInstanceOf[Completed],
-      s"trackAxis should complete, got: $trackResult")
-
-    // Verify axis A is in Tracking state (not Idle, not Moving)
-    val trackProbe = TestProbe[CurrentState]()
-    val trackSub = commandService.subscribeCurrentState(
-      Set(StateName(CurrentStateAxisACurrentState.eventKey.eventName.name)),
-      cs => trackProbe.ref ! cs
-    )
-    val trackState = trackProbe.receiveMessage(stateTimeout)
-    val trackAxisState = trackState(CurrentStateAxisACurrentState.axisStateKey).head
-    trackSub.cancel()
-    println(s"  trackAxis: axisState = ${trackAxisState.name}")
-    assert(trackAxisState.name == "tracking",
-      s"Axis A should be tracking, was: ${trackAxisState.name}")
-
-    // Let it track for a bit so we can verify motion
-    Thread.sleep(1000)
-
-    // Read position — it should have changed (motor is jogging)
-    val motionProbe = TestProbe[CurrentState]()
-    val motionSub = commandService.subscribeCurrentState(
-      Set(StateName(CurrentStateAxisACurrentState.eventKey.eventName.name)),
-      cs => motionProbe.ref ! cs
-    )
-    val motionState = motionProbe.receiveMessage(stateTimeout)
-    val trackingPos = motionState(CurrentStateAxisACurrentState.positionKey).head
-    motionSub.cancel()
-    println(s"  trackAxis: position after 1s of tracking = $trackingPos (started at $currentPos)")
-
-    // Now stop
-    val stopSetup = makeSetup("stopAxis", "axis" -> "A")
-    val stopResponse = Await.result(commandService.submit(stopSetup), 5.seconds)
-    println(s"  stopAxis submit: $stopResponse")
-    assert(stopResponse.isInstanceOf[Started],
-      s"stopAxis should return Started, got: $stopResponse")
-
-    val stopResult = Await.result(
-      commandService.queryFinal(stopResponse.runId)(Timeout(commandTimeout)),
-      commandTimeout
-    )
-    println(s"  stopAxis final: $stopResult")
-    assert(stopResult.isInstanceOf[Completed],
-      s"stopAxis should complete, got: $stopResult")
-
-    // Verify axis A returned to Idle and is no longer moving
-    Thread.sleep(500) // let state settle
-    val finalProbe = TestProbe[CurrentState]()
-    val finalSub = commandService.subscribeCurrentState(
-      Set(StateName(CurrentStateAxisACurrentState.eventKey.eventName.name)),
-      cs => finalProbe.ref ! cs
-    )
-    val finalState = finalProbe.receiveMessage(stateTimeout)
-    val finalAxisState = finalState(CurrentStateAxisACurrentState.axisStateKey).head
-    finalSub.cancel()
-    println(s"  After stop: axisState = ${finalAxisState.name}")
-    assert(finalAxisState.name == "idle",
-      s"Axis A should be idle after stopAxis, was: ${finalAxisState.name}")
-
-    // Verify motor is not moving via CommandStateAxisA
-    val cmdProbe = TestProbe[CurrentState]()
-    val cmdSub = commandService.subscribeCurrentState(
-      Set(StateName(CommandStateAxisACurrentState.eventKey.eventName.name)),
-      cs => cmdProbe.ref ! cs
-    )
-    val cmdState = cmdProbe.receiveMessage(stateTimeout)
-    val moving = cmdState(CommandStateAxisACurrentState.movingKey).head
-    cmdSub.cancel()
-    println(s"  After stop: moving = $moving")
-    assert(!moving, "Axis A should not be moving after stopAxis")
-  }
   // ── I/O Tests ────────────────────────────────────────────────────────────
 
   val ioStateName = StateName(InputOutputStateCurrentState.eventKey.eventName.name)

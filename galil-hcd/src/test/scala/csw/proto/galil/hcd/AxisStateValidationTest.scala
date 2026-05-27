@@ -143,8 +143,8 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
   // ========================================
 
   test("CommandWatcher reports Error when commandHalted is set — stopAxis context") {
-    val isActor = makeIsActorWithAxis(Axis.A, AxisStateEnum.Tracking,
-      activeCommand = Some(ActiveCommand.Track), activeThread = 1)
+    val isActor = makeIsActorWithAxis(Axis.A, AxisStateEnum.Moving,
+      activeCommand = Some(ActiveCommand.Move), activeThread = 1)
 
     val capture = ResultCapture()
     val runId = Id()
@@ -152,13 +152,13 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
     val config = CommandWatcherActor.WatchConfig(
       runId = runId,
       axis = Axis.A,
-      commandName = "trackAxis",
+      commandName = "positionAxis",
       activeThread = 1,
-      mask = CommandWatcherActor.CompletionMask.trackAxis,
+      mask = CommandWatcherActor.CompletionMask.positionAxis,
       timeout = 5.seconds,
       internalStateActor = isActor,
       commandResponseManager = null,
-      completionAxisState = AxisStateEnum.Tracking,
+      completionAxisState = AxisStateEnum.Idle,
       resultReporter = Some(capture.reporter)
     )
     testKit.spawn(CommandWatcherActor(config))
@@ -185,7 +185,7 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
       2.seconds)
     cmdState.map(_.commandHalted) shouldBe Some(false)
   }
-
+  
   test("CommandWatcher reports Error when commandHalted is set — positionAxis context") {
     val isActor = makeIsActorWithAxis(Axis.B, AxisStateEnum.Moving,
       activeCommand = Some(ActiveCommand.Move), activeThread = 2)

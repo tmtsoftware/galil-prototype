@@ -534,7 +534,11 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
             e(In,{value:trackPos,onChange:setTrackPos,ph:'pos',style:{flex:1}}),
             e(In,{value:trackVel,onChange:setTrackVel,ph:'vel',style:{width:46}}),
             e(Btn,{label:'Go',color:'#06B6D4',small:true,
-              onClick:()=>cmd('trackAxis',{target:trackPos,target2:trackVel})}))
+              onClick:()=>cmd('trackAxis',{
+                position:trackPos,
+                rate:trackVel,
+                validTime:new Date(Date.now()+2000).toISOString()
+              })}))
         : null));
 }
 

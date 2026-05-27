@@ -549,18 +549,38 @@ object GalilMotionKeys {
 
     }
 
-    /** Sets the specified axis into tracking mode with continuous target updates. */
+    /**
+     * Sets the specified axis into tracking mode by streaming a Position-Velocity-Time (PVT) segment to the controller. Each
+     * invocation supplies one absolute target state — position, rate, and the TAI time at which that state should hold — and
+     * completes when the segment is accepted into the controller's PVT FIFO. The first invocation on an Idle axis starts
+     * tracking; subsequent invocations append further segments. The axis remains in Tracking state until stopAxis is issued or a
+     * fault occurs. The Assembly is responsible for supplying segments at a cadence and lead time sufficient to keep the FIFO
+     * non-empty; the HCD detects underrun and transitions the axis to Error.
+     */
     object TrackAxisCommand {
       val commandName: CommandName = CommandName("trackAxis")
 
       /** The axis to track (A-H). */
       val axisKey: GChoiceKey = ChoiceKey.make("axis", "A", "B", "C", "D", "E", "F", "G", "H")
 
-      /** Primary tracking target value (e.g., absolute position). */
-      val target1Key: Key[Float] = FloatKey.make("target1")
+      /**
+       * Absolute target position at validTime. Units match positionAxis for the axis type: degrees for rotating axes, encoder
+       * counts for linear axes.
+       */
+      val positionKey: Key[Float] = FloatKey.make("position")
 
-      /** Secondary tracking parameter (e.g., desired velocity). */
-      val target2Key: Key[Float] = FloatKey.make("target2")
+      /**
+       * Target velocity at validTime (segment-end velocity). Units match the axis type: deg/sec for rotating, counts/sec for
+       * linear. Use 0 to bring the axis to rest at the target before any subsequent stopAxis.
+       */
+      val rateKey: Key[Float] = FloatKey.make("rate")
+
+      /**
+       * Absolute TAI time at which the (position, rate) state should be achieved. Must be strictly monotonically increasing
+       * across successive trackAxis calls on the same tracking session. Should be far enough in the future at submission time to
+       * maintain a non-empty PVT FIFO under the Assembly's chosen cadence (typically ~1.2 s lead for 1 Hz updates).
+       */
+      val validTimeKey: Key[TAITime] = TAITimeKey.make("validTime")
 
     }
 

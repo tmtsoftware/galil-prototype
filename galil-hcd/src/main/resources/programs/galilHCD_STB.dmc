@@ -150,7 +150,6 @@ DM speed[8]
 DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
-DM Dtarget[2]
 DM cpr[8]
 DM homing[8]
 ' default the motor parameters to those in flash EEPROM
@@ -204,9 +203,6 @@ mdelay[3]=200
 mdelay[4]=100
 mdelay[5]=100
 mdelay[6]=100
-REM sensible default track targets
-Dtarget[0]=0
-Dtarget[1]=20
 REM limit on the size of IP offset when tracking
 DIPLim=500
 MG "Controller Initialized"
@@ -507,10 +503,6 @@ MG "Motor A (ANT) MOVE to ",_TPA," in ",dtime0/tcon," sec"
 ae[0]=0
 EN
 REM ----------------------------------------------------------------------------
-#TrackA
-MG "Motor A (ANT) TRACK not supported"
-EN
-REM ----------------------------------------------------------------------------
 #StopA
 ae[0]=1
 STA
@@ -583,10 +575,6 @@ MG "Motor B (ATS) MOVE to ",_TPB," in ",dtime1/tcon," sec"
 ae[1]=0
 EN
 REM ----------------------------------------------------------------------------
-#TrackB
-MG "Motor B TRACK not supported"
-EN
-REM ----------------------------------------------------------------------------
 #StopB
 ae[1]=1
 STB
@@ -650,10 +638,6 @@ MG "Motor C (AVS) MOVE to ",_TPC," in ",dtime2/tcon," sec"
 ae[2]=0
 EN
 REM ----------------------------------------------------------------------------
-#TrackC
-MG "Motor C (AVS) TRACK not supported"
-EN
-REM ----------------------------------------------------------------------------
 #StopC
 ae[2]=1
 STC
@@ -707,24 +691,6 @@ dtime3=etime3-stime3
 tcon=1000000/_TM
 MG "Motor D (ALAR) MOVE to ",_TPD," in ",dtime3/tcon," sec"
 ae[3]=0
-EN
-REM ----------------------------------------------------------------------------
-#TrackD
-ae[3]=1
-REM D will track a dmd consisting of a rotational target and a rot velocity.
-REM simply JG at the expected velocity and use IP to adjust the
-REM absolute position as needed.
-JGD=Dtarget[1]
-MG "Motor D TRACK  from pos ",_TPD, " velo  ", _TVD
-MG "                 to pos ", Dtarget[0], " velo ", Dtarget[1]
-BGD
-IF (@ABS[(Dtarget[0]-_TPD)]>DIPLim)
- MG "Motor D TRACK IP adj too large (ignoring) ",(Dtarget[0]-_TPD)
-ELSE
- MG "Motor D TRACK  IP adj by  ", Dtarget[0]-_TPD
- IPD=Dtarget[0]-_TPD
- ae[3]=0
-ENDIF
 EN
 REM ----------------------------------------------------------------------------
 #StopD
@@ -793,10 +759,6 @@ dtime4=etime4-stime4
 tcon=1000000/_TM
 MG "Motor E (FSP-X) MOVE to ",_TDE," in ",dtime4/tcon," sec"
 ae[4]=0
-EN
-REM ----------------------------------------------------------------------------
-#TrackE
-MG "Motor E (FSP-X) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopE
@@ -869,10 +831,6 @@ MG "Motor F (FSP-Y) MOVE to ",_TDF," in ",dtime5/tcon," sec"
 ae[5]=0
 EN
 REM ----------------------------------------------------------------------------
-#TrackF
-MG "Motor F (FSP-Y) TRACK not supported"
-EN
-REM ----------------------------------------------------------------------------
 #StopF
 ae[5]=1
 STF
@@ -941,10 +899,6 @@ dtime6=etime6-stime6
 tcon=1000000/_TM
 MG "Motor G (FSP-Z) MOVE to ",_TDG," in ",dtime6/tcon," sec"
 ae[6]=0
-EN
-REM ----------------------------------------------------------------------------
-#TrackG
-MG "Motor G (FSP-Z) TRACK not supported"
 EN
 REM ----------------------------------------------------------------------------
 #StopG

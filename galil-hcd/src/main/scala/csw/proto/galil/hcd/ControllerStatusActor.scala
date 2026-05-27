@@ -278,6 +278,12 @@ class ControllerStatusActor(
   // axis state changes that imply error clearing (operator recovery via Home/Stop).
   private var lastReportedAxisError: Map[Axis, String] = Map.empty
 
+  // Set of axes currently in axisState == Tracking, derived from the IS
+  // StateChanged subscription.  Drives the per-scan PVT monitoring read
+  // (`MG _PV<x>,_BT<x>` for each tracking axis).  Empty when no axis is
+  // tracking, so the round-trip is skipped on cold poll cycles.
+  private var trackingAxes: Set[Axis] = Set.empty
+
   // Subscribe to IS axisState changes via message adapter.  Drives polling-rate
   // adaptation (1Hz standby / 10Hz when any axis is Homing/Moving/Tracking) and
   // dedupe-cache cleanup for lastReportedAxisError when an axis leaves Error.
@@ -612,6 +618,16 @@ class ControllerStatusActor(
       // Step 4: read ae[] for configured axes (graceful on parse failure).
       val aeValues: Map[Axis, Int] = readAeValues()
 
+      // Step 4b: PVT monitoring read for any axis currently tracking.  Single
+      // compound MG _PV<x>,_BT<x>,... round-trip; skipped if no axis is tracking.
+      // The observedAt timestamp is captured close to the read so the IS-side
+      // TAI comparison uses the moment the controller actually responded.
+      if trackingAxes.nonEmpty then
+        val pvtObservedAt = java.time.Instant.now()
+        val pvtReadings = readPvtMonitoring(trackingAxes)
+        if pvtReadings.nonEmpty then
+          internalState ! InternalStateActor.ReportPvtMonitoring(pvtReadings, pvtObservedAt)
+
       // Diagnostic: when an error is latched, log the raw inputs to the
       // attribution decision so post-mortem analysis of any unexpected fault
       // is possible without instrumenting further. Cheap (only fires on
@@ -747,6 +763,62 @@ class ControllerStatusActor(
           throw new java.io.IOException(s"_XQ read failed (status connection): ${ex.getMessage}", ex)
         case ex: Exception =>
           log.debug(s"_XQ read failed (non-IO, ignored): ${ex.getMessage}")
+          Map.empty
+
+  /**
+   * Read `MG _PV<x>,_BT<x>` for each tracking axis and return a Map[Axis, (freeFifoSlots, segmentsExecuted)].
+   *
+   * Used to monitor an active PVT tracking session:
+   *   - `_PV<x>` is the number of free segment slots in the per-axis PVT FIFO
+   *     (255 = empty, 0 = full).  Drives optional watermark warnings.
+   *   - `_BT<x>` is the count of segments executed since the most recent `BT<x>`.
+   *     Monotonic within a session; useful for cross-checking against
+   *     `TrackingSession.segmentsSubmitted` and as a diagnostic timing reference.
+   *
+   * Companion to `readAeValues` / `readXqValues`: single compound MG round-trip
+   * on the status connection.  The IS-side underrun detector reads the
+   * forwarded values relative to the per-session `lastValidTime`; we do not
+   * make the determination here (interpretation belongs with the data — IS
+   * owns the session ledger, S61 lesson).
+   *
+   * Behavior:
+   *   - If no axes are tracking: skip the round-trip, return Map.empty.
+   *   - On parse failure: returns Map.empty (the underrun detector will simply
+   *     not get a fresh reading this cycle; preemptive detection still fires
+   *     on the next clean read).
+   *   - On IOException: rethrows so the outer QR loop reports connection loss.
+   */
+  private def readPvtMonitoring(axes: Set[Axis]): Map[Axis, (Int, Int)] =
+    if axes.isEmpty then Map.empty
+    else
+      val sortedAxes = axes.toSeq.sortBy(_.index)
+      // Interleave _PV<x>,_BT<x> so token order matches axis order with stride 2.
+      val mgCmd = "MG " + sortedAxes.flatMap(a => Seq(s"_PV${a.char}", s"_BT${a.char}")).mkString(",")
+      try
+        val responses = statusIo.send(mgCmd)
+        val text      = responses.map(_._2.utf8String).mkString
+        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
+        val expected  = sortedAxes.length * 2
+        if tokens.length != expected then
+          log.debug(s"_PV/_BT read returned ${tokens.length} tokens, expected $expected; ignoring (text='${text.trim}')")
+          Map.empty
+        else
+          val parsed = sortedAxes.zipWithIndex.flatMap { (axis, i) =>
+            for
+              pv <- Try(tokens(2 * i).toDouble.toInt).toOption
+              bt <- Try(tokens(2 * i + 1).toDouble.toInt).toOption
+            yield axis -> (pv, bt)
+          }.toMap
+          if parsed.size != sortedAxes.length then
+            log.debug(s"_PV/_BT read produced unparseable tokens; ignoring (text='${text.trim}')")
+            Map.empty
+          else
+            parsed
+      catch
+        case ex: java.io.IOException =>
+          throw new java.io.IOException(s"_PV/_BT read failed (status connection): ${ex.getMessage}", ex)
+        case ex: Exception =>
+          log.debug(s"_PV/_BT read failed (non-IO, ignored): ${ex.getMessage}")
           Map.empty
 
   /**
@@ -1008,7 +1080,14 @@ class ControllerStatusActor(
 
     val anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
     val targetRate = if anyAxisActive then actionPollingRateHz else standbyPollingRateHz
-    
+
+    // Update cache of which axes are in Tracking, used by handleQRResponse to
+    // decide whether to poll _PV<x>/_BT<x>.  Recomputed on every state change
+    // (subscription is filtered to axisState changes only — cheap).
+    trackingAxes = hcdState.axes.collect {
+      case (axis, ax) if ax.axisState == AxisStateEnum.Tracking => axis
+    }.toSet
+
     if targetRate != pollingRateHz then
       val reason = if anyAxisActive then
         val activeAxes = hcdState.axes.collect {

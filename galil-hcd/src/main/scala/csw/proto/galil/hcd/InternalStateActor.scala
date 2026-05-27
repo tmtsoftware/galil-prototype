@@ -191,7 +191,38 @@ object InternalStateActor:
    * simplifies callers — no need to check current state before sending.
    */
   case class EnterFaulted(reason: String) extends Command
-  
+
+  /**
+   * Per-scan report from ControllerStatusActor with the latest `_PV<x>` (free FIFO slots)
+   * and `_BT<x>` (segments executed since last BT) readings for axes that ControllerStatusActor
+   * believes are currently tracking.
+   *
+   * IS's role on receipt: for each axis in the report, if `axisState == Tracking` and
+   * a `trackingSession` exists, evaluate the preemptive underrun condition:
+   *   - If TAI now > `session.lastValidTime` and no fresh `trackAxis` has arrived to
+   *     advance the ledger: transition the axis to Error with axisError =
+   *     "Tracking stream underrun" and clear the session.
+   *
+   * Watermark warnings (low free-slot count) are deferred to a future enhancement —
+   * the watermark policy hasn't been pinned down (1 slot? 2? configurable?), and the
+   * preemptive TAI check catches every underrun before the FIFO actually empties,
+   * so the warning is purely advance notice.
+   *
+   * If CS believes an axis is tracking but IS no longer does (race with stopAxis
+   * arrival), the IS-side handler simply ignores the entry for that axis — the
+   * authoritative source for the tracking lifecycle is IS, not the CS cache.
+   *
+   * @param readings Map[Axis, (freeFifoSlots, segmentsExecuted)]
+   * @param observedAt TAI/wall-clock instant the reading was taken (captured by CS
+   *   at the start of the read; carried so the IS-side TAI comparison uses the same
+   *   timestamp the controller actually responded to, not whenever the message is
+   *   eventually processed).
+   */
+  case class ReportPvtMonitoring(
+    readings: Map[Axis, (Int, Int)],
+    observedAt: java.time.Instant
+  ) extends Command
+
   // ========================================
   // Responses
   // ========================================
@@ -387,6 +418,10 @@ class InternalStateActor(
         handleEnterFaulted(reason)
         Behaviors.same
 
+      case ReportPvtMonitoring(readings, observedAt) =>
+        handleReportPvtMonitoring(readings, observedAt)
+        Behaviors.same
+
   /**
    * Transition the HCD into Faulted state, applying per-axis state transitions
    * for any axes that were in motion-related states.
@@ -422,10 +457,15 @@ class InternalStateActor(
 
       newStateOpt.foreach { newState =>
         log.info(s"EnterFaulted: axis $axis ${axisState.axisState} → $newState")
-        handleUpdateAxisState(axis,
-          Map("axisState" -> newState),
-          context.system.ignoreRef
-        )
+        // When the axis is leaving Tracking, also clear its tracking session ledger.
+        // The invariant is `axisState == Tracking ⇔ trackingSession.isDefined`; any
+        // path that breaks Tracking must clear the session in the same update.
+        val axisUpdates: Map[String, Any] =
+          if axisState.axisState == AxisStateEnum.Tracking then
+            Map("axisState" -> newState, "trackingSession" -> None)
+          else
+            Map("axisState" -> newState)
+        handleUpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
       }
 
       // Clear activeCommand if set — regardless of prior axisState.
@@ -435,6 +475,73 @@ class InternalStateActor(
             Map("clearActiveCommand" -> true),
             context.system.ignoreRef
           )
+      }
+    }
+
+  /**
+   * Evaluate per-axis PVT monitoring readings forwarded from ControllerStatusActor
+   * and apply preemptive underrun detection.
+   *
+   * For each axis in the report we check: is the axis still in `axisState = Tracking`
+   * AND does it have an active `trackingSession` AND is `observedAt` strictly later
+   * than the session's `lastValidTime`?  If so, the FIFO has executed past the most
+   * recent submitted segment without a fresh `trackAxis` advancing the ledger — the
+   * controller will silently stop the motor at the end of that segment (or already
+   * has).  We transition the axis to Error and clear the session.
+   *
+   * "Preemptive" means: we declare the fault as soon as TAI now > lastValidTime,
+   * which is at the instant the *last* segment finishes executing.  The controller
+   * itself will continue to honor the trailing portion of that segment but won't
+   * emit any error — silent underrun.  By declaring Error preemptively the assembly
+   * sees the fault immediately rather than after some indeterminate amount of
+   * post-FIFO-empty silence.
+   *
+   * If CS believes an axis is tracking but IS no longer does (e.g. stopAxis just
+   * arrived), we ignore that entry — IS is authoritative for the lifecycle.
+   *
+   * The free-FIFO-slots (`_PV`) and segments-executed (`_BT`) readings are not
+   * acted on here in S64; they are retained in the message shape for future
+   * watermark warnings and for diagnostic logging.
+   */
+  private def handleReportPvtMonitoring(
+    readings: Map[Axis, (Int, Int)],
+    observedAt: java.time.Instant
+  ): Unit =
+    readings.foreach { case (axis, (freeSlots, segmentsExecuted)) =>
+      currentState.axes.get(axis).foreach { axisState =>
+        if axisState.axisState == AxisStateEnum.Tracking then
+          axisState.trackingSession match
+            case Some(session) =>
+              if observedAt.isAfter(session.lastValidTime) then
+                val lateMicros =
+                  java.time.Duration.between(session.lastValidTime, observedAt).toNanos / 1_000L
+                log.warn(s"PVT underrun detected on axis $axis: TAI now $observedAt is " +
+                         s"${lateMicros}µs past lastValidTime ${session.lastValidTime} " +
+                         s"(_PV=$freeSlots free slots, _BT=$segmentsExecuted executed, " +
+                         s"${session.segmentsSubmitted} submitted)")
+                handleUpdateAxisState(axis,
+                  Map(
+                    "axisState"       -> AxisStateEnum.Error,
+                    "axisError"       -> "Tracking stream underrun",
+                    "trackingSession" -> None
+                  ),
+                  context.system.ignoreRef
+                )
+                // Clear activeCommand so HMI/subscribers see no command in flight.
+                handleUpdateAxisCmdState(axis,
+                  Map("clearActiveCommand" -> true),
+                  context.system.ignoreRef
+                )
+              else
+                log.debug(s"PVT monitor axis $axis: _PV=$freeSlots, _BT=$segmentsExecuted, " +
+                         s"${session.segmentsSubmitted} submitted, lastValidTime=${session.lastValidTime}")
+            case None =>
+              // axisState=Tracking but no session — invariant violation.  Log and let
+              // the next stopAxis / fault clean up.
+              log.warn(s"PVT monitor axis $axis: axisState=Tracking but no trackingSession " +
+                       s"(invariant violation); ignoring reading")
+        // else: axis no longer Tracking by IS's authoritative view — CS's cache is
+        // stale by one StateChanged delivery; ignore.
       }
     }
 
@@ -474,16 +581,37 @@ class InternalStateActor(
       
       // Apply updates
       currentState = currentState.updateAxis(axis, updates)
-      
+
+      // Invariant: axisError is meaningful only while axisState == Error.  Whenever
+      // a transition leaves Error (operator recovery via stopAxis/homeAxis, or any
+      // future automatic recovery), clear the axisError text so subscribers (HMI
+      // banner, future EventService publication) don't see stale Error-state text
+      // alongside the new non-Error axisState.
+      //
+      // Applied here (rather than asking every handler to remember "and clear
+      // axisError") so the invariant is declarative: "axisState != Error ⇒
+      // axisError == ''".  If a caller has explicitly set axisError in the same
+      // update, that wins — the auto-clear only fires when no axisError key was
+      // supplied (rare: only fault paths set it, and those simultaneously set
+      // axisState=Error so the auto-clear branch doesn't fire anyway).
+      val leavingError =
+        oldAxisState.exists(_.axisState == AxisStateEnum.Error) &&
+        currentState.getAxis(axis).exists(_.axisState != AxisStateEnum.Error)
+      if leavingError && !updates.contains("axisError") then
+        currentState = currentState.updateAxis(axis, Map("axisError" -> ""))
+
       // Get new axis state
       val newAxisState = currentState.getAxis(axis)
       
-      // Detect ALL changed fields (including auto-calculated ones like inPosition)
+      // Detect ALL changed fields (including auto-calculated ones like inPosition
+      // and the auto-cleared axisError above)
       val allChangedFields = (oldAxisState, newAxisState) match
         case (Some(oldAxis), Some(newAxis)) =>
           var changed = updates.keySet
           if oldAxis.inPosition != newAxis.inPosition then
             changed = changed + "inPosition"
+          if oldAxis.axisError != newAxis.axisError then
+            changed = changed + "axisError"
           changed
         case _ =>
           updates.keySet

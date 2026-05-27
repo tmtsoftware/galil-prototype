@@ -132,9 +132,23 @@ exact integer slot arithmetic.
 | **offsetAxis** | Move by relative distance | Idle, inPosition, thread released |
 | **homeAxis** | Home axis to reference | Idle, not moving, thread released |
 | **stopAxis** | Halt active motion | Idle (or Lost), not moving, thread released |
-| **trackAxis** | Jog-mode tracking | Tracking, thread released (motor continues) |
 | **selectWheel** | Position to discrete slot (0-7) | Idle, inPosition, thread released |
 | **positionWheel** | Position to angular demand (degrees) | Idle, inPosition, thread released |
+
+### Immediate (PVT-Streaming) Command
+
+| Command | Description | Completion |
+|---------|-------------|-----------|
+| **trackAxis** | Stream one PVT segment (`PV<x>=ΔP,V,T` + initial `BT<x>`) | Completed on FIFO acceptance |
+
+`trackAxis(axis, position, rate, validTime)` is the per-segment primitive for
+HCD-orchestrated tracking. Each call writes one PVT segment to the controller's
+per-axis FIFO; the controller does cubic-Hermite interpolation between segments
+to produce a smooth trajectory. The Assembly streams these at ~1 Hz (with FIFO
+slack — see the lead-margin discussion below), and the HCD owns absolute→relative
+conversion and underrun monitoring. The "tracking session" is a state in IS
+(`axisState = Tracking` plus a `trackingSession` ledger), not a long-running CSW
+command lifecycle. See the [Tracking](#tracking) section below.
 
 Move commands compute physics-based timeouts from the axis motor configuration
 (trapezoidal velocity profile with 2x safety factor, 3-second minimum).
@@ -211,9 +225,12 @@ and `galilHCD_STB.dmc` (STB DMC-4080).
 | `#MoveA`-`#MoveH` | Absolute position move (PA mode) |
 | `#HomeA`-`#HomeH` | Home sequence |
 | `#StopA`-`#StopH` | Controlled stop |
-| `#TrackA`-`#TrackH` | Jog-mode tracking with position/velocity targets |
 | `#SelectA`-`#SelectH` | Discrete 8-position wheel: `PA = dmd[idx] * (cpr[idx] / 8)` |
 | `#POSERR`, `#LIMSWI`, `#MCTIME`, `#CMDERR` | Controller-invoked fault handlers |
+
+Tracking is implemented in the HCD as direct PVT segment writes to the
+controller's per-axis FIFO — no embedded `#TrackX` programs (removed in S64
+when the architecture pivoted from JG+IP to PVT streaming).
 
 **Key embedded arrays:**
 - `cpr[8]` — counts per revolution (integer; written by HCD `writeMotionConfig()`)
@@ -224,7 +241,7 @@ and `galilHCD_STB.dmc` (STB DMC-4080).
 
 ### Embedded `ae[]` Convention
 
-Every motion program (`#HomeX`/`#MoveX`/`#SetupX`/`#TrackX`/`#StopX`) sets
+Every motion program (`#HomeX`/`#MoveX`/`#SetupX`/`#StopX`) sets
 `ae[axis]=1` on entry and clears `ae[axis]=0` only on the success path. Any abort
 (`#CMDERR` killing the thread, or an error handler exiting via `RE`/`RE1`) leaves
 `ae[axis]=1` (program error). The fault handlers also may set ae:
@@ -273,6 +290,101 @@ program so the prune is in place before the new `RegisterAxisThread`.
 compound. The `MG` runs in the same line buffer as `XQ`, before any program execution
 can complete or `#CMDERR`. This eliminates a previous race where a fast-completing or
 fast-failing program ended before a separate `MG _NO` query could observe it.
+
+---
+
+## Tracking
+
+The HCD implements tracking as direct PVT (Position-Velocity-Time) segment
+streaming to the controller's per-axis FIFO. There is no embedded `#TrackX`
+program — `trackAxis` is an HCD-orchestrated operation that talks PVT to the
+controller.
+
+### Wire format
+
+Per segment, the HCD writes `PV<axis>=ΔP,V,T` to the controller. The first
+segment of a tracking session also issues `BT<axis>` to begin trajectory
+execution. Subsequent segments only need the `PV<axis>=` write — the controller
+is already streaming through the FIFO.
+
+| Wire | Meaning |
+|------|---------|
+| `PVA=ΔP,V,T` | A-axis PVT segment. Third letter IS the axis (`PVB=` for B, `PVC=` for C, ...). There is no `PVAA=`. |
+| `BTA` | Begin trajectory for axis A. Project convention is always per-axis; bare `BT` (no axis) would start all axes with loaded segments. |
+| `_PVA` | A-axis FIFO free-slots count (255 = empty FIFO, 0 = full). Segments in flight = `255 - _PVA`. |
+| `_BTA` | A-axis segments executed since the most recent `BTA`. Resets on each new BT; not cumulative. |
+
+### Per-segment lifecycle
+
+`trackAxis(axis, position, rate, validTime)` from the Assembly:
+
+1. **Validate** envelope (axis, position, rate, validTime all present) and gate
+   on `controllerSamplePeriodMicros > 0` (set at init from `MG _TM`).
+2. **Convert** user units to counts: rotating axes use `value * cpr / 360`
+   (integer arithmetic); linear axes are passthrough.
+3. **Compute** `ΔP = positionCounts - prevEndpointCounts` and
+   `T_samples = round((validTime - prevValidTime) / samplePeriod)`.
+4. **Guard** against degenerate `(0,0,0)` (the controller treats this as
+   end-of-trajectory) and non-monotonic `validTime`.
+5. **Write** the wire string — first segment includes `;BT<x>`, subsequent
+   segments are `PV<x>=` only.
+6. **Update IS:** `axisState = Tracking`, `trackingSession = Some(TrackingSession(...))`,
+   record `lastTargetCounts`, `lastValidTime`, `segmentsSubmitted`.
+7. **Complete:** `crm.updateCommand(Completed(runId))` immediately on FIFO
+   acceptance. No watcher is spawned — trackAxis is `completionType=immediate`.
+
+The "tracking session" is a state in IS, not a long-running CSW command lifecycle.
+Per the invariant `axisState == Tracking ⇔ trackingSession.isDefined`, the session
+is set by the first `trackAxis` from `Idle`, updated by subsequent calls in
+`Tracking`, and cleared by `stopAxis` (on success path) or by `EnterFaulted`
+(atomically with Tracking → Error).
+
+### First-segment handling
+
+When `trackAxis` arrives in `axisState = Idle`, there is no previous segment to
+base ΔP on. HCD uses the polled motor position as `prevEndpointCounts` and
+`Instant.now()` as `prevValidTime`. The first segment thus carries the motor
+from its current physical position to the Assembly's first commanded position
+over the lead-time interval. `v_start = 0` is implicit (controller infers from
+rest). The Assembly is responsible for the first target being physically
+achievable.
+
+### Stopping
+
+`stopAxis` from `Tracking` bypasses `checkAndInterrupt` entirely (there's no
+embedded thread to halt under PVT) and runs `#StopX` directly. `#StopX`'s `STx`
+drains the FIFO and decelerates the motor to rest. `trackingSession` is cleared
+atomically with `axisState → Idle` on success.
+
+For graceful trajectory termination (decelerate-then-stop), the Assembly can
+submit a final `trackAxis(axis, target, rate=0, validTime)` to ramp velocity to
+zero before issuing `stopAxis`.
+
+### Underrun detection
+
+When any axis is in `Tracking`, `ControllerStatusActor` adds `_PV<x>,_BT<x>` to
+its QR-companion polls and forwards the readings to IS via
+`ReportPvtMonitoring(readings, observedAt)`. IS checks
+`observedAt > session.lastValidTime` per tracking axis; if true and the session
+is still active, the axis transitions to `Error` with
+`axisError = "Tracking stream underrun"` and `trackingSession` is cleared.
+
+Detection is preemptive — it fires before the controller's FIFO physically
+empties (the controller would then silently stop the motor with no error code).
+The Assembly observes the fault via `CurrentStateAxis` and can react.
+
+### Lead margin
+
+Tracking submissions must arrive with `validTime` sufficiently far in the
+future to keep the controller's FIFO non-empty between updates. The pattern
+used by `TrackInjectorApp` (the standalone lab test client in `galil-client`)
+is `validTime = now + 1/cadence + leadMargin`, where `leadMargin` is slack
+beyond the cadence period. At 1 Hz cadence with a 0.2 s lead margin, each
+segment's `validTime` is 1.2 s in the future — leaving the FIFO with ~1
+segment of slack while the next update is in flight.
+
+Lead-margin policy will ultimately be specified in the TCS-to-Assembly ICD;
+the HCD only enforces strict monotonicity of `validTime`.
 
 ---
 
@@ -548,9 +660,9 @@ sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusAct
 | ControllerStatusActorTest | 25 | QR polling, adaptive rate, analog input polling, `_XQ<n>` per-thread synthesis (authoritative over stale QR `threadStatus`), `ae[axis]` interpretation (codes 2/3/4 → POSERR/LIMSWI/MCTIME, S55 `NotifyAxisHalted` pruning) |
 | CommandHandlerActorTest | 16 | Immediate commands, validation, faultReset gating |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
-| LongRunningCommandTest | 29 | Motion command handlers |
+| LongRunningCommandTest | 24 | Motion command handlers |
 | RotatingMechanismTest | 26 | Approach algorithm, positionWheel, offsetAxis, no-cpr fallback |
-| AxisStateValidationTest | 14 | State machine rules, interruption mechanics, `stopCompletionState(homed)` |
+| AxisStateValidationTest | 13 | State machine rules, interruption mechanics, `stopCompletionState(homed)` |
 | IOTest | 17 | DIO bit extraction, setBit/clearBit dispatch, analog input polling |
 
 ### Controller/Simulator-Dependent Tests (no CSW services)

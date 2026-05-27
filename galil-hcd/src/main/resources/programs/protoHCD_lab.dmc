@@ -85,7 +85,6 @@ DM speed[8]
 DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
-DM Atarget[2]
 DM cpr[8]
 aeBusy=0
 ' default the motor parameters to those in flash EEPROM
@@ -135,9 +134,6 @@ mdelay[3]=100
 mdelay[4]=100
 mdelay[5]=100
 mdelay[6]=100
-' sensible default track targets
-Atarget[0]=0
-Atarget[1]=20
 MG "Controller Initialized"
 EN
 REM ----------------------------------------------------------------------------
@@ -328,21 +324,6 @@ tcon=1000000/_TM
 MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
 ae[1]=0
 EN
-
-#TrackA
-ae[0]=1
-' A will track a demand consisting of a rotational target and a rot velocity.
-' initial thoughts are to JG at the expected velocity and use IP to adjust the
-'  absolute position as needed.
-JGA=Atarget[1]
-MG "Motor A TRACK  from",_TDA, "  to pos ", Atarget[0], " velo ", Atarget[1]
-BGA
-MG "Motor A TRACK  IP adj by  ", Atarget[0]-_TDA
-IPA=Atarget[0]-_TDA
-WT 200
-MG "Motor A TRACK delta rem: ", Atarget[0]-_TDA
-ae[0]=0
-EN
 '
 #StopA
 ' a command to stop the motor
@@ -350,11 +331,6 @@ ae[0]=1
 STA
 MG "Motor A STOP"
 ae[0]=0
-EN
-'
-#TrackB
-' just a stub
-MG "Motor B TRACK not supported"
 EN
 '
 #StopB

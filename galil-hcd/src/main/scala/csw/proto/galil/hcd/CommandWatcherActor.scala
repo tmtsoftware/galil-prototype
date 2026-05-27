@@ -129,19 +129,6 @@ object CommandWatcherActor:
       moving = Some(false)
     )
 
-    /**
-     * trackAxis: thread released, no error.
-     * The #TrackX program sets JG velocity + IP position adjustment, then ENDs.
-     * After the program ends, the motor continues jogging (moving=true from QR).
-     * The axis remains in Tracking state until stopAxis is issued.
-     * Neither inPosition nor moving are checked — the program just needs to
-     * start successfully and release its thread without error.
-     */
-    val trackAxis: CompletionMask = CompletionMask(
-      activeThread = Some(0),
-      axisErrorMsg = Some("")
-    )
-
   // ========================================
   // Configuration for a watched command
   // ========================================

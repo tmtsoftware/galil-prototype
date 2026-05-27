@@ -809,6 +809,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         Future.successful(())
       }
       _ <- initController()
+      // Read the controller's servo-loop sample period (_TM, µs/sample) and stash
+      // it in HcdState.  PVT segment durations are expressed in samples on the
+      // wire, so handleTrackAxis converts (validTime delta in µs) / _TM to get
+      // T_samples.  _TM is a controller-global scalar set by the embedded #Init;
+      // typically 1000µs but read rather than hardcoded so a non-default servo
+      // rate would be honored.
+      _ <- readSamplePeriod()
       // Suspend QR polling during axis setup. BZ (Brushless Zero) commutation
       // pauses all controller communication per the Galil manual, causing QR
       // polls on the status connection to time out or return corrupt data.
@@ -1651,6 +1658,68 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *   - Report current configuration to Assemblies (future ICD extension)
    *   - Operate correctly in stand-alone testing before an Assembly calls configAxis
    */
+
+  /**
+   * Read the controller's servo-loop sample period (`_TM`, microseconds per sample)
+   * once at init and stash it in `HcdState.controllerSamplePeriodMicros`.
+   *
+   * `_TM` is the time base for the entire Galil controller — every motion timing
+   * primitive (jog speed, PVT segment duration, profiled-move duration, etc.) is
+   * expressed in samples.  Default is 1000 µs/sample (1 kHz servo loop) on both
+   * lab DMC-50040 and STB DMC-4080; the value is set by `TM <µs>` and can be
+   * reconfigured at runtime, so we read it rather than hardcode.
+   *
+   * Consumer: `CommandHandlerActor.handleTrackAxis` uses this to convert the PVT
+   * segment duration from microseconds (from `validTime` deltas) into integer
+   * samples for the `PVA<x>=ΔP,V,T` wire form.  Without this read, every
+   * `trackAxis` Errors with "controller sample period not yet known."
+   *
+   * Failure handling: if the read fails or returns a non-numeric response, log a
+   * warning and leave `controllerSamplePeriodMicros = 0` (the default).  The HCD
+   * continues to come up; only tracking is unavailable until the next successful
+   * read (e.g. after a `faultReset Init`).
+   */
+  private def readSamplePeriod(): Future[Unit] = {
+    import scala.concurrent.Await
+    import scala.concurrent.duration._
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+
+    implicit val askTimeout: org.apache.pekko.util.Timeout = org.apache.pekko.util.Timeout(3.seconds)
+    implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    log.debug("readSamplePeriod: MG _TM")
+    try {
+      val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
+        ref => GalilCommandMessage.SendCommand("MG _TM", ref)
+      )
+      val result = Await.result(future, 2.seconds)
+      result.error match {
+        case Some(err) =>
+          log.warn(s"readSamplePeriod: MG _TM failed ($err) — tracking will be unavailable")
+        case None =>
+          val text = result.response.trim
+          // `_TM` is reported as a real number (e.g. "1000.0000"); take the truncated
+          // integer value.  Anything <= 0 indicates a parse failure or impossible config.
+          text.toDoubleOption.map(_.toInt) match {
+            case Some(periodMicros) if periodMicros > 0 =>
+              internalStateActor ! InternalStateActor.UpdateHcdState(
+                Map("controllerSamplePeriodMicros" -> periodMicros),
+                ctx.system.ignoreRef
+              )
+              log.info(s"Controller sample period: _TM = ${periodMicros}µs " +
+                       s"(${1000000 / periodMicros} Hz servo loop)")
+            case _ =>
+              log.warn(s"readSamplePeriod: unparseable _TM response '$text' — tracking will be unavailable")
+          }
+      }
+    } catch {
+      case ex: Exception =>
+        log.warn(s"readSamplePeriod: exception ($ex) — tracking will be unavailable")
+    }
+
+    Future.successful(())
+  }
+
   /**
    * Write motion configuration from HCD config file to the controller's embedded variables.
    *
@@ -2332,9 +2401,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           setup(PositionWheelCommand.axisKey).head
           
         case "trackAxis" =>
-          setup(TrackAxisCommand.axisKey).head
-          setup(TrackAxisCommand.target1Key)
-          // target2 is optional per ICD
+          setup(TrackAxisCommand.positionKey)
+          setup(TrackAxisCommand.rateKey)
+          setup(TrackAxisCommand.validTimeKey)
           setup(TrackAxisCommand.axisKey).head
           
         case other =>
