@@ -1204,3 +1204,119 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     state.state shouldBe HcdStateEnum.Faulted
     state.initializingReason shouldBe ""
   }
+
+  // ========================================
+  // Tracking session invariant (S65)
+  //
+  // handleUpdateAxisState enforces declaratively: axisState != Tracking ⇒
+  // trackingSession == None.  The session ledger anchors the next PVA segment's
+  // ΔP/T; a stale ledger left behind after leaving Tracking would make the next
+  // trackAxis SEED from garbage and slam the motor / fault the controller.
+  // Leaving Tracking also resets the PVT telemetry readings to defaults.
+  // ========================================
+
+  private def trackingSession(segments: Long = 5L): TrackingSession =
+    TrackingSession(
+      lastTargetCounts  = 1000L,
+      lastValidTime     = Instant.now(),
+      btFiredAt         = Instant.now(),
+      segmentsSubmitted = segments
+    )
+
+  private def enterTracking(
+    actor: org.apache.pekko.actor.typed.ActorRef[InternalStateActor.Command],
+    axis: Axis,
+    session: TrackingSession,
+    extra: Map[String, Any] = Map.empty
+  ): Unit =
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    actor ! InternalStateActor.UpdateAxisState(
+      axis,
+      Map("axisState" -> AxisStateEnum.Tracking, "trackingSession" -> Some(session)) ++ extra,
+      probe.ref
+    )
+    probe.receiveMessage().success shouldBe true
+
+  private def axisStateOf(
+    actor: org.apache.pekko.actor.typed.ActorRef[InternalStateActor.Command],
+    axis: Axis
+  ): AxisState =
+    val q = testKit.createTestProbe[Option[AxisState]]()
+    actor ! InternalStateActor.GetAxisState(axis, q.ref)
+    q.receiveMessage().getOrElse(fail(s"axis $axis missing"))
+
+  test("leaving Tracking auto-clears trackingSession and resets PVT telemetry") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    val session = trackingSession()
+
+    // Enter Tracking with a session and non-default telemetry readings.
+    enterTracking(actor, Axis.A, session,
+      extra = Map("pvFreeSlots" -> 100, "btSegmentsExecuted" -> 7))
+    val tracking = axisStateOf(actor, Axis.A)
+    tracking.axisState shouldBe AxisStateEnum.Tracking
+    tracking.trackingSession shouldBe Some(session)
+
+    // Transition to Idle WITHOUT supplying a trackingSession key.
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("axisState" -> AxisStateEnum.Idle), probe.ref)
+    probe.receiveMessage().success shouldBe true
+
+    val idle = axisStateOf(actor, Axis.A)
+    idle.axisState shouldBe AxisStateEnum.Idle
+    idle.trackingSession shouldBe None         // auto-cleared
+    idle.pvFreeSlots shouldBe 255              // telemetry reset to default
+    idle.btSegmentsExecuted shouldBe 0
+  }
+
+  test("leaving Tracking to Error clears trackingSession (the historically-leaky path)") {
+    // CS.reportAxisError / CHA.setErrorState transition Tracking → Error without
+    // explicitly clearing the session; the declarative invariant must catch it.
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.B)))
+    enterTracking(actor, Axis.B, trackingSession())
+
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.B, Map("axisState" -> AxisStateEnum.Error), probe.ref)
+    probe.receiveMessage().success shouldBe true
+
+    val errored = axisStateOf(actor, Axis.B)
+    errored.axisState shouldBe AxisStateEnum.Error
+    errored.trackingSession shouldBe None
+  }
+
+  test("staying in Tracking preserves the trackingSession") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    val session = trackingSession()
+    enterTracking(actor, Axis.A, session)
+
+    // A position-only update while still Tracking must NOT clear the ledger.
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A, Map("position" -> 123.0), probe.ref)
+    probe.receiveMessage().success shouldBe true
+
+    val still = axisStateOf(actor, Axis.A)
+    still.axisState shouldBe AxisStateEnum.Tracking
+    still.trackingSession shouldBe Some(session)
+  }
+
+  test("an explicit trackingSession in the same update wins over the auto-clear") {
+    // The auto-clear only fires when no trackingSession key is supplied; a caller
+    // that sets one explicitly (e.g. re-seeding) keeps its value.
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    enterTracking(actor, Axis.A, trackingSession(segments = 1L))
+
+    val reseeded = trackingSession(segments = 99L)
+    val probe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+    actor ! InternalStateActor.UpdateAxisState(
+      Axis.A,
+      Map("axisState" -> AxisStateEnum.Idle, "trackingSession" -> Some(reseeded)),
+      probe.ref
+    )
+    probe.receiveMessage().success shouldBe true
+
+    val s = axisStateOf(actor, Axis.A)
+    s.axisState shouldBe AxisStateEnum.Idle
+    s.trackingSession shouldBe Some(reseeded)  // explicit value preserved
+  }

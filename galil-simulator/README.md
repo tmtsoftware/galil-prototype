@@ -1,7 +1,7 @@
 # Galil Simulator
 
 Simulates a Galil DMC-500x0 motion controller, enabling the full HCD integration
-test suite (`HcdIntegrationTest` — 18 tests) to run without hardware. The simulator
+test suite (`HcdIntegrationTest` — 17 tests) to run without hardware. The simulator
 also supports standalone Assembly and Sequencer development against a simulated HCD,
 and interactive testing via the REPL client.
 

@@ -835,3 +835,262 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     axisState.axisState should be(AxisStateEnum.Tracking)
     axisState.demand should be(500.0)
   }
+
+  // ============================================================================
+  // trackAxis PVT internals (S65)
+  //
+  // These exercise handleTrackAxis's segment arithmetic and the defensive guards
+  // added in S65, end-to-end through the real CommandHandlerActor against the
+  // MockCIActor.  The mock records the exact wire command, so we assert the
+  // computed PV<axis>=ΔP,V,T (and BT on the first segment) directly.
+  //
+  // Determinism note: the FIRST segment seeds prevValidTime from Instant.now(),
+  // so its T_samples carries a few-ms skew — those tests assert ΔP/V exactly and
+  // T by pattern.  CONTINUATION segments seed prevValidTime from the
+  // trackingSession ledger, so ΔP/V/T are all exact.
+  //
+  // CRM is null in this harness (as in the smoke test above): the guard and
+  // success paths both perform their observable side effects (wire write, IS
+  // update) BEFORE the trailing crm.updateCommand, so assertions on commandLog
+  // and IS state are unaffected by the null-CRM call that follows.
+  // ============================================================================
+
+  private val tmMicros = 1000  // _TM = 1 kHz servo loop
+
+  /** PV/BT wire commands the mock recorded this test (createTestActors clears it). */
+  private def pvWire: List[String] = MockCIActor.commands.filter(_.startsWith("PV"))
+
+  private def axisNow(isActor: ActorRef[InternalStateActor.Command], axis: Axis): AxisState =
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    isActor ! InternalStateActor.GetAxisState(axis, probe.ref)
+    probe.receiveMessage().getOrElse(fail(s"axis $axis missing"))
+
+  /** Seed an axis directly into Tracking with a known ledger, so the next
+    * trackAxis is treated as a deterministic continuation segment. */
+  private def seedTracking(
+    isActor: ActorRef[InternalStateActor.Command],
+    axis: Axis,
+    ledger: TrackingSession,
+    fields: Map[String, Any]
+  ): Unit =
+    isActor ! InternalStateActor.UpdateHcdState(
+      Map("controllerSamplePeriodMicros" -> tmMicros), testKit.system.ignoreRef)
+    isActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> AxisStateEnum.Tracking, "trackingSession" -> Some(ledger)) ++ fields,
+      testKit.system.ignoreRef)
+    Thread.sleep(50)
+
+  /** Seed an axis Idle with _TM and the given fields, ready for a first-segment
+    * trackAxis. */
+  private def seedIdle(
+    isActor: ActorRef[InternalStateActor.Command],
+    axis: Axis,
+    fields: Map[String, Any]
+  ): Unit =
+    isActor ! InternalStateActor.UpdateHcdState(
+      Map("controllerSamplePeriodMicros" -> tmMicros), testKit.system.ignoreRef)
+    isActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> AxisStateEnum.Idle) ++ fields, testKit.system.ignoreRef)
+    Thread.sleep(50)
+
+  private val t0 = java.time.Instant.parse("2026-01-01T00:00:00Z")
+  private def taiAfter(secs: Long) = csw.time.core.models.TAITime(t0.plusSeconds(secs))
+  // First-segment tests seed prevValidTime from Instant.now(), so their validTime
+  // must also be now-relative (a t0-anchored time would be in the past and trip
+  // the monotonic guard before the guard under test).
+  private def taiAfterNow(secs: Long) =
+    csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(secs))
+
+  // ---- arithmetic ----------------------------------------------------------
+
+  test("trackAxis linear continuation computes ΔP,V,T and emits PVA only (no BT)") {
+    val (handler, isActor, _) = createTestActors()
+    val ledger = TrackingSession(lastTargetCounts = 1000L, lastValidTime = t0,
+      btFiredAt = t0, segmentsSubmitted = 1L)
+    seedTracking(isActor, Axis.A, ledger, Map(
+      "mechanismType" -> MechanismType.Linear,
+      "maxSpeed"      -> 1000000.0
+    ))
+
+    // position 1500 counts, prev 1000 ⇒ ΔP=500; rate 200; gap 2s @1kHz ⇒ T=2000.
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 1500.0, "rate" -> 200.0, "validTime" -> taiAfter(2))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe List("PVA=500,200,2000")    // continuation: no ;BTA
+    val s = axisNow(isActor, Axis.A)
+    s.axisState shouldBe AxisStateEnum.Tracking
+    s.trackingSession.map(_.lastTargetCounts) shouldBe Some(1500L)
+    s.trackingSession.map(_.segmentsSubmitted) shouldBe Some(2L)
+  }
+
+  test("trackAxis rotating continuation converts degrees→counts via countsPerRevolution") {
+    val (handler, isActor, _) = createTestActors()
+    val ledger = TrackingSession(lastTargetCounts = 100L, lastValidTime = t0,
+      btFiredAt = t0, segmentsSubmitted = 1L)
+    seedTracking(isActor, Axis.A, ledger, Map(
+      "mechanismType"       -> MechanismType.Rotating,
+      "countsPerRevolution" -> 400.0,
+      "maxSpeed"            -> 1000000.0
+    ))
+
+    // 180° × 400/360 = 200 counts; prev 100 ⇒ ΔP=100; 36°/s × 400/360 = 40; gap 1s ⇒ T=1000.
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 180.0, "rate" -> 36.0, "validTime" -> taiAfter(1))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe List("PVA=100,40,1000")
+  }
+
+  test("trackAxis rotating wrap-correction takes the shortest arc across 0/360 (S65)") {
+    val (handler, isActor, _) = createTestActors()
+    // Prev endpoint 398 counts (≈358.2°).  Naive target for 2° is 2 counts ⇒ ΔP=-396
+    // (a ~356° backward spin).  Wrap correction must pick the +1-rev equivalent (402)
+    // ⇒ ΔP=+4 counts (≈+3.6° forward).
+    val ledger = TrackingSession(lastTargetCounts = 398L, lastValidTime = t0,
+      btFiredAt = t0, segmentsSubmitted = 1L)
+    seedTracking(isActor, Axis.A, ledger, Map(
+      "mechanismType"       -> MechanismType.Rotating,
+      "countsPerRevolution" -> 400.0,
+      "maxSpeed"            -> 1000000.0
+    ))
+
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 2.0, "rate" -> 10.0, "validTime" -> taiAfter(1))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe List("PVA=4,11,1000")        // +4, not -396
+    axisNow(isActor, Axis.A).trackingSession.map(_.lastTargetCounts) shouldBe Some(402L)
+  }
+
+  test("trackAxis first segment seeds from polled position and emits PVA;BT") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear,
+      "position"      -> 0.0,
+      "maxSpeed"      -> 1000000.0
+    ))
+
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 300.0, "rate" -> 50.0,
+            "validTime" -> csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(2)))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire should have size 1
+    val parts = pvWire.head.split(";")
+    parts(0) should fullyMatch regex """PVA=300,50,\d+"""   // ΔP=300, V=50, T≈2000
+    parts(1) shouldBe "BTA"                                  // first segment begins trajectory
+    val s = axisNow(isActor, Axis.A)
+    s.axisState shouldBe AxisStateEnum.Tracking
+    s.trackingSession.map(_.lastTargetCounts) shouldBe Some(300L)
+    s.trackingSession.map(_.segmentsSubmitted) shouldBe Some(1L)
+  }
+
+  // ---- guards (reject before the wire write; axis must not enter Tracking) ---
+
+  test("trackAxis rejects non-monotonic validTime") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 1000000.0))
+
+    // validTime in the past relative to the first-segment prev (= now).
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 100.0, "rate" -> 10.0,
+            "validTime" -> csw.time.core.models.TAITime(java.time.Instant.now().minusSeconds(5)))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("trackAxis rejects a segment whose ΔP exceeds the PVA position bound") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 1.0e9))
+
+    // ΔP = 50,000,000 > 44,000,000 (PvaMaxDeltaPosition); rate/T within bounds.
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 50000000.0, "rate" -> 100.0, "validTime" -> taiAfterNow(2))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("trackAxis rejects a segment whose T exceeds the PVA time bound") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 1000000.0))
+
+    // 3 s gap @1kHz ⇒ T≈3000 > 2048 (PvaMaxTSamples); ΔP/V small.
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 100.0, "rate" -> 10.0, "validTime" -> taiAfterNow(3))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("trackAxis rejects a requested rate above the configured maxSpeed") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 100.0))
+
+    // rate 500 > maxSpeed 100 (and within PVA V bound, so the envelope check is the one that trips).
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 50.0, "rate" -> 500.0, "validTime" -> taiAfterNow(2))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("trackAxis rejects an implied segment velocity above maxSpeed (stale-seed slam guard)") {
+    val (handler, isActor, _) = createTestActors()
+    seedIdle(isActor, Axis.A, Map(
+      "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 1000.0))
+
+    // ΔP=10000 over 1 s ⇒ implied 10000 counts/s > maxSpeed 1000, even though the
+    // requested rate (50) is within envelope.  This is the guard that stops the
+    // controller slamming the motor when the first target is far from the polled
+    // position with a short T.
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 10000.0, "rate" -> 50.0, "validTime" -> taiAfterNow(1))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("trackAxis rejects tracking on an axis with no configured maxSpeed") {
+    val (handler, isActor, _) = createTestActors()
+    // No maxSpeed set ⇒ None ⇒ reject (bounds/monotonic all pass first).
+    seedIdle(isActor, Axis.A, Map("mechanismType" -> MechanismType.Linear, "position" -> 0.0))
+
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("trackAxis", "A",
+        Map("position" -> 100.0, "rate" -> 10.0, "validTime" -> taiAfterNow(2))),
+      Id(), None)
+    Thread.sleep(200)
+
+    pvWire shouldBe empty
+    axisNow(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }

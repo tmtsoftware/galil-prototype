@@ -16,7 +16,7 @@ on the Galil controller, not in the HCD. The HCD's responsibilities are:
 - Execute programs by name (`XQ`) with dynamic thread allocation
 - Monitor controller state via QR binary data records (adaptive 1 Hz / 10 Hz polling)
 - Detect and surface controller-side errors (per-axis via `ae[]`, controller-level via `TC`)
-- Manage Faulted state and recovery (connection loss, controller errors, embedded program failures)
+- Manage Faulted state and recovery (connection loss, controller errors, embedded program failures, initialization failures)
 - Publish CSW CurrentState events for Assemblies to observe
 
 ### Actor Hierarchy

@@ -992,12 +992,12 @@ object CommandHandlerActor {
       case _ => rawTarget
     }
 
-    // Defensive soft-limit check.  The CSW path runs the same check in
-    // GalilHcd.validateAxisStateAndLimits before accepting the command, and the
-    // HMI path runs it in HmiServer.softLimitRejection before submitting.  This
-    // backstop catches any path that bypasses both — and is itself a no-op for
-    // rotating axes, axes with softLimitsEnabled=false, or axes whose limits are
-    // not configured.
+    // Defensive soft-limit check.  Both entry paths run the same envelope check
+    // before accepting the command (CSW: GalilHcd.validateAxisStateAndLimits;
+    // HMI: HmiServer.axisCommandRejection), each via CommandGate.checkSoftLimit.
+    // This backstop catches any path that bypasses both — and is itself a no-op
+    // for rotating axes, axes with softLimitsEnabled=false, or axes whose limits
+    // are not configured.
     maybeAxisState.flatMap(_.checkSoftLimit(target)) match {
       case Some(reason) =>
         val msg = s"positionAxis $axis: $reason"

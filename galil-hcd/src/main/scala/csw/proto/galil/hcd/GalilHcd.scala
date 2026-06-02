@@ -749,9 +749,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // (and by the HMI and CSW-validate gates that mirror it).  Doing the
       // transition AFTER runInitSequence completes guarantees that we only
       // flip to Ready if every step of init actually succeeded — if any
-      // step throws, we fall through to the catch below and stay in
-      // Uninitialized, which leaves the operator looking at a stuck-init view
-      // and able to Restart from the HMI to retry.
+      // step throws, we fall through to the catch below and come up Faulted.
       internalStateActor ! InternalStateActor.UpdateHcdState(
         Map(
           "state"              -> HcdStateEnum.Ready,
@@ -762,8 +760,22 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       log.info(s"Galil HCD initialized successfully (simulate=${hcdConfig.simulate})")
     } catch {
       case ex: Exception =>
-        log.error("Initialization failed", ex = ex)
-        throw ex
+        // Init failed.  We deliberately do NOT re-throw: throwing tears the
+        // component down (CSW stops the TLA → onShutdown → the HMI server and
+        // all actors go away), leaving no way to recover without restarting the
+        // process.  Instead we come up Faulted — the HMI server and actors are
+        // already started by this point, so the component still reaches Running
+        // and registers with Location Service, the HMI shows the fault with a
+        // Clear Fault control, and the operator recovers via faultReset
+        // (Init/Reload re-run runInitSequence) or Restart.  This makes a startup
+        // failure behave identically to a runtime fault, reusing the same
+        // recovery machinery — only possible because the faultReset work made
+        // runInitSequence safely repeatable.  EnterFaulted (not a raw state
+        // write) so per-axis transitions and initializingReason clearing are
+        // applied consistently with every other fault.
+        val reason = s"Initialization failed: ${ex.getMessage}"
+        log.error(reason, ex = ex)
+        internalStateActor ! InternalStateActor.EnterFaulted(reason)
     }
     
   }
@@ -799,6 +811,17 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    */
   private def runInitSequence(): Future[Unit] = {
     for {
+      // Suppress the status actor's per-scan ae[] read until #Init has
+      // dimensioned the embedded arrays.  On a freshly power-cycled controller
+      // (whose #AUTO no longer runs #Init) ae[] does not exist yet, and QR
+      // polling is already running here; an early `MG ae[i]` would latch
+      // controller error 57, which the post-#Init TC 1 check would then
+      // misattribute to #Init.  Re-asserted false on every (re)init — including
+      // the recovery paths that route through here — because Reset's RS clears
+      // the arrays.  Set true again right after initController below.
+      // (Wrapped in Future.successful so it can be the first comprehension step;
+      // the send runs eagerly when this generator is evaluated.)
+      _ <- Future.successful(statusMonitor ! ControllerStatusActor.SetEmbeddedArraysReady(ready = false))
       _ <- if (!hcdConfig.simulate) {
         for {
           _ <- verifyEmbeddedProgram()
@@ -811,6 +834,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         Future.successful(())
       }
       _ <- initController()
+      // #Init has now dimensioned ae[] et al. — re-enable the status actor's
+      // ae[] read (see SetEmbeddedArraysReady(false) at the top of this for).
+      _ = statusMonitor ! ControllerStatusActor.SetEmbeddedArraysReady(ready = true)
       // Read the controller's servo-loop sample period (_TM, µs/sample) and stash
       // it in HcdState.  PVT segment durations are expressed in samples on the
       // wire, so handleTrackAxis converts (validTime delta in µs) / _TM to get
@@ -1690,6 +1716,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
     log.debug("readSamplePeriod: MG _TM")
+    // _TM is required, not optional: PVT tracking expresses segment durations in
+    // controller samples (validTime delta / _TM), so without it the HCD cannot
+    // track.  There is no reason for _TM to be unreadable on a healthy
+    // controller, so any failure here fails initialization (HCD comes up
+    // Faulted) rather than silently disabling tracking.
     try {
       val future = controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
         ref => GalilCommandMessage.SendCommand("MG _TM", ref)
@@ -1697,7 +1728,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val result = Await.result(future, 2.seconds)
       result.error match {
         case Some(err) =>
-          log.warn(s"readSamplePeriod: MG _TM failed ($err) — tracking will be unavailable")
+          Future.failed(new RuntimeException(s"readSamplePeriod: MG _TM failed: $err"))
         case None =>
           val text = result.response.trim
           // `_TM` is reported as a real number (e.g. "1000.0000"); take the truncated
@@ -1710,16 +1741,15 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               )
               log.info(s"Controller sample period: _TM = ${periodMicros}µs " +
                        s"(${1000000 / periodMicros} Hz servo loop)")
+              Future.successful(())
             case _ =>
-              log.warn(s"readSamplePeriod: unparseable _TM response '$text' — tracking will be unavailable")
+              Future.failed(new RuntimeException(s"readSamplePeriod: unparseable _TM response '$text'"))
           }
       }
     } catch {
       case ex: Exception =>
-        log.warn(s"readSamplePeriod: exception ($ex) — tracking will be unavailable")
+        Future.failed(new RuntimeException(s"readSamplePeriod: exception reading _TM: ${ex.getMessage}", ex))
     }
-
-    Future.successful(())
   }
 
   /**
@@ -1758,13 +1788,22 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val axisNames = Seq("A", "B", "C", "D", "E", "F", "G", "H")
     val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
 
+    // Collect per-axis failures across all active axes so init reports a single,
+    // complete picture.  A non-empty list fails the returned Future, which fails
+    // initialization (and brings the HCD up Faulted) — motion config is not
+    // optional: running on stale EEPROM values when the config write failed
+    // would silently mis-drive the mechanism.
+    val failures = scala.collection.mutable.ListBuffer[String]()
+
     activeAxes.foreach { axisName =>
       val axis = Axis.fromChar(axisName.head)
       val idx = axis.index
 
       hcdConfig.axes.get(axisName) match {
         case None =>
-          log.warn(s"Axis $axisName active but no config entry found — skipping motion config write")
+          val msg = s"axis $axisName active but no config entry found"
+          log.error(s"Motion config: $msg — cannot write motion config")
+          failures += msg
 
         case Some(axisConfig) =>
           // Build compound command for all motion parameters
@@ -1819,11 +1858,17 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               s"speed=${axisConfig.maxSpeed}, accel=${axisConfig.acceleration}, " +
               s"decel=${axisConfig.deceleration}, cpr=${axisConfig.countsPerRevolution} " +
               s"(${chunks.size} chunk(s))")
+          } else {
+            failures += s"axis $axisName motion config write failed"
           }
       }
     }
 
-    Future.successful(())
+    if (failures.nonEmpty)
+      Future.failed(new RuntimeException(
+        s"Motion config write failed (${failures.mkString("; ")})"))
+    else
+      Future.successful(())
   }
 
   /**
@@ -2228,17 +2273,15 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         //   Faulted      — operator must clear the fault first; only
         //                  faultReset is permitted (legacy behavior).
         // Ready commands fall through to normal validation.
+        // Gate decision is shared with the HMI path via CommandGate; see that
+        // object for why the two paths must agree.  The CSW path exempts only
+        // faultReset during Faulted (setSoftLimits is an HMI-only action).
         val hcdState = queryHcdStateSync()
-        hcdState.state match
-          case HcdStateEnum.Uninitialized =>
-            log.warn(s"Command '$commandName' rejected: HCD is Uninitialized")
-            return CommandResponse.Invalid(runId, CommandIssue.OtherIssue("HCD Uninitialized — commands not yet accepted"))
-          case HcdStateEnum.Faulted if commandName != "faultReset" =>
-            val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
-                         else "HCD is Faulted"
+        CommandGate.checkHcdState(hcdState, commandName, Set("faultReset")) match
+          case Some(reason) =>
             log.warn(s"Command '$commandName' rejected: $reason")
-            return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(s"HCD Faulted: $reason"))
-          case _ => // Ready, or Faulted-with-faultReset — proceed
+            return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(reason))
+          case None => // Ready, or Faulted-with-faultReset — proceed
 
         // faultReset is handled directly by GalilHcd, not CommandHandlerActor,
         // so it is not in either CHA classification set.  Validate its
@@ -2464,8 +2507,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
       maybeState match {
         case Some(axisState) =>
-          // 1. State machine check first.
-          axisState.axisState.validateCommand(commandName) match {
+          // 1. State machine check first (SDD Figure 4-2) — shared with the
+          // HMI path and the CHA backstop via the canonical enum method.
+          CommandGate.checkAxisState(axisState, commandName) match {
             case Some(reason) =>
               log.warn(s"Command rejected: $commandName on axis $axis — $reason")
               return CommandResponse.Invalid(runId, CommandIssue.OtherIssue(reason))
@@ -2473,21 +2517,17 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               // Transition valid; fall through to soft-limit check.
           }
 
-          // 2. Soft-limit check for positionAxis and offsetAxis.
-          // For positionAxis the target is absolute; for offsetAxis it is the
-          // current axis position plus the requested distance, so we evaluate
-          // it against the same accumulated-count `position` field used elsewhere.
-          val maybeTarget: Option[Double] = commandName match {
-            case "positionAxis" =>
-              Some(setup(PositionAxisCommand.targetKey).head.toDouble)
-            case "offsetAxis" =>
-              Some(axisState.position + setup(OffsetAxisCommand.distanceKey).head.toDouble)
-            case _ => None
+          // 2. Soft-limit check for positionAxis and offsetAxis.  CommandGate
+          // resolves the absolute target (positionAxis = absolute target,
+          // offsetAxis = current position + distance) and applies the envelope.
+          val rawTarget: Option[Double] = commandName match {
+            case "positionAxis" => Some(setup(PositionAxisCommand.targetKey).head.toDouble)
+            case "offsetAxis"   => Some(setup(OffsetAxisCommand.distanceKey).head.toDouble)
+            case _              => None
           }
 
-          maybeTarget.flatMap(axisState.checkSoftLimit) match {
-            case Some(reason) =>
-              val msg = s"$commandName $axis rejected: $reason"
+          CommandGate.checkSoftLimit(axisState, commandName, axis.toString, rawTarget) match {
+            case Some(msg) =>
               log.warn(msg)
               CommandResponse.Invalid(runId, CommandIssue.ParameterValueOutOfRangeIssue(msg))
             case None =>

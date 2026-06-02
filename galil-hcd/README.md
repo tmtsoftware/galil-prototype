@@ -1,8 +1,8 @@
 # GalilMotion HCD
 
-The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-500x0
-motion controllers. It manages embedded program execution, state monitoring, error
-detection, fault recovery, and CSW event publishing for axes configured as either
+The Galil HCD implements the CSW Hardware Control Daemon interface for Galil DMC-400x0 
+and DMC-500x0 motion controllers. It manages embedded program execution, state monitoring, 
+error detection, fault recovery, and CSW event publishing for axes configured as either
 linear or rotating mechanisms.
 
 See the [CSW documentation](https://tmtsoftware.github.io/csw/6.0.0/) for how HCDs
@@ -122,7 +122,7 @@ exact integer slot arithmetic.
   Galil convention), `value` (int: 1=set, 0=clear). Sends `SB n` or `CB n` to controller.
 - **setAO** — Set an analog output channel. Parameters: `address` (int), `value` (float).
 - **faultReset** — Recover from a Faulted HCD state. Parameter: `severity` (Choice of
-  `None`, `Init`, `Minor`, `Major`). See [Fault Recovery](#fault-recovery) below for behavior.
+  `None`, `Init`, `Reset`, `Reload`). See [Fault Recovery](#fault-recovery) below for behavior.
 
 ### Long-Running Commands
 
@@ -156,7 +156,10 @@ Move commands compute physics-based timeouts from the axis motor configuration
 When the HCD is in `Faulted` state, every command except `faultReset` is rejected
 with `Invalid(OtherIssue("HCD Faulted: <msg>"))`. The check is enforced both in CSW
 `validateCommand` and in `HmiServer.handleCommandRequest` (the HMI bypasses CSW
-validation by going directly to `CommandHandlerActor`).
+validation by going directly to `CommandHandlerActor`). Both paths share one set of
+pure checks (`CommandGate`: HCD-state, axis-state-machine, soft-limit), so the HMI
+rejects axis-state-machine violations synchronously too — same rules as CSW, minus
+the HMI-only engineering escapes (`setSoftLimits`, engineering jog/stop).
 
 ### Rotating Axis Approach Algorithm
 
@@ -321,11 +324,20 @@ is already streaming through the FIFO.
 1. **Validate** envelope (axis, position, rate, validTime all present) and gate
    on `controllerSamplePeriodMicros > 0` (set at init from `MG _TM`).
 2. **Convert** user units to counts: rotating axes use `value * cpr / 360`
-   (integer arithmetic); linear axes are passthrough.
+   (integer arithmetic); linear axes are passthrough. For rotating axes the HCD
+   also **wrap-corrects** the target to the shortest-arc equivalent in accumulated
+   counts (the Assembly works in `[0,360)` and has no notion of accumulated
+   revolutions; the HCD picks the whole-revolution shift nearest the previous
+   endpoint so a `359° → 1°` step moves `+2°`, not `−358°`).
 3. **Compute** `ΔP = positionCounts - prevEndpointCounts` and
    `T_samples = round((validTime - prevValidTime) / samplePeriod)`.
-4. **Guard** against degenerate `(0,0,0)` (the controller treats this as
-   end-of-trajectory) and non-monotonic `validTime`.
+4. **Guard** the segment, rejecting (before any wire write) on: non-monotonic
+   `validTime`; sub-sample `T_samples < 1`; PVA argument bounds (`|ΔP| ≤ 44e6`,
+   `|V| ≤ 22e6`, `T ≤ 2048` samples — the controller would otherwise reject with
+   `?` and fault the HCD); the configured per-axis velocity envelope (`maxSpeed`,
+   checked against both the requested rate *and* the implied average velocity
+   `|ΔP|/T` — the latter catches a far-from-target first segment that would slam
+   the motor); and the degenerate `(0,0,0)` end-of-trajectory tuple.
 5. **Write** the wire string — first segment includes `;BT<x>`, subsequent
    segments are `PV<x>=` only.
 6. **Update IS:** `axisState = Tracking`, `trackingSession = Some(TrackingSession(...))`,
@@ -335,9 +347,11 @@ is already streaming through the FIFO.
 
 The "tracking session" is a state in IS, not a long-running CSW command lifecycle.
 Per the invariant `axisState == Tracking ⇔ trackingSession.isDefined`, the session
-is set by the first `trackAxis` from `Idle`, updated by subsequent calls in
-`Tracking`, and cleared by `stopAxis` (on success path) or by `EnterFaulted`
-(atomically with Tracking → Error).
+is set by the first `trackAxis` from `Idle` and updated by subsequent calls in
+`Tracking`. Clearing is enforced **declaratively** in `handleUpdateAxisState`: any
+transition out of `Tracking` (stopAxis, fault, underrun, an embedded `#POSERR`/
+`#LIMSWI`/`#MCTIME` error, or re-init) clears the ledger in the same update, so a
+stale ledger can never seed the next session's ΔP/T.
 
 ### First-segment handling
 
@@ -404,6 +418,12 @@ Per-axis embedded program errors surface via `ae[]`. Each QR scan,
    **Order matters: QR before `ae` reads** — the reverse order races with successful
    program endings (the program clears `ae=0` after we read it but before QR shows
    the thread cleared, giving us a stale `ae=1` to misattribute).
+   These `ae[]` reads stay suppressed until `#Init` has dimensioned the array: the
+   HCD gates them on a `SetEmbeddedArraysReady` flag that `runInitSequence` asserts
+   only after `#Init` completes (and re-clears on every re-init). Reading an
+   undimensioned `ae[]` makes the controller latch error 57, which on a cold boot —
+   where `#AUTO` no longer auto-runs `#Init` — would otherwise surface as a spurious
+   error latch misattributed to the next `#Init`.
 4. Decide per-axis errors:
    - `ae[i]=2/3/4` → report per-axis as POSERR/LIMSWI/MCTIME (deduplicated via
      `lastReportedAxisError` so repeated values don't spam IS).
@@ -463,13 +483,25 @@ expiry on long-idle connections.
 ### Faulted State
 
 The `Faulted` HCD state is triggered by any of: a controller error latch, loss of
-the command or status TCP connection, or an embedded program error that cannot be
-cleanly attributed to a single axis. All three feed through
+the command or status TCP connection, an embedded program error that cannot be
+cleanly attributed to a single axis, or a failure during the initialization
+sequence. All feed through
 `InternalStateActor.EnterFaulted(reason)`, which atomically:
 
 - Sets `HcdState.state = Faulted` and `HcdState.controllerErrorMsg = reason`
 - Per-axis transitions: `Homing → Lost`, `Moving/Tracking → Error`
 - Clears any active commands
+
+**Initialization failure comes up Faulted, not dead.** A fatal init step (a `#Init`
+error, a motion-config write failure, or a `_TM` read failure) does not throw out of
+`initialize()` — that would tear the component down and take the HMI with it.
+Instead the HCD logs the cause, calls `EnterFaulted`, and returns normally, so it
+still reaches CSW `Running` and registers with the HMI up. The operator recovers
+with `faultReset` (which re-runs the init sequence), exactly as for a runtime fault —
+this is only safe because the `faultReset` work made `runInitSequence` repeatable.
+Embedded-program **verification** mismatches are deliberately *not* fatal (they only
+warn), so engineering changes to the controller program are allowed; if a mismatch
+is a real problem, recover via a `faultReset` that reloads the embedded program.
 
 When CS (rather than CC) detects a controller error, it additionally fires a
 fire-and-forget `ST;MO` compound via `commandActor` to safe all motors and disable
@@ -482,21 +514,26 @@ its in-flight command immediately when `Faulted` arrives, with the
 ### Fault Recovery
 
 The `faultReset` command (SDD Section 4.6.4) recovers from `Faulted`. The
-`severity` parameter selects the level of intervention:
+`severity` parameter selects the level of intervention, in increasing order. Every
+severity first **gates on connection health** — it verifies both controller TCP
+connections, reopening any that dropped (see below) — and fails the recovery
+(leaving the HCD `Faulted` with a clear reason) if a connection can't be restored.
+All four are implemented.
 
 | Severity | Behavior |
 |----------|----------|
-| **None** | Test existing sockets; reconnect any that have dropped; clear the controller error latch; transition HCD `Faulted → Ready`. Implemented. |
-| **Init** | Reconnect dropped connections and re-run `#Init` and `#SetupX`. Not yet implemented. |
-| **Minor** | Reset the controller and re-initialize. Not yet implemented. |
-| **Major** | Reload embedded code and re-initialize. Not yet implemented. |
+| **None** | Connection gate only: clear the controller error latch and `controllerErrorMsg`, then `Faulted → Ready`. No further controller interaction. |
+| **Init** | Connection gate, then re-run the init phase against the program already loaded — `#Init`, `#SetupX`, motion-config write, limit read. `Faulted → Uninitialized → Ready` (or back to `Faulted` if an init step fails). |
+| **Reset** | Connection gate, then send `RS` to reboot the controller, reconnect all three TCP handles (command/status/console), then re-run the init phase. |
+| **Reload** | Connection gate, then upload fresh embedded code from the repository (`DL`), burn it to EEPROM (`BP`), re-verify, then re-run the init phase. No `RS`: `DL` already replaces the running program in controller RAM, so adding `RS` would only force an unneeded reconnect cycle (and risk controller-side TCPERR/error 123, as seen on the STB). TCP stays connected throughout. |
 
-**Reconnection (None severity):** `handleFaultReset` asks the command actor and the
-status actor to `Reconnect`, sequentially. Each actor first verifies its existing
-socket (the connection may have healed on its own — cable blip, OS recovery) by
-sending a benign probe (`MG 0` for command, drained-then-`QR` for status). On verify
-success, no socket close is needed. On verify failure, the actor closes the dead
-socket and opens a fresh `GalilIoTcp`.
+**Connection gate (all severities):** `verifyConnectionsAliveEither` asks the command
+actor and the status actor to `Reconnect`, sequentially. Each actor first verifies its
+existing socket (the connection may have healed on its own — cable blip, OS recovery)
+by sending a benign probe (`MG 0` for command, drained-then-`QR` for status). On verify
+success, no socket close is needed. On verify failure, the actor closes the dead socket
+and opens a fresh `GalilIoTcp`. (`Reset` additionally reconnects the console handle as
+part of its `RS` sequence.)
 
 **Status post-reconnect housekeeping:** drain any stale buffered data, call `TC 1`
 to read and log the controller's disconnect-time error (typically
@@ -650,20 +687,23 @@ The browser-side HMI infrastructure:
 ```bash
 sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusActorTest \
   *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest \
-  *RotatingMechanismTest *AxisStateValidationTest *IOTest"
+  *RotatingMechanismTest *AxisStateValidationTest *IOTest *CommandGateTest \
+  *ProgramFileManagerTest"
 ```
 
 | Suite | Tests | Coverage |
 |-------|------:|---------|
 | GalilHcdConfigTest | 9 | Config parsing, countsPerRevolution |
-| InternalStateActorTest | 63 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, `EnterFaulted` transitions (Homing→Lost, Moving/Tracking→Error, activeCommand clearing, idempotency) |
-| ControllerStatusActorTest | 25 | QR polling, adaptive rate, analog input polling, `_XQ<n>` per-thread synthesis (authoritative over stale QR `threadStatus`), `ae[axis]` interpretation (codes 2/3/4 → POSERR/LIMSWI/MCTIME, S55 `NotifyAxisHalted` pruning) |
+| InternalStateActorTest | 67 | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, `EnterFaulted` transitions, `trackingSession` invariant (auto-clear on leaving Tracking) |
+| ControllerStatusActorTest | 30 | QR polling, adaptive rate, analog input polling, `_XQ<n>` per-thread synthesis, `ae[axis]` interpretation (2/3/4 → POSERR/LIMSWI/MCTIME, S55 `NotifyAxisHalted` pruning), `ae[]` startup gating (`SetEmbeddedArraysReady`) |
 | CommandHandlerActorTest | 16 | Immediate commands, validation, faultReset gating |
 | CommandWatcherActorTest | 15 | Completion mask evaluation |
-| LongRunningCommandTest | 24 | Motion command handlers |
+| LongRunningCommandTest | 34 | Motion command handlers; trackAxis PVT internals (ΔP/V/T arithmetic, deg→counts, 0/360 wrap correction, PVA-bound and velocity-envelope guards) |
 | RotatingMechanismTest | 26 | Approach algorithm, positionWheel, offsetAxis, no-cpr fallback |
-| AxisStateValidationTest | 13 | State machine rules, interruption mechanics, `stopCompletionState(homed)` |
+| AxisStateValidationTest | 14 | State machine rules, interruption mechanics, `stopCompletionState(homed)` |
 | IOTest | 17 | DIO bit extraction, setBit/clearBit dispatch, analog input polling |
+| CommandGateTest | 19 | Shared command-gate checks (HCD-state, axis-state-machine, soft-limit) and CSW/HMI parity |
+| ProgramFileManagerTest | 14 | DL upload prep (REM/blank strip, 80-char compression + guard), `compressLine`, LS-download parsing |
 
 ### Controller/Simulator-Dependent Tests (no CSW services)
 
@@ -680,18 +720,18 @@ sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator
 ```bash
 # Against lab hardware:
 sbt -Dgalil.config.path=GalilHcdConfig-Hardware.conf \
-    "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~50s
+    "galil-hcd/testOnly *HcdIntegrationTest"               # 17 tests, ~50s
 
 # Against simulator:
 sbt "galil-simulator/run"
 sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf \
-    "galil-hcd/testOnly *HcdIntegrationTest"               # 18 tests, ~45s
+    "galil-hcd/testOnly *HcdIntegrationTest"               # 17 tests, ~45s
 ```
 
 ### Simulator Tests
 
 ```bash
-sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
+sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 102 tests
 ```
 
 ### Full Test Summary
@@ -699,18 +739,20 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"    # 73 tests
 | Suite | Tests | Dependencies |
 |-------|------:|-------------|
 | GalilHcdConfigTest | 9 | None |
-| InternalStateActorTest | 63 | None |
-| ControllerStatusActorTest | 25 | None |
+| InternalStateActorTest | 67 | None |
+| ControllerStatusActorTest | 30 | None |
 | CommandHandlerActorTest | 16 | None |
 | CommandWatcherActorTest | 15 | None |
-| LongRunningCommandTest | 29 | None |
+| LongRunningCommandTest | 34 | None |
 | RotatingMechanismTest | 26 | None |
 | AxisStateValidationTest | 14 | None |
 | IOTest | 17 | None |
+| CommandGateTest | 19 | None |
+| ProgramFileManagerTest | 14 | None |
 | ControllerCommandActorTest | 16 | Hardware or Simulator (no CSW services) |
 | CurrentStatePublisherActorTest | 4 | Simulator (no CSW services) |
-| HcdIntegrationTest | 18 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
-| GalilSimulatorActorTest | 73 | None |
-| **Total** | **325** | |
+| HcdIntegrationTest | 17 | Hardware or Simulator + FrameworkTestKit (no csw-services) |
+| GalilSimulatorActorTest | 102 | None |
+| **Total** | **400** | |
 
 The HCD depends on `galil-io` for the controller wire protocol. That module has its own unit-test suite (`galil-io/GalilIoTest`, 45 tests) covering `writeRaw` / `send` (single + compound) / `sendAndWaitForPrompt` / `downloadProgram` / `uploadProgram` (including the DL `?`-rejection path and read-timeout save/restore) / `chunkCompound` and the 80-character line guard.  Run with `sbt "galil-io/test"`.

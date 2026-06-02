@@ -1072,3 +1072,42 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     // No error — the prune kept axis A out of axesWithClearedThread.
     cmdProbe.receiveMessage().get.axisErrorMsg shouldBe ""
   }
+
+  test("ae[] reads are gated on SetEmbeddedArraysReady (startup suppression)") {
+    // Before #Init, ae[] is not dimensioned on the controller, so reading it
+    // would make the controller latch error 57 ("Bad function or array"), which
+    // the post-#Init TC 1 check then misattributes to #Init.  The status actor
+    // must therefore withhold the ae[] read until GalilHcd signals
+    // SetEmbeddedArraysReady(true) (sent right after #Init).  This test drives
+    // the gate directly: with it closed, a scan carrying ae[A]=2 must produce
+    // NO per-axis error; once opened via the message, the same ae[A]=2 reports
+    // the POSERR error.
+    val internalState = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
+    ))
+    val liveThreads = scala.collection.mutable.Set[Int]()
+    val ae = scala.collection.mutable.Map[Int, Int](Axis.A.index -> 2)
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithThreadsAndAe(liveThreads, ae),
+        internalState, loggerFactory, standbyPollingRateHz = 10.0, actionPollingRateHz = 10.0,
+        configuredAxes = Set(Axis.A, Axis.B), embeddedArraysReady = false)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+
+    // Gate closed: the ae[] read is suppressed, so ae[A]=2 is never observed.
+    sm ! ControllerStatusActor.QRResponse(createExtendedDataRecord(threadStatus = 0x00.toByte))
+    Thread.sleep(150)
+    val probe1 = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe1.ref)
+    probe1.receiveMessage().get.axisErrorMsg shouldBe ""
+
+    // Open the gate (as GalilHcd does right after #Init) and scan again — now
+    // the ae[] read fires and the POSERR is attributed to axis A.
+    sm ! ControllerStatusActor.SetEmbeddedArraysReady(ready = true)
+    sm ! ControllerStatusActor.QRResponse(createExtendedDataRecord(threadStatus = 0x00.toByte))
+    Thread.sleep(150)
+    val probe2 = testKit.createTestProbe[Option[AxisCmdState]]()
+    internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe2.ref)
+    probe2.receiveMessage().get.axisErrorMsg shouldBe "Position error exceeded limit"
+  }

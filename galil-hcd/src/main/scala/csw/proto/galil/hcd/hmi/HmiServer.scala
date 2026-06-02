@@ -300,18 +300,14 @@ class HmiServer(
       //                  because it's an HMI-internal flag flip useful
       //                  for preparing limit-switch tests before recovery.
       // Ready commands fall through to normal handling.
+      // Shared with the CSW path via CommandGate; the HMI exempts both
+      // faultReset and the HMI-only setSoftLimits action during Faulted.
       val hcdState = queryHcdStateForHmi()
-      hcdState.state match
-        case HcdStateEnum.Uninitialized =>
-          log.warn(s"HMI command '${request.commandName}' rejected: HCD is Uninitialized")
-          return commandResponseJson(runId.id, "Error", "HCD Uninitialized — commands not yet accepted")
-        case HcdStateEnum.Faulted
-             if request.commandName != "faultReset" && request.commandName != "setSoftLimits" =>
-          val reason = if hcdState.controllerErrorMsg.nonEmpty then hcdState.controllerErrorMsg
-                       else "HCD is Faulted"
+      CommandGate.checkHcdState(hcdState, request.commandName, Set("faultReset", "setSoftLimits")) match
+        case Some(reason) =>
           log.warn(s"HMI command '${request.commandName}' rejected: $reason")
-          return commandResponseJson(runId.id, "Error", s"HCD Faulted: $reason")
-        case _ => // Ready, or Faulted-with-faultReset/setSoftLimits — proceed
+          return commandResponseJson(runId.id, "Error", reason)
+        case None => // Ready, or Faulted-with-faultReset/setSoftLimits — proceed
 
       // HMI-internal action: per-axis soft-limit bypass toggle.  Not exposed to
       // assemblies (no CSW Setup, no CommandHandlerActor); fires UpdateAxisState
@@ -331,12 +327,15 @@ class HmiServer(
       if request.commandName == "engStop" then
         return handleEngStop(request.params, runId, hcdState)
 
-      // Soft-limit check for positionAxis / offsetAxis.  The CSW path runs the
-      // same check in validateCommand and would reject the command before
-      // submitting it; the HMI bypasses that path so we must replicate it here.
-      // Returning "Error" synchronously means the HMI sees the rejection in the
-      // immediate response rather than as an asynchronous CRM update.
-      softLimitRejection(request.commandName, request.params) match
+      // Axis-state-machine + soft-limit gate for long-running axis commands.
+      // The CSW path runs both checks in validateCommand and rejects before
+      // submitting; the HMI bypasses that path, so we replicate both here to
+      // give the operator a synchronous rejection (amber REJ bar) rather than
+      // a silent CRM-only Error from the CHA backstop.  Both checks share a
+      // single InternalState query.  Runs AFTER the engJog/engStop/setSoftLimits
+      // short-circuits above so those HMI-only engineering actions are never
+      // subject to the CSW axis-state machine.
+      axisCommandRejection(request.commandName, request.params) match
         case Some(reason) =>
           log.warn(s"HMI command '${request.commandName}' rejected: $reason")
           return commandResponseJson(runId.id, "Error", reason)
@@ -608,38 +607,47 @@ class HmiServer(
   }
 
   /**
-   * Mirror of GalilHcd.validateAxisStateAndLimits's soft-limit check for the HMI
-   * command path.  Returns Some(reason) if the command must be rejected for a
-   * soft-limit violation, None otherwise.
+   * Combined axis-state-machine + soft-limit gate for the HMI command path,
+   * mirroring GalilHcd.validateAxisStateAndLimits.  Applies only to the
+   * long-running axis commands; immediate commands (configAxis etc.) and the
+   * HMI-only engineering actions are not subject to it.  Shares a single
+   * InternalState query across both checks.  Returns Some(reason) if the
+   * command must be rejected, None otherwise.
    *
-   * Only positionAxis and offsetAxis carry an absolute or relative target; for
-   * everything else this is a no-op.  Soft-limit enforcement itself is gated by
-   * AxisState.checkSoftLimit (linear-only, softLimitsEnabled, limits configured).
+   * Fail-open on a missing/uninitialised axis or a query failure (returns None
+   * → command falls through), matching the HMI's existing behaviour: the CHA
+   * backstop and buildSetup still catch genuinely malformed commands.  (The
+   * CSW path additionally rejects a genuinely-uninitialised axis; that edge is
+   * unreachable once init has completed and all axes are present in IS.)
+   *
+   * Soft-limit target source: both positionAxis and offsetAxis carry their
+   * value under the JSON key "target" (buildSetup maps offsetAxis's "target"
+   * onto the ICD distanceKey); CommandGate.checkSoftLimit resolves the absolute
+   * target from the command name (positionAxis = absolute, offsetAxis =
+   * position + distance).
    */
-  private def softLimitRejection(commandName: String, params: Map[String, JsValue]): Option[String] = {
-    if commandName != "positionAxis" && commandName != "offsetAxis" then return None
+  private def axisCommandRejection(commandName: String, params: Map[String, JsValue]): Option[String] =
+    if !CommandHandlerActor.isLongRunning(commandName) then return None
 
     val axisChar = params.get("axis") match
       case Some(JsString(s)) if s.nonEmpty => s.head.toUpper
       case _ => return None  // missing axis → buildSetup will produce a clearer error
-    val raw = params.get("target") match
-      case Some(JsNumber(n)) => Some(n.toDouble)
-      case Some(JsString(s)) => scala.util.Try(s.toDouble).toOption
-      case _ => None
-    val rawTarget = raw match
-      case Some(v) => v
-      case None    => return None  // no target → not a soft-limit issue
 
-    val axis = try Axis.fromChar(axisChar)
-               catch { case _: IllegalArgumentException => return None }
-    val maybeAxisState = queryAxisStateForHmi(axis)
-    maybeAxisState.flatMap { axisState =>
-      val absTarget =
-        if commandName == "offsetAxis" then axisState.position + rawTarget
-        else rawTarget
-      axisState.checkSoftLimit(absTarget).map(reason => s"$commandName $axisChar rejected: $reason")
+    val axis =
+      try Axis.fromChar(axisChar)
+      catch { case _: IllegalArgumentException => return None }
+
+    queryAxisStateForHmi(axis).flatMap { axisState =>
+      // 1. State machine first (SDD Figure 4-2).
+      CommandGate.checkAxisState(axisState, commandName).orElse {
+        // 2. Soft-limit envelope for positionAxis / offsetAxis.
+        val rawTarget = params.get("target") match
+          case Some(JsNumber(n)) => Some(n.toDouble)
+          case Some(JsString(s)) => scala.util.Try(s.toDouble).toOption
+          case _                 => None
+        CommandGate.checkSoftLimit(axisState, commandName, axis.toString, rawTarget)
+      }
     }
-  }
 
   /**
    * Synchronously query a single AxisState from InternalState for HMI gating.

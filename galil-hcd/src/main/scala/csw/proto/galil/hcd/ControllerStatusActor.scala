@@ -67,6 +67,23 @@ object ControllerStatusActor:
    * Command to start/stop polling
    */
   case class SetPolling(enabled: Boolean) extends Command
+
+  /**
+   * Declare whether the controller's embedded arrays (ae[] et al.) have been
+   * dimensioned by #Init yet.  The per-scan ae[] read (readAeValues) must be
+   * suppressed until they exist: on a freshly power-cycled controller whose
+   * #AUTO no longer runs #Init, polling starts before #Init dimensions ae[],
+   * so an `MG ae[i]` against the not-yet-created array makes the controller
+   * latch error 57 ("Bad function or array").  The status actor swallows the
+   * malformed read, but the latch survives and the post-#Init `TC 1` check in
+   * GalilHcd then misattributes it to #Init and fails initialization.
+   *
+   * GalilHcd sends ready=false at the start of runInitSequence and ready=true
+   * immediately after #Init completes (initController), so the suppression
+   * window is exactly [start of (re)init .. ae[] dimensioned] on both the
+   * initial and the recovery (Reset/Reload/Init) paths.
+   */
+  case class SetEmbeddedArraysReady(ready: Boolean) extends Command
   
   /**
    * Command to change polling rate
@@ -208,7 +225,11 @@ object ControllerStatusActor:
     loggerFactory: LoggerFactory,
     standbyPollingRateHz: Double = 1.0,
     actionPollingRateHz: Double = 10.0,
-    configuredAxes: Set[Axis] = Set.empty
+    configuredAxes: Set[Axis] = Set.empty,
+    // Tests model a running, post-#Init controller by default (ae[] dimensioned),
+    // so ae[] reads are enabled.  Pass false to exercise the startup-suppression
+    // gate (ae[] reads withheld until SetEmbeddedArraysReady(true)).
+    embeddedArraysReady: Boolean = true
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
@@ -217,7 +238,8 @@ object ControllerStatusActor:
         // Dummy command actor for test — probe is not exercised in unit tests
         val dummyCommandActor = context.system.deadLetters.asInstanceOf[ActorRef[GalilCommandMessage]]
         new ControllerStatusActor(context, timers, statusIo, testConfig, internalState,
-          loggerFactory, standbyPollingRateHz, actionPollingRateHz, dummyCommandActor, configuredAxes)
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz, dummyCommandActor, configuredAxes,
+          initialEmbeddedArraysReady = embeddedArraysReady)
       }
     }
 
@@ -234,7 +256,11 @@ class ControllerStatusActor(
   standbyPollingRateHz: Double,
   actionPollingRateHz: Double,
   commandActor: ActorRef[GalilCommandMessage],
-  configuredAxes: Set[Axis]
+  configuredAxes: Set[Axis],
+  // Initial value of embeddedArraysReady.  Production leaves this false (the
+  // safe default — see the var below); the test factory defaults it true so
+  // unit tests model a controller whose #Init has already dimensioned ae[].
+  initialEmbeddedArraysReady: Boolean = false
 ) extends AbstractBehavior[ControllerStatusActor.Command](context):
 
   import ControllerStatusActor._
@@ -253,6 +279,16 @@ class ControllerStatusActor(
   private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
+
+  // True once #Init has dimensioned the controller's embedded arrays (ae[] et
+  // al.).  Gates the per-scan ae[] read so it is never issued against a
+  // not-yet-created array (which would latch controller error 57 and fail the
+  // post-#Init TC 1 check).  Set via SetEmbeddedArraysReady from GalilHcd:
+  // false at the start of (re)init, true right after #Init.  Production seeds
+  // it false (initialEmbeddedArraysReady default) so a freshly-constructed
+  // actor (initial startup, or a Restart-spawned TLA) does not read ae[]
+  // before the first #Init; the test factory seeds it true.
+  private var embeddedArraysReady: Boolean = initialEmbeddedArraysReady
 
   // --- Status-connection timeout resilience -------------------------------
   // A read timeout (SocketTimeoutException) means the controller did not reply
@@ -366,6 +402,12 @@ class ControllerStatusActor(
         
       case SetPolling(enabled) =>
         handleSetPolling(enabled)
+
+      case SetEmbeddedArraysReady(ready) =>
+        if ready != embeddedArraysReady then
+          log.info(s"Embedded arrays ${if ready then "ready" else "not ready"} — ae[] reads ${if ready then "enabled" else "suppressed"}")
+        embeddedArraysReady = ready
+        Behaviors.same
         
       case SetPollingRate(newRateHz) =>
         handleSetPollingRate(newRateHz)
@@ -793,7 +835,12 @@ class ControllerStatusActor(
    * block (we let the QR loss handler deal with connection failures uniformly).
    */
   private def readAeValues(): Map[Axis, Int] =
-    if configuredAxes.isEmpty then Map.empty
+    // Suppress until #Init has dimensioned ae[]: an `MG ae[i]` against a
+    // not-yet-created array makes the controller latch error 57 ("Bad function
+    // or array"), which the post-#Init TC 1 check then misattributes to #Init.
+    // embeddedArraysReady is set false at the start of (re)init and true right
+    // after #Init by GalilHcd (SetEmbeddedArraysReady).
+    if !embeddedArraysReady || configuredAxes.isEmpty then Map.empty
     else
       val sortedAxes = configuredAxes.toSeq.sortBy(_.index)
       val mgCmd = "MG " + sortedAxes.map(a => s"ae[${a.index}]").mkString(",")
