@@ -812,6 +812,15 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
       Map("controllerSamplePeriodMicros" -> 1000),  // standard 1 kHz servo loop
       testKit.system.ignoreRef
     )
+    // handleTrackAxis (S65) also requires a configured per-axis velocity envelope:
+    // maxSpeed = None ⇒ reject ("cannot start tracking — maxSpeed not configured").
+    // The guard checks both the requested rate (10 here) and the implied average
+    // segment velocity (ΔP=500 counts over ~2 s ≈ 250 counts/sec from the default
+    // position of 0); 20000 clears both.  In production maxSpeed is set via
+    // configAxis before any trackAxis is accepted.
+    isActor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("maxSpeed" -> 20000.0),
+      testKit.system.ignoreRef)
     Thread.sleep(50)
 
     val vt = csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(2))

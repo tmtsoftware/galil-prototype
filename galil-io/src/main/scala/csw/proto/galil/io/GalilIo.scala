@@ -420,7 +420,11 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
   private val socket        = new Socket()
   private val timeoutInMs   = 3 * 1000; // 3 seconds
 
-  // XXX TODO: Error handling when there is no device available!
+  // connect() throws (ConnectException / SocketTimeoutException) when no controller is
+  // reachable — intentional fail-fast.  The connection-owning actors wrap construction in
+  // try/catch (ControllerCommandActor initial + reconnect, ControllerStatusActor reconnect)
+  // and drive the Disconnected/recovery path.  ControllerStatusActor's *initial* connect
+  // (its Behaviors.setup) does not yet wrap this — tracked in the connection-retry backlog.
   socket.connect(socketAddress, timeoutInMs)
   socket.setSoTimeout(timeoutInMs)  // Set read timeout to prevent infinite blocking
   socket.setKeepAlive(true)         // Enable TCP keepalive — prevents silent drop by OS or intermediate devices

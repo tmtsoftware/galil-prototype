@@ -107,7 +107,7 @@ class CurrentStatePublisherActorTest
     val state = currentState(CurrentStateCurrentState.stateKey).head
     // Choice type - use .name to get the string value
     val stateName = state.name
-    assert(stateName == "Idle" || stateName == "Ready" || stateName == "Faulted")
+    assert(stateName == "Uninitialized" || stateName == "Ready" || stateName == "Faulted")
   }
   
   test("CurrentState - axis A state should be published") {

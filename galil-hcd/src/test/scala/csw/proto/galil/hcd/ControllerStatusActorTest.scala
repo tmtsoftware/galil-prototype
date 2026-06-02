@@ -29,6 +29,59 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
   }
 
   /**
+   * GalilIo stub for status-connection timeout tests.  On AI reads (MG @AN...) it
+   * throws SocketTimeoutException or returns a valid reply per successive entries of
+   * `throwSeq` (true = throw, false = reply); the iterator advances only on AI reads.
+   * QR and any other command return ":" — harmless here (a QR parse failure bumps
+   * errorCount but never touches the timeout counters or faults), so the QR poll
+   * timer cannot interfere with the AI-timeout assertions.
+   */
+  private def aiTimeoutSeqIo(throwSeq: Seq[Boolean]): csw.proto.galil.io.GalilIo =
+    new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      private val seq = throwSeq.iterator
+      private var lastWasAi = false
+      private var aiShouldThrow = false
+      // Decide throw-or-not once per command (the iterator advances only on AI
+      // commands), so a reply read more than once by receiveReplies stays consistent.
+      override protected def write(sendBuf: Array[Byte]): Unit =
+        lastWasAi = new String(sendBuf).trim.startsWith("MG @AN")
+        if lastWasAi then aiShouldThrow = seq.hasNext && seq.next()
+      override protected def read(): ByteString =
+        if !lastWasAi then ByteString(":")
+        else if aiShouldThrow then throw new java.net.SocketTimeoutException("Read timed out")
+        else ByteString(Seq.fill(8)("2.5000").mkString(" ") + "\r\n:")
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
+
+  /**
+   * GalilIo stub for QR malformed-record tests.  On QR reads it consumes `behaviors`:
+   * "timeout" throws SocketTimeoutException; "malformed" returns a 4-byte record whose
+   * declared size (0xFFFF) cannot match any block layout, so DataRecord.apply throws
+   * DataRecordFormatException before any buffer underflow.  The decision is made once
+   * per command and the iterator advances only on QR reads; AI/other return ":".
+   */
+  private def qrFaultSeqIo(behaviors: Seq[String]): csw.proto.galil.io.GalilIo =
+    new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      private val seq = behaviors.iterator
+      private var lastWasQr = false
+      private var pending = "malformed"
+      override protected def write(sendBuf: Array[Byte]): Unit =
+        lastWasQr = new String(sendBuf).trim == "QR"
+        if lastWasQr then pending = if seq.hasNext then seq.next() else "malformed"
+      override protected def read(): ByteString =
+        if !lastWasQr then ByteString(":")
+        else if pending == "timeout" then throw new java.net.SocketTimeoutException("Read timed out")
+        // 0xFFFF declared size + ':' terminator: receiveReplies completes (a real socket
+        // would otherwise hit its read timeout), then DataRecord throws DataRecordFormatException.
+        else ByteString(Array[Byte](0, 0, -1, -1, ':'.toByte))
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
+
+  /**
    * Test IO stub that simulates `MG _XQ<n>` and `MG ae[i]` responses based on
    * a mutable set of "live threads" the test controls. Used by tests that
    * inject QRResponse and need CS's per-scan _XQ query to return sensible
@@ -261,6 +314,91 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     statusMonitor ! ControllerStatusActor.GetPollingStatus(statusProbe.ref)
     val status3 = statusProbe.receiveMessage()
     status3.errorCount should be (0)
+  }
+
+  test("ControllerStatusActor tolerates a single AI read timeout, faults on the second") {
+    val internalState = testKit.spawn(InternalStateActor())
+    // Low QR rate so the QR poll timer does not fire during this sub-second test;
+    // the AI poll timer first fires at 1s, after the assertions complete.
+    val statusMonitor = testKit.spawn(
+      ControllerStatusActor.withIo(aiTimeoutSeqIo(Seq(true, true)), internalState,
+        loggerFactory, standbyPollingRateHz = 0.5, actionPollingRateHz = 0.5)
+    )
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+
+    // First AI timeout: tolerated, no fault.
+    statusMonitor ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(100)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    hcdProbe.receiveMessage().state should not be HcdStateEnum.Faulted
+
+    // Second consecutive AI timeout: escalates to Faulted with an accurate reason.
+    statusMonitor ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(100)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    val faulted = hcdProbe.receiveMessage()
+    faulted.state should be (HcdStateEnum.Faulted)
+    faulted.controllerErrorMsg should include ("AI read timeouts")
+  }
+
+  test("ControllerStatusActor resets the AI timeout count after a successful read") {
+    val internalState = testKit.spawn(InternalStateActor())
+    // throw, succeed (resets count), throw → final count is 1, NOT a fault.
+    val statusMonitor = testKit.spawn(
+      ControllerStatusActor.withIo(aiTimeoutSeqIo(Seq(true, false, true)), internalState,
+        loggerFactory, standbyPollingRateHz = 0.5, actionPollingRateHz = 0.5)
+    )
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+
+    statusMonitor ! ControllerStatusActor.PollAnalogInputs  // timeout  (count 1)
+    statusMonitor ! ControllerStatusActor.PollAnalogInputs  // success  (count 0)
+    statusMonitor ! ControllerStatusActor.PollAnalogInputs  // timeout  (count 1 again)
+    Thread.sleep(150)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    // Without the reset, the 3rd read would be the 2nd *consecutive* timeout and fault.
+    hcdProbe.receiveMessage().state should not be HcdStateEnum.Faulted
+  }
+
+  test("ControllerStatusActor tolerates malformed QR records, faults after the threshold") {
+    val internalState = testKit.spawn(InternalStateActor())
+    val statusMonitor = testKit.spawn(
+      ControllerStatusActor.withIo(qrFaultSeqIo(Seq("malformed", "malformed", "malformed")),
+        internalState, loggerFactory, standbyPollingRateHz = 0.5, actionPollingRateHz = 0.5)
+    )
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+
+    // Two malformed records: drained/resynced and tolerated (MaxConsecutiveFormatErrors = 3).
+    statusMonitor ! ControllerStatusActor.PollController
+    statusMonitor ! ControllerStatusActor.PollController
+    Thread.sleep(100)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    hcdProbe.receiveMessage().state should not be HcdStateEnum.Faulted
+
+    // Third consecutive malformed record: escalates to Faulted with an accurate reason.
+    statusMonitor ! ControllerStatusActor.PollController
+    Thread.sleep(100)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    val faulted = hcdProbe.receiveMessage()
+    faulted.state should be (HcdStateEnum.Faulted)
+    faulted.controllerErrorMsg should include ("malformed QR data records")
+  }
+
+  test("ControllerStatusActor: a malformed QR record clears the timeout count") {
+    val internalState = testKit.spawn(InternalStateActor())
+    // timeout (count 1), malformed (drains, resets timeout count to 0), timeout (count 1
+    // again) → never two *consecutive* timeouts, so this must NOT fault.
+    val statusMonitor = testKit.spawn(
+      ControllerStatusActor.withIo(qrFaultSeqIo(Seq("timeout", "malformed", "timeout")),
+        internalState, loggerFactory, standbyPollingRateHz = 0.5, actionPollingRateHz = 0.5)
+    )
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+
+    statusMonitor ! ControllerStatusActor.PollController  // timeout   (timeout count 1)
+    statusMonitor ! ControllerStatusActor.PollController  // malformed (timeout count → 0)
+    statusMonitor ! ControllerStatusActor.PollController  // timeout   (timeout count 1)
+    Thread.sleep(150)
+    internalState ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    hcdProbe.receiveMessage().state should not be HcdStateEnum.Faulted
   }
   
   test("ControllerStatusActor should support enabling/disabling polling") {

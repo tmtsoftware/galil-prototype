@@ -5,7 +5,7 @@ import csw.logging.client.scaladsl.LoggerFactory
 import org.apache.pekko.actor.typed.{ActorRef, Behavior}
 import csw.proto.galil.io.DataRecord
 import csw.proto.galil.io.DataRecord.{GalilAxisStatus, GeneralState}
-import csw.proto.galil.io.{GalilIo, GalilIoTcp}
+import csw.proto.galil.io.{DataRecordFormatException, GalilIo, GalilIoTcp}
 
 import java.time.Instant
 import scala.concurrent.duration._
@@ -34,7 +34,7 @@ object ControllerStatusActor:
   /**
    * Periodic polling trigger (internal timer message)
    */
-  private case object PollController extends Command
+  private[hcd] case object PollController extends Command
 
   /** Internal: result of the command-connection probe sent after a status IOException. */
   private case class CommandProbeResult(result: GalilCommandMessage.SendCommandResult) extends Command
@@ -253,6 +253,33 @@ class ControllerStatusActor(
   private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
+
+  // --- Status-connection timeout resilience -------------------------------
+  // A read timeout (SocketTimeoutException) means the controller did not reply
+  // within the socket read timeout — NOT that the socket is dead.  A single slow
+  // read was observed faulting a healthy controller for hours; the recovery found
+  // the same socket still working.  We now drain any late response (to avoid a
+  // desync on the next read) and tolerate a brief run of timeouts, escalating to
+  // Faulted only on the MaxConsecutiveTimeouts-th in a row.  Each timeout blocks
+  // the actor for up to the socket read timeout (~3s), so the threshold is kept
+  // small.  Per-poll-type counts (QR vs AI) so each escalates independently — the
+  // analog channels may be live control inputs — and a single successful read of
+  // that type resets its count.  A genuine disconnect (remote close / broken pipe)
+  // is a distinct exception and still faults immediately.
+  private val MaxConsecutiveTimeouts = 2
+  private var qrTimeoutCount: Int = 0
+  private var aiTimeoutCount: Int = 0
+
+  // A malformed/misaligned QR DataRecord (DataRecordFormatException) is a different
+  // failure from a timeout: data IS arriving, but the receive buffer is dirty with
+  // stale/partial bytes — typically right after a brief link interruption.  It is
+  // recoverable by draining the buffer to resync, so we tolerate a few in a row and
+  // fault only if the controller is persistently streaming garbage that draining
+  // cannot fix.  The threshold is a little more lenient than for timeouts because a
+  // single dirty record is the normal artifact of a reconnect, not an outage.
+  private val MaxConsecutiveFormatErrors = 3
+  private var qrFormatErrorCount: Int = 0
+
   // Set true after the first controller error is detected and reported.
   // Suppresses repeat TC 1 calls on subsequent QR polls — a running embedded error
   // handler can fire CMDERR every few seconds, leaving errorCode nonzero on every poll.
@@ -506,6 +533,64 @@ class ControllerStatusActor(
 
     Behaviors.same
 
+  /**
+   * Common handling for a read timeout on a status poll (QR or AI).
+   *
+   * SocketTimeoutException means no reply within the socket read timeout, not a
+   * dead socket.  Drain any late/stale response (bounded) so the next read does
+   * not desync, then either tolerate it (the next scheduled poll is the retry) or,
+   * once `consecutiveCount` reaches MaxConsecutiveTimeouts, escalate to Faulted with
+   * an accurate reason and stop polling.
+   */
+  private def handleStatusTimeout(pollLabel: String, consecutiveCount: Int, detail: String): Unit =
+    val stale = statusIo.drainAndShowBuffer(timeoutMs = 500)
+    if stale.nonEmpty then
+      log.warn(s"$pollLabel poll timeout — drained ${stale.length} bytes of late/stale data (avoids next-read desync)")
+    if consecutiveCount >= MaxConsecutiveTimeouts then
+      log.error(s"$pollLabel poll — status connection unresponsive: $consecutiveCount consecutive read timeouts ($detail) — faulting")
+      stopPolling()
+      pollingEnabled = false
+      // Mirror what ReportConnectionStatus(Disconnected) does internally (set the
+      // field, then fault), but the socket is unresponsive rather than closed, so
+      // the reason says so instead of claiming a disconnect that did not occur.
+      internalState ! InternalStateActor.UpdateHcdState(
+        Map("statusConnection" -> ConnectionStatus.Disconnected),
+        context.system.ignoreRef
+      )
+      internalState ! InternalStateActor.EnterFaulted(
+        s"Status connection unresponsive: $consecutiveCount consecutive $pollLabel read timeouts"
+      )
+    else
+      log.warn(s"$pollLabel poll timeout ($consecutiveCount/$MaxConsecutiveTimeouts) — tolerating; next poll will retry: $detail")
+
+  /**
+   * Handle a malformed/misaligned QR DataRecord (DataRecordFormatException).
+   *
+   * Data is arriving but the receive buffer is dirty (stale/partial bytes, e.g. just
+   * after a brief link blip).  Drain to resync; because data is flowing again the
+   * link is back, so clear the timeout count.  Tolerate up to MaxConsecutiveFormatErrors
+   * consecutive malformed records, escalating only if draining cannot resync (the
+   * controller is persistently streaming garbage).
+   */
+  private def handleStatusFormatError(detail: String): Unit =
+    val stale = statusIo.drainAndShowBuffer(timeoutMs = 500)
+    qrTimeoutCount = 0  // data is flowing again — the link is back, not timed out
+    qrFormatErrorCount += 1
+    val drainedNote = if stale.nonEmpty then s", drained ${stale.length} stale bytes" else ""
+    if qrFormatErrorCount >= MaxConsecutiveFormatErrors then
+      log.error(s"QR — status connection: $qrFormatErrorCount consecutive malformed data records$drainedNote ($detail) — faulting")
+      stopPolling()
+      pollingEnabled = false
+      internalState ! InternalStateActor.UpdateHcdState(
+        Map("statusConnection" -> ConnectionStatus.Disconnected),
+        context.system.ignoreRef
+      )
+      internalState ! InternalStateActor.EnterFaulted(
+        s"Status connection: $qrFormatErrorCount consecutive malformed QR data records"
+      )
+    else
+      log.warn(s"QR malformed record ($qrFormatErrorCount/$MaxConsecutiveFormatErrors)$drainedNote — resyncing; next poll will retry: $detail")
+
   private def handlePollController(): Behavior[Command] =
     if pollingEnabled then
       log.debug("Polling controller for QR data")
@@ -513,13 +598,26 @@ class ControllerStatusActor(
         val response = statusIo.send("QR")
         val bs = response.head._2
         val dr = DataRecord(bs)
+        qrTimeoutCount = 0      // primary QR read succeeded — clear consecutive-timeout count
+        qrFormatErrorCount = 0  // valid record parsed — clear malformed-record count
         handleQRResponse(dr)
       catch
+        case ex: java.net.SocketTimeoutException =>
+          // Slow reply, socket likely alive — tolerate up to MaxConsecutiveTimeouts.
+          qrTimeoutCount += 1
+          handleStatusTimeout("QR", qrTimeoutCount, ex.getMessage)
+          Behaviors.same
+        case ex: DataRecordFormatException =>
+          // Malformed/misaligned record — data is flowing but the buffer is dirty
+          // (e.g. stale bytes after a brief link blip).  Drain + resync + tolerate;
+          // a dirty record is not a connection loss.
+          handleStatusFormatError(ex.getMessage)
+          Behaviors.same
         case ex: java.io.IOException =>
-          // TCP connection lost (remote close, broken pipe, or timeout).
-          // Stop polling immediately — continuing would hammer a dead socket.
-          // Report Disconnected to IS so HMI and operators see the failure.
-          // No reconnection here; HCD must be restarted to recover.
+          // Genuine disconnect (remote close → read -1, or broken pipe), not a
+          // timeout: the socket is gone.  Report Disconnected (→ Faulted) and probe
+          // the command connection to distinguish isolated status loss from total
+          // controller loss.  (Auto-reconnect on true disconnect is a future item.)
           log.error(s"QR poll — status connection lost: ${ex.getMessage}")
           stopPolling()
           pollingEnabled = false
@@ -661,9 +759,14 @@ class ControllerStatusActor(
 
       Behaviors.same
     catch
+      case ex: java.net.SocketTimeoutException =>
+        // Mid-scan read timeout (ae[]/TC): tolerate exactly like the primary QR send.
+        qrTimeoutCount += 1
+        handleStatusTimeout("QR", qrTimeoutCount, ex.getMessage)
+        Behaviors.same
       case ex: java.io.IOException =>
         // ae[] read or other status-connection I/O failed mid-scan.
-        // Same handling as a QR send failure: stop polling, report Disconnected,
+        // Genuine loss (not a timeout): stop polling, report Disconnected,
         // probe the command connection. Mirrors handlePollController's catch.
         log.error(s"QR scan — status connection lost mid-scan: ${ex.getMessage}")
         stopPolling()
@@ -711,6 +814,8 @@ class ControllerStatusActor(
           else
             parsed
       catch
+        case ex: java.net.SocketTimeoutException =>
+          throw ex  // preserve timeout type so the outer QR handler tolerates it
         case ex: java.io.IOException =>
           // Re-throw so the outer QR loop's IOException handler reports connection loss.
           throw new java.io.IOException(s"ae[] read failed (status connection): ${ex.getMessage}", ex)
@@ -759,6 +864,8 @@ class ControllerStatusActor(
           else
             parsed
       catch
+        case ex: java.net.SocketTimeoutException =>
+          throw ex  // preserve timeout type so the outer QR handler tolerates it
         case ex: java.io.IOException =>
           throw new java.io.IOException(s"_XQ read failed (status connection): ${ex.getMessage}", ex)
         case ex: Exception =>
@@ -815,6 +922,8 @@ class ControllerStatusActor(
           else
             parsed
       catch
+        case ex: java.net.SocketTimeoutException =>
+          throw ex  // preserve timeout type so the outer QR handler tolerates it
         case ex: java.io.IOException =>
           throw new java.io.IOException(s"_PV/_BT read failed (status connection): ${ex.getMessage}", ex)
         case ex: Exception =>
@@ -1128,6 +1237,7 @@ class ControllerStatusActor(
     val mgCmd = s"MG ${(1 to 8).map(n => s"@AN[$n]").mkString(",")}"
     try
       val responses    = statusIo.send(mgCmd)
+      aiTimeoutCount = 0  // successful read — clear consecutive-timeout count
       val responseText = responses.map(_._2.utf8String).mkString
       log.debug(s"AI poll response: '$responseText'")
       val tokens = responseText.trim.split("\\s+").filter(_.nonEmpty)
@@ -1140,8 +1250,14 @@ class ControllerStatusActor(
         context.system.ignoreRef
       )
     catch
+      case ex: java.net.SocketTimeoutException =>
+        // Slow reply, socket likely alive — tolerate up to MaxConsecutiveTimeouts.
+        // AI escalates on its own count: these channels may be live control inputs,
+        // so persistent AI loss must fault even if QR happens to stay healthy.
+        aiTimeoutCount += 1
+        handleStatusTimeout("AI", aiTimeoutCount, ex.getMessage)
       case ex: java.io.IOException =>
-        // Same treatment as QR poll failure: connection is gone, stop polling.
+        // Genuine disconnect, not a timeout — socket is gone.
         log.error(s"AI poll — status connection lost: ${ex.getMessage}")
         stopPolling()
         pollingEnabled = false

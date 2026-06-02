@@ -270,8 +270,8 @@ class HcdIntegrationTest
     
     val state = systemState(CurrentStateCurrentState.stateKey).head
     println(s"  HCD state: ${state.name}")
-    assert(state.name == "Idle" || state.name == "Ready",
-      s"HCD should be Idle or Ready, was: ${state.name}")
+    assert(state.name == "Uninitialized" || state.name == "Ready",
+      s"HCD should be Uninitialized or Ready, was: ${state.name}")
     sub.cancel()
     
     // Home axes A and B in parallel to establish known positions
@@ -713,7 +713,13 @@ class HcdIntegrationTest
     println(s"  Axis B final: state=${axisState.name}, pos=$pos, inPos=$inPos")
     assert(axisState.name == "idle", s"Axis B should be idle, was: ${axisState.name}")
     assert(inPos, "Axis B should be inPosition at new target")
-    assert(pos == newTarget.toDouble, s"Axis B should be at $newTarget, was: $pos")
+    // The HCD's completion contract is in-position within inPositionThreshold (1.0 count for
+    // this axis), not bit-exact counts.  A clean move from rest settles dead-on, but an
+    // interrupt retargets and approaches from the opposite direction, so the servo settles at
+    // the far edge of its deadband (here 99 for a target of 100).  Assert against the actual
+    // guarantee; a genuinely wrong landing would still be well outside 1.0.
+    assert(math.abs(pos - newTarget.toDouble) <= 1.0,
+      s"Axis B should be within the in-position threshold (1.0) of $newTarget, was: $pos")
     setAxisSpeed(commandService, "B", 100.0f)  // restore normal speed
   }
 

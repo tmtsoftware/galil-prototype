@@ -24,7 +24,7 @@ REM ----------------------------------------------------------------------------
 #AUTO
 REM Code here runs automatically when the controller starts
 REM Call INIT here for now. May want to eventually call Init from the HCD only.
-XQ #Init,7
+REM XQ #Init,7
 EN
 '
 REM ----------------------------------------------------------------------------

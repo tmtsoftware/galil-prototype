@@ -519,10 +519,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // logLevel in application.conf must remain "debug" (Gate 2 open) so that runtime elevation
     // to DEBUG via the HMI is not permanently blocked by LogActor's global level floor.
     //
-    // TODO: identify the exact Typesafe Config entrySet() key-rendering rule for multi-dot
-    // component names and file a CSW issue / workaround so component-log-levels can be used
-    // reliably for such prefixes in the future.  Testing confirmed the numeric-suffix theory
-    // ("1" -> "one") does NOT fix the problem; the issue is the depth of nesting.
+    // KNOWN CSW LIMITATION (workaround is the LogAdminUtil call below): the static
+    // component-log-levels HOCON block cannot reliably target a deeply-nested prefix like
+    // "ICS.HCD.GalilMotion.1" because Config.entrySet() key rendering does not round-trip
+    // back to the runtime Prefix.  Confirmed NOT a numeric-suffix issue ("1" -> "one"); it
+    // is the nesting depth.  The runtime path here (live Prefix, no HOCON round-trip)
+    // sidesteps it.  Filing an upstream CSW issue is tracked in the project backlog.
     LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
 
     log.info("Initializing Galil HCD")
