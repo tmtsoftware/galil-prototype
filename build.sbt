@@ -2,6 +2,7 @@ import Dependencies._
 
 lazy val aggregatedProjects: Seq[ProjectReference] = Seq(
   `galil-assembly`,
+  `ics-assemblies`,
   `galil-hcd`,
   `galil-client`,
   `galil-simulator`,
@@ -33,6 +34,18 @@ lazy val `galil-assembly` = project
   .settings(
     libraryDependencies ++= GalilAssembly
   )
+
+// APS-ICS assemblies: one module hosting common stage-assembly code plus every
+// ICS assembly component (InsertionStage first). Depends on galil-hcd for the
+// generated GalilMotionKeys (the HCD command/CurrentState contract). NOTE: this
+// pulls HCD impl onto the assembly classpath; a future refactor could lift the
+// generated keys into a small shared module to tighten the layering.
+lazy val `ics-assemblies` = project
+  .enablePlugins(DeployApp)
+  .settings(
+    libraryDependencies ++= IcsAssemblies
+  )
+  .dependsOn(`galil-hcd` % "compile->compile")
 
 // A Scala client application that talks to the Galil assembly
 lazy val `galil-client` = project

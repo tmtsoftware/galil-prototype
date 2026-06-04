@@ -61,6 +61,9 @@ object GalilMotionKeys {
       /** True if axis A has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
 
+      /** True if axis A has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
+
       /** Error message for axis A, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
@@ -87,6 +90,9 @@ object GalilMotionKeys {
 
       /** True if axis B has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+      /** True if axis B has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
 
       /** Error message for axis B, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
@@ -115,6 +121,9 @@ object GalilMotionKeys {
       /** True if axis C has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
 
+      /** True if axis C has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
+
       /** Error message for axis C, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
@@ -141,6 +150,9 @@ object GalilMotionKeys {
 
       /** True if axis D has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+      /** True if axis D has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
 
       /** Error message for axis D, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
@@ -169,6 +181,9 @@ object GalilMotionKeys {
       /** True if axis E has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
 
+      /** True if axis E has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
+
       /** Error message for axis E, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
@@ -195,6 +210,9 @@ object GalilMotionKeys {
 
       /** True if axis F has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+      /** True if axis F has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
 
       /** Error message for axis F, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
@@ -223,6 +241,9 @@ object GalilMotionKeys {
       /** True if axis G has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
 
+      /** True if axis G has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
+
       /** Error message for axis G, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
@@ -249,6 +270,9 @@ object GalilMotionKeys {
 
       /** True if axis H has reached its target. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+      /** True if axis H has a valid home reference (last homeAxis succeeded; cleared at home start and on home failure). */
+      val homedKey: Key[Boolean] = BooleanKey.make("homed")
 
       /** Error message for axis H, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")

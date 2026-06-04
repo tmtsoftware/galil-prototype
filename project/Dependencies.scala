@@ -21,6 +21,13 @@ object Dependencies {
 //    Libs.`junit-interface` % Test
   )
 
+  val IcsAssemblies = Seq(
+    CSW.`csw-framework`,
+    CSW.`csw-testkit` % Test,
+    Libs.`scalatest` % Test,
+    Libs.`pekko-actor-testkit-typed` % Test
+  )
+
   val GalilClient = Seq(
     CSW.`csw-framework`,
     CSW.`csw-testkit`,

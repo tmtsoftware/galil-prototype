@@ -331,6 +331,18 @@ class CurrentStatePublisherActor(
       case Axis.G => (CurrentStateAxisGCurrentState.angularPositionKey, CurrentStateAxisGCurrentState.countsPerRevKey)
       case Axis.H => (CurrentStateAxisHCurrentState.angularPositionKey, CurrentStateAxisHCurrentState.countsPerRevKey)
 
+    // homed flag — reflects AxisState.homed (true iff a valid home reference exists).
+    // Published so assemblies can surface their `indexed` field from HCD truth rather than inferring it.
+    val homedKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.homedKey
+      case Axis.B => CurrentStateAxisBCurrentState.homedKey
+      case Axis.C => CurrentStateAxisCCurrentState.homedKey
+      case Axis.D => CurrentStateAxisDCurrentState.homedKey
+      case Axis.E => CurrentStateAxisECurrentState.homedKey
+      case Axis.F => CurrentStateAxisFCurrentState.homedKey
+      case Axis.G => CurrentStateAxisGCurrentState.homedKey
+      case Axis.H => CurrentStateAxisHCurrentState.homedKey
+
     // Map internal enum to ICD choice string
     val stateValue = axisState.axisState match
       case AxisStateEnum.Lost => "lost"
@@ -355,7 +367,9 @@ class CurrentStatePublisherActor(
         // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
         angPosKey.set(axisState.angularPosition.getOrElse(0.0).toFloat),
         // Counts per revolution — integer, published so Assembly can do its own unit conversions
-        cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat)
+        cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat),
+        // Valid-home-reference flag (S68) — assemblies map this to their `indexed` field
+        homedKey.set(axisState.homed)
       )
     )
 
