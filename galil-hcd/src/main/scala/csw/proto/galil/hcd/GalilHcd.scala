@@ -585,9 +585,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // empty and per-axis program-error attribution from ae[] is disabled.
     internalStateActor ! InternalStateActor.SetStatusActor(statusMonitor)
 
-    // Store configured polling rates in IS
+    // Store configured controller id and polling rates in IS. controllerId is
+    // pushed here so the published CurrentState reflects the configured value
+    // rather than the HcdState default.
     internalStateActor ! InternalStateActor.UpdateHcdState(
       Map(
+        "controllerId" -> hcdConfig.controller.id,
         "standbyPollingRateHz" -> standbyRate,
         "actionPollingRateHz" -> actionRate,
         "currentPollingRateHz" -> standbyRate
@@ -614,7 +617,10 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // (including [GALIL:prefix] console lines) streams to connected browsers.
     // HTTP binding is non-blocking so this adds negligible latency to init.
     try {
-      val hmiPort = if (hcdConfig.simulate) 9090 else 9090 + hcdConfig.controller.id
+      // HMI port is a direct function of controller.id (0..N), identical in
+      // simulation and on hardware. Ids must be unique per host; the port is the
+      // only per-host resource keyed off id. The CSW prefix is independent of it.
+      val hmiPort = 9090 + hcdConfig.controller.id
       hmiServer = new hmi.HmiServer(
         internalStateActor      = internalStateActor,
         commandHandlerActor     = commandHandlerActor,

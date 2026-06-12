@@ -249,7 +249,7 @@ case class AxisState(
   // off temporarily from the HMI when the operator wants to test hardware limit switches.
   // Has no effect on rotating axes (no soft limits configured) or on homeAxis.
   softLimitsEnabled: Boolean = true,
-  // Motion configuration (embedded variables, set by configAxis / readMotionConfig, SDD Table 3-2)
+  // Motion configuration (embedded variables, seeded from config at init / configAxis override, SDD Table 3-2)
   maxSpeed: Option[Double] = None,
   acceleration: Option[Double] = None,
   deceleration: Option[Double] = None,
@@ -558,7 +558,7 @@ case class AxisCmdState(
  * Overall HCD state.
  * 
  * @param state Current HCD state
- * @param controllerId Controller number (1-4)
+ * @param controllerId Controller instance id (from controller.id config; 0..N)
  * @param controllerErrorMsg Controller error message
  * @param version Embedded version number
  * @param controllerAxisCount Axis count reported by the controller ID command (4 or 8); -1 if unknown.

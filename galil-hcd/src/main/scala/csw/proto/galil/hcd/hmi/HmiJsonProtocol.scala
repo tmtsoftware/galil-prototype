@@ -60,7 +60,7 @@ object HmiJsonProtocol {
       "upperLimit" -> s.upperLimit.getOrElse[Double](0.0),
       "lowerLimit" -> s.lowerLimit.getOrElse[Double](0.0),
       "softLimitsEnabled" -> s.softLimitsEnabled,
-      // Motion configuration (from readMotionConfig + configAxis updates)
+      // Motion configuration (seeded from config at init + configAxis updates)
       "maxSpeed"            -> s.maxSpeed.getOrElse[Double](0.0),
       "acceleration"        -> s.acceleration.getOrElse[Double](0.0),
       "deceleration"        -> s.deceleration.getOrElse[Double](0.0),

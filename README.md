@@ -114,10 +114,11 @@ sbt stage
 
 ### With Hardware
 
-A hardware instance registers as `aps.ICS.HCD.GalilMotion.<id>` and serves the
-HMI on port `9090 + controller.id`. The example below uses the lab controller
-config (id = 1, HMI on 9091); the STB config (`GalilHcdConfig-STB.conf`) is
-analogous.
+A hardware instance serves the HMI on port `9090 + controller.id`. The example
+below uses the lab controller config (id = 1, HMI on 9091); the STB config
+(`GalilHcdConfig-STB.conf`) is analogous. The CSW prefix (for example
+`aps.ICS.HCD.GalilMotion.1`) is set by the container conf and is independent of
+`controller.id`; the two need not share a value.
 
 ```bash
 # Terminal 1: Start CSW services

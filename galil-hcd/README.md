@@ -72,7 +72,9 @@ The HCD serves the HMI itself; just open the URL once the HCD is running.
 | Simulator | `http://localhost:9090` | GalilSimulatorApp at 127.0.0.1:8888 |
 | Hardware (id=1) | `http://localhost:9091` | DMC-500x0 at 192.168.86.41:23 |
 
-The simulator HMI port is fixed at 9090; the hardware HMI port is `9090 + controller.id`.
+The HMI port is `9090 + controller.id` in every mode (`controller.id` is 0..N; the
+default simulator config uses id 0, so it serves on 9090). The CSW prefix is set by
+the container conf and is independent of `controller.id`.
 See [HMI](#hmi) for what the console provides.
 
 ### Tests
@@ -155,7 +157,7 @@ The HCD uses two layers of configuration:
 controller {
   host = [192, 168, 86, 41]      # IP as integer array
   port = 23                       # TCP port
-  id = 1                          # controller instance id (HMI port = 9090 + id on hardware)
+  id = 1                          # controller instance id (HMI port = 9090 + id)
   embeddedProgram = "protoHCD_lab.dmc"
   standbyPollingRateHz = 1.0      # QR rate when all axes idle
   actionPollingRateHz = 10.0      # QR rate when any axis active
