@@ -41,7 +41,7 @@ object GalilCommandMessage {
   case class DownloadProgram(replyTo: ActorRef[DownloadProgramResult]) extends GalilCommandMessage
   case class DownloadProgramResult(program: String, error: Option[String] = None) extends GalilCommandMessage
 
-  // Synchronous command execution for CommandHandlerActor — uses the dedicated command connection.
+  // Synchronous command execution for CommandHandlerActor; uses the dedicated command connection.
   case class SendCommand(commandString: String, replyTo: ActorRef[SendCommandResult]) extends GalilCommandMessage
   case class SendCommandResult(response: String, error: Option[String] = None) extends GalilCommandMessage
 
@@ -67,11 +67,11 @@ object GalilCommandMessage {
    * not that it never ran. A non-(-1) line number means thread N is still mid-execution.
    *
    * preCommands (if present) is sent atomically within the same galilIo.synchronized
-   * block as the XQ — eliminating a separate CI round-trip for callers that need to
+   * block as the XQ; eliminating a separate CI round-trip for callers that need to
    * set embedded variables (e.g. dmd[idx]=target) immediately before launching a program.
    * If the preCommands send fails, ExecuteProgram returns an error and XQ is not sent.
    *
-   * Thread allocation uses the controller's MG _NO bitmask as the source of truth —
+   * Thread allocation uses the controller's MG _NO bitmask as the source of truth , 
    * no separate pool bookkeeping. (Allocation looks for *clear* bits, where _NO is
    * reliable; per-thread state queries during execution use _XQ<n> instead, which is
    * unaffected by the post-CMDERR _NO unreliability documented in ControllerStatusActor.)
@@ -103,16 +103,16 @@ object GalilCommandMessage {
   )
 
   /**
-   * Halt an active execution thread (SDD 4.8.1 — Halting the Active Command).
+   * Halt an active execution thread (SDD 4.8.1; Halting the Active Command).
    *
    * The CI actor confirms the thread is still active via MG _NO and sends HX to halt
    * it if so. All operations are synchronized under galilIo.synchronized to prevent
    * interleaving with QR polling.
    *
-   * This message only kills the thread — it does NOT send ST. The caller is responsible
+   * This message only kills the thread; it does NOT send ST. The caller is responsible
    * for any subsequent motor stop (ST) or embedded stop program (#StopX) as appropriate:
    *   - checkAndInterrupt: sends ST after HaltExecution, then starts a new embedded program
-   *   - stopAxis: does not need ST — #StopX handles motor deceleration
+   *   - stopAxis: does not need ST; #StopX handles motor deceleration
    *
    * @param thread  Thread number from IS.activeThread. Use 0 to skip HX entirely.
    * @param axis    Axis identifier (used for logging context)
@@ -146,7 +146,7 @@ object GalilCommandMessage {
    * Attempt to verify and if necessary re-establish the command TCP connection.
    *
    * Step 1: test the existing socket with a lightweight command (MG 0).
-   *   - If that succeeds the connection never actually dropped — report Connected, done.
+   *   - If that succeeds the connection never actually dropped; report Connected, done.
    * Step 2: if the test fails, close the dead socket and open a fresh GalilIoTcp.
    *   - Retest with MG 0. Report Connected on success, Disconnected on failure.
    *
@@ -155,7 +155,7 @@ object GalilCommandMessage {
    */
   case class Reconnect(replyTo: ActorRef[ReconnectResult]) extends GalilCommandMessage
 
-  // ── Fault-recovery primitives (Session 58) ───────────────────────────
+  // ── Fault-recovery primitives ───────────────────────────
   //
   // These three messages back the deeper faultReset severities (Reset and
   // Reload).  They run on the command connection because the simulator and
@@ -173,7 +173,7 @@ object GalilCommandMessage {
 
   /**
    * Burn the currently-loaded volatile program to EEPROM (BP command).
-   * Typically takes 2–3 seconds on real hardware; pauses the controller
+   * Typically takes 2-3 seconds on real hardware; pauses the controller
    * while writing.  The command-connection read timeout is temporarily
    * extended to 5s to cover the burn, then restored to 3s.
    */
@@ -183,7 +183,7 @@ object GalilCommandMessage {
   /**
    * Send the controller-reset command (RS).  RS terminates all open TCP
    * sessions on the controller as part of the reset, so this message does
-   * NOT wait for a reply (none is coming) — it just writes the bytes and
+   * NOT wait for a reply (none is coming); it just writes the bytes and
    * proactively reports the command connection as Disconnected to IS.  The
    * caller is responsible for waiting for the controller to come back and
    * re-opening sockets via Reconnect on the affected actors.
@@ -197,89 +197,42 @@ object GalilCommandMessage {
 }
 
 /**
- * JVM-shutdown driver — ensures actor PostStop work completes on signal-based
- * JVM exit (SIGINT, SIGTERM) before the JVM tears down.
+ * JVM-shutdown driver: ensures actor PostStop work completes on signal-based JVM
+ * exit (SIGINT, SIGTERM) before the JVM tears down, so the controller is safed
+ * (ST;MO) and the command socket is closed cleanly.
  *
- * The problem this solves.  Empirical testing (Session 57) on the staged
- * binary showed that on Ctrl-C / SIGTERM the JVM exits silently with no
- * `ControllerCommandActor stopping — sending ST;MO` log line — i.e. the
- * actor's PostStop signal is not running, and motors stay energised.
+ * On an HMI Shutdown the supervisor's onShutdown path runs synchronously while the
+ * JVM is healthy, so cleanup always completes. On a signal exit, Pekko's
+ * CoordinatedShutdown runs from its own JVM hook but races the JVM's exit: the JVM
+ * can tear down threads and sockets before PostStop runs, leaving motors energised.
  *
- * What was actually happening.  Pekko's CoordinatedShutdown *does* run on
- * a JVM shutdown hook of its own (registered by Pekko at actor-system
- * construction), and *does* eventually deliver PostStop to all actors —
- * including ours.  But Pekko's hook and the JVM's exit are racing: by the
- * time the JVM hook starts, the JVM is also concluding the exit sequence,
- * and there is no synchronisation that holds the JVM open until
- * CoordinatedShutdown's phases all complete.  The result is that the JVM
- * tears down threads and sockets out from under Pekko's in-progress
- * shutdown — sometimes before PostStop runs at all.  On HMI Shutdown,
- * the supervisor → onShutdown → actor-system-terminate path is fully
- * synchronous on the actor side, so by the time the JVM exits everything
- * has already finished cleanly.  Signal exit doesn't have that
- * synchronisation.
+ * This driver registers an additional JVM shutdown hook that:
+ *   1. Best-effort resolves the supervisor and sends Shutdown (usually a no-op on
+ *      signal exit, since Pekko has already deregistered the component; useful on
+ *      any path where Pekko's hook has not fired).
+ *   2. Blocks on `system.whenTerminated` (capped at 15s). This is the load-bearing
+ *      step: waiting on the actor system's termination Future holds the JVM open
+ *      until all CoordinatedShutdown phases complete, so PostStop runs, ST;MO is
+ *      sent and acknowledged, and the command socket closes before the JVM exits.
  *
- * What this driver does.  Registers our own JVM shutdown hook that:
- *   1. Tries to resolve our supervisor and send Shutdown — best-effort
- *      belt-and-suspenders, mostly fails on signal exit because Pekko's
- *      own coordinated shutdown has already removed us from the location
- *      service by the time we get here, but harmless when it fails.  Useful
- *      on any future shutdown path where Pekko's hook hasn't already kicked
- *      in (some launcher script variant, embedded scenario, etc).
- *   2. Blocks on `system.whenTerminated` with a 15s cap.  This is the
- *      load-bearing step.  By waiting on the actor system's termination
- *      Future, we hold the JVM open until *all* CoordinatedShutdown phases
- *      complete — which means PostStop runs to completion, ST;MO is sent
- *      and acknowledged, and the command socket is closed cleanly before
- *      the JVM tears down threads.
+ * The 15s cap prevents a wedged controller or stuck shutdown phase from blocking
+ * JVM exit indefinitely; the full sequence completes in roughly 50ms on the
+ * simulator and 1.5s on hardware. On timeout the driver announces on stderr and
+ * lets the JVM proceed (the OS reclaims sockets; motors may not be safed).
  *
- * Logging caveat.  By the time our hook runs, the SLF4J/CSW logging actors
- * may already be in mid-teardown via Pekko's own shutdown.  Some log lines
- * we'd expect (notably `ControllerCommandActor stopping — sending ST;MO`)
- * are not flushed to csw.log even though the underlying work happens — the
- * raw TCP send to the controller succeeds and ST;MO is acknowledged, but
- * the structured log entry is dropped.  This is why our `announce()` helper
- * always writes to stderr first and only attempts SLF4J best-effort:
- * stderr survives the entire shutdown and reaches the operator's terminal.
- * If you need to verify ST;MO was actually sent on a Ctrl-C, check the
- * controller-side log (or the simulator's CMD/RSP trace) — the HCD-side
- * structured log won't show it.
+ * Logging caveat: by the time this hook runs, the CSW/SLF4J logging actors may be
+ * mid-teardown, so some expected log lines (notably the ControllerCommandActor
+ * ST;MO line) may not reach csw.log even though the work happens. The `announce()`
+ * helper therefore writes to stderr first and attempts SLF4J only best-effort. To
+ * verify ST;MO on a Ctrl-C, check the controller-side or simulator CMD/RSP trace.
  *
- * Three exit paths and what happens on each:
- *   - HMI Shutdown.  Supervisor → component shutdown runs synchronously
- *     while the JVM is still healthy.  All log lines flush.  Our hook
- *     fires last (as the JVM begins its exit), finds the supervisor
- *     already gone, finds `whenTerminated` already complete, returns
- *     immediately.  Belt-and-suspenders only.
- *   - SIGINT (Ctrl-C).  Pekko's own JVM hook starts CoordinatedShutdown.
- *     Our hook runs in parallel.  Resolve fails (location service already
- *     gone).  We await `whenTerminated`; PostStop runs during that wait
- *     and ST;MO succeeds.  JVM exits cleanly.
- *   - SIGTERM.  Same as SIGINT.  (Earlier testing suggested SIGTERM and
- *     SIGINT behaved differently — the difference was actually that on
- *     SIGTERM Pekko's CoordinatedShutdown sometimes flushes more log lines
- *     before the logging actors stop, but the underlying behaviour is the
- *     same.)
- *
- * Bounded runtime.  The await caps at 15s so that a wedged controller or
- * a stuck shutdown phase cannot block the JVM exit indefinitely.  In
- * practice the HMI-Shutdown trace shows the full sequence completes in
- * ~50ms on the simulator and ~1.5s on hardware (with 7 axes' worth of
- * BZ-paused cleanup), so 15s is generous.  If we hit the timeout we
- * announce that on stderr and let the JVM proceed — the OS will reclaim
- * the sockets, motors may not be safed.
- *
- * Registration is one-shot per JVM (guarded by `registered`).  Restart
- * re-invokes `initialize()` but the JVM-level hook persists; we don't
- * want to register a second copy.
- *
- * What this driver is NOT.  It's not a replacement for HMI Shutdown or
- * for the deployed control system's lifecycle commands — those remain
- * the proper way to stop the HCD.  This is a development-time and
- * defensive safety net.
+ * Registration is one-shot per JVM (guarded by `registered`); Restart re-invokes
+ * initialize() but the JVM-level hook persists. This driver is a development-time
+ * and defensive safety net, not a replacement for HMI Shutdown or the deployed
+ * control system's lifecycle commands.
  */
 private object SignalShutdownDriver {
-  // JVM-lifetime flag — survives Restart's destruction of GalilHcdHandlers
+  // JVM-lifetime flag; survives Restart's destruction of GalilHcdHandlers
   // because this object lives at the classloader level, not the actor level.
   private val registered = new java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -293,7 +246,7 @@ private object SignalShutdownDriver {
    *
    * The hook closes over `cswCtx` and the `ActorSystem` rather than `ctx`
    * because `ctx` belongs to the TLA actor, which gets destroyed and
-   * recreated on Restart — keeping a reference to it would create a stale
+   * recreated on Restart; keeping a reference to it would create a stale
    * binding.  The actor system is JVM-scoped and stable across Restart.
    */
   def registerOnce(
@@ -320,12 +273,12 @@ private object SignalShutdownDriver {
    * Strategy:
    *   1. Resolve our supervisor by component prefix.
    *   2. If found, send Shutdown.  If not found, the system is probably
-   *      already shutting down — just wait for it.
+   *      already shutting down; just wait for it.
    *   3. Block on `whenTerminated` with a hard timeout so a wedged shutdown
    *      can't hang the JVM forever.
    *
    * stderr is used for the visible status messages because by the time the
-   * hook runs the SLF4J logging actors may be mid-teardown — stderr is the
+   * hook runs the SLF4J logging actors may be mid-teardown; stderr is the
    * one channel guaranteed to reach the operator's terminal.  We also try
    * SLF4J for the structured log file; if it works it works.
    */
@@ -354,7 +307,7 @@ private object SignalShutdownDriver {
     announce(s"JVM shutdown — driving clean CSW Shutdown for $prefix")
 
     try {
-      // Step 1: resolve our supervisor.  Short timeout — if location service
+      // Step 1: resolve our supervisor.  Short timeout; if location service
       // is unreachable, fall through to the await below.
       val connection = Connection.PekkoConnection(
         ComponentId(prefix, cswCtx.componentInfo.componentType)
@@ -381,7 +334,7 @@ private object SignalShutdownDriver {
 
     // Step 2: block until the actor system is fully done, capped at the
     // hook's overall budget.  whenTerminated is the Future that completes
-    // when ALL the coordinated-shutdown phases have run — including our
+    // when ALL the coordinated-shutdown phases have run; including our
     // component's PostStop chain, which is what does the ST;MO.
     try {
       Await.result(system.whenTerminated, ShutdownAwaitTimeout)
@@ -513,7 +466,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // fall back to defaultLogLevel (= logLevel in application.conf = DEBUG).
     //
     // The fix uses the same runtime path as the HMI: LogAdminUtil.setComponentLogLevel()
-    // accepts the live Prefix object directly — no HOCON string round-trip — and writes into
+    // accepts the live Prefix object directly; no HOCON string round-trip; and writes into
     // the same ConcurrentHashMap that LoggerImpl.componentLoggingState reads on every log call.
     //
     // logLevel in application.conf must remain "debug" (Gate 2 open) so that runtime elevation
@@ -543,7 +496,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     hcdConfig = loadConfiguration()
     
     // Phase 2: Connect to controller and verify identity
-    // Create ControllerCommandActor — opens command TCP connection.
+    // Create ControllerCommandActor; opens command TCP connection.
     // The actor connects to the Galil controller and identifies it during Behaviors.setup.
     // We use the ask pattern (standard CSW approach) to block until the actor is ready.
     log.info("Establishing controller connection")
@@ -558,7 +511,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       "ControllerCommandActor"
     )
     
-    // Block until the actor has completed setup (connect + ID) — standard CSW init pattern
+    // Block until the actor has completed setup (connect + ID); standard CSW init pattern
     val identityFuture = controllerCommandActor.ask[ControllerIdentity](ref => GalilCommandMessage.GetIdentity(ref))
     val identity = Await.result(identityFuture, 5.seconds)
     log.info(s"Controller ready: firmware=${identity.firmware}, model=DMC-${identity.model}, axes=${identity.axisCount}")
@@ -574,7 +527,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // Phase 2b: Spawn ControllerConsoleActor as a sibling (hardware-only).
     // Opens a dedicated third TCP handle; CF I + CW 2 claim all unsolicited MG output.
     // The latch blocks until the handle is live so MG lines are captured before #Init runs.
-    // Skipped in simulation mode — no physical controller to receive CF I / CW 2.
+    // Skipped in simulation mode; no physical controller to receive CF I / CW 2.
     if !hcdConfig.simulate then
       val consoleLatch = new java.util.concurrent.CountDownLatch(1)
       consoleActor = ctx.spawn(
@@ -594,7 +547,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     
     // Phase 3: Start status monitoring with adaptive polling rate
     // Motor type (stepper vs servo) is read from the QR DataRecord switches byte,
-    // not from config — the embedded code sets this during axis Setup.
+    // not from config; the embedded code sets this during axis Setup.
     // Polling rate adapts automatically based on axis states:
     //   standby rate: all axes idle/lost/error
     //   action rate:  any axis homing/moving/tracking
@@ -655,7 +608,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     )
     log.info("CommandHandlerActor created")
 
-    // Phase 3d: Start HMI server immediately after actors are ready — before
+    // Phase 3d: Start HMI server immediately after actors are ready; before
     // Phase 4 (#Init, #SetupX) so initialization MG output appears in the HMI.
     // HmiLogAppender.broadcast is wired here; any log.info() from this point
     // (including [GALIL:prefix] console lines) streams to connected browsers.
@@ -704,7 +657,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           "upperLimit"  -> axisConfig.upperLimit,
           "lowerLimit"  -> axisConfig.lowerLimit,
           // Seed IS with motion parameters from config.
-          // These are authoritative — writeMotionConfig() pushes them to the
+          // These are authoritative; writeMotionConfig() pushes them to the
           // controller's embedded variables after #SetupX, making the config
           // file the single source of truth. Assembly overrides via configAxis.
           "maxSpeed"    -> axisConfig.maxSpeed,
@@ -738,7 +691,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
     // Phase 4: Embedded program verification + controller initialization.
     //
-    // The body of Phase 4 lives in runInitSequence() — it is the sequence
+    // The body of Phase 4 lives in runInitSequence(); it is the sequence
     // we'll re-run during faultReset (severities Init/Reset/Reload).  See
     // that method for the step-by-step rationale.
     try {
@@ -748,7 +701,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // commands are rejected by the universal gate in CommandHandlerActor
       // (and by the HMI and CSW-validate gates that mirror it).  Doing the
       // transition AFTER runInitSequence completes guarantees that we only
-      // flip to Ready if every step of init actually succeeded — if any
+      // flip to Ready if every step of init actually succeeded; if any
       // step throws, we fall through to the catch below and come up Faulted.
       internalStateActor ! InternalStateActor.UpdateHcdState(
         Map(
@@ -763,13 +716,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // Init failed.  We deliberately do NOT re-throw: throwing tears the
         // component down (CSW stops the TLA → onShutdown → the HMI server and
         // all actors go away), leaving no way to recover without restarting the
-        // process.  Instead we come up Faulted — the HMI server and actors are
+        // process.  Instead we come up Faulted; the HMI server and actors are
         // already started by this point, so the component still reaches Running
         // and registers with Location Service, the HMI shows the fault with a
         // Clear Fault control, and the operator recovers via faultReset
         // (Init/Reload re-run runInitSequence) or Restart.  This makes a startup
         // failure behave identically to a runtime fault, reusing the same
-        // recovery machinery — only possible because the faultReset work made
+        // recovery machinery; only possible because the faultReset work made
         // runInitSequence safely repeatable.  EnterFaulted (not a raw state
         // write) so per-axis transitions and initializingReason clearing are
         // applied consistently with every other fault.
@@ -798,12 +751,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *   - HCD state is Uninitialized (so the validate / HMI gates reject
    *     stray commands while this sequence runs)
    *
-   * Steps (mirror what initialize() Phase 4 used to do inline):
-   *   1. (hardware only) verifyEmbeddedProgram — diff-only warning, never fails
+   * Steps (shared by initialize() and faultReset recovery):
+   *   1. (hardware only) verifyEmbeddedProgram; diff-only warning, never fails
    *   2. initController (XQ #Init + post-init TC 1 check)
    *   3. polling off → setupAxes → polling on  (BZ commutation pauses TCP)
-   *   4. writeMotionConfig — push authoritative motion params from config file
-   *   5. readLimitConfig   — query LD per axis to seed limit-enabled flags
+   *   4. writeMotionConfig; push authoritative motion params from config file
+   *   5. readLimitConfig  ; query LD per axis to seed limit-enabled flags
    *
    * The caller is responsible for the Uninitialized → Ready transition
    * after this Future succeeds, and for the Uninitialized → Faulted
@@ -813,11 +766,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     for {
       // Suppress the status actor's per-scan ae[] read until #Init has
       // dimensioned the embedded arrays.  On a freshly power-cycled controller
-      // (whose #AUTO no longer runs #Init) ae[] does not exist yet, and QR
+      // (whose #AUTO does not run #Init) ae[] does not exist yet, and QR
       // polling is already running here; an early `MG ae[i]` would latch
       // controller error 57, which the post-#Init TC 1 check would then
-      // misattribute to #Init.  Re-asserted false on every (re)init — including
-      // the recovery paths that route through here — because Reset's RS clears
+      // misattribute to #Init.  Re-asserted false on every (re)init; including
+      // the recovery paths that route through here; because Reset's RS clears
       // the arrays.  Set true again right after initController below.
       // (Wrapped in Future.successful so it can be the first comprehension step;
       // the send runs eagerly when this generator is evaluated.)
@@ -834,7 +787,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         Future.successful(())
       }
       _ <- initController()
-      // #Init has now dimensioned ae[] et al. — re-enable the status actor's
+      // #Init has now dimensioned ae[] et al.; re-enable the status actor's
       // ae[] read (see SetEmbeddedArraysReady(false) at the top of this for).
       _ = statusMonitor ! ControllerStatusActor.SetEmbeddedArraysReady(ready = true)
       // Read the controller's servo-loop sample period (_TM, µs/sample) and stash
@@ -853,7 +806,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       _ <- setupAxes()
       _ = { statusMonitor ! ControllerStatusActor.SetPolling(enabled = true)
             log.info("QR polling resumed after axis setup") }
-      // Write motion config AFTER setupAxes — #SetupX establishes motor type
+      // Write motion config AFTER setupAxes; #SetupX establishes motor type
       // and hardware config; we then overwrite the motion parameters with the
       // authoritative values from the HCD config file. This applies to both
       // hardware (supplanting EEPROM defaults) and simulator (initialising
@@ -865,7 +818,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   }
 
   // ========================================
-  // Fault Recovery — handleFaultReset
+  // Fault Recovery; handleFaultReset
   // ========================================
 
   /**
@@ -873,26 +826,26 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * onSubmit, runs on a Future so the framework thread is not blocked.
    *
    * Severity ladder (per ICD §2.2.1.13 and SDD §4.6.4):
-   *   None   — Just clear the error message; HCD goes Faulted → Ready.
+   *   None:   Just clear the error message; HCD goes Faulted → Ready.
    *            Pre-step: verify both command and status TCP connections
    *            still respond.  If either is dead we fail recovery rather
    *            than let stale Ready state mislead callers.
-   *   Init   — Verify connections, then Faulted → Uninitialized → re-run
+   *   Init:   Verify connections, then Faulted → Uninitialized → re-run
    *            the controller init sequence (verifyEmbedded → initController
    *            → setupAxes → writeMotionConfig → readLimitConfig) → Ready.
    *            Used when the controller's embedded program state has gone
    *            stale (e.g. a stale axis error) but the hardware itself is
    *            otherwise fine.
-   *   Reset  — Verify connections, send RS to the controller, wait for it
-   *            to come back (controller reset takes ~5–10s on STB), reconnect
+   *   Reset:  Verify connections, send RS to the controller, wait for it
+   *            to come back (controller reset takes ~5-10s on STB), reconnect
    *            all three TCP handles (command/status/console) with a 15s
    *            wall-clock budget, then run the init sequence.  Used when
    *            embedded program state is suspected and Init alone won't help.
-   *   Reload — Verify connections, upload fresh embedded code from the
+   *   Reload: Verify connections, upload fresh embedded code from the
    *            HCD's resource folder (DL), burn it to EEPROM (BP), then
    *            perform the Reset sequence (RS + reconnect + init).  Used
    *            when the controller's embedded program is wrong and needs
-   *            forced replacement.  EEPROM-write — use sparingly.
+   *            forced replacement.  EEPROM-write; use sparingly.
    *
    * Final SubmitResponse is delivered via the CRM:
    *   - Completed(runId) on success
@@ -909,14 +862,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       case "None" =>
         // Verify both controller TCP connections respond.  Per design (Q2):
         // every severity gates on connection health before doing its work.
-        // For None, the gate is the entire body — there is no further
+        // For None, the gate is the entire body; there is no further
         // controller interaction.  If a connection is down, recovery fails
         // and the HCD remains Faulted with a clear reason.
         log.info("faultReset None: verifying controller connections")
 
         verifyConnectionsAliveEither() match {
           case Right(_) =>
-            // Both connections working — clear the controllerErrorMsg and
+            // Both connections working; clear the controllerErrorMsg and
             // transition Faulted → Ready.
             internalStateActor ! InternalStateActor.UpdateHcdState(
               Map(
@@ -929,7 +882,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             commandResponseManager.updateCommand(Completed(runId))
 
           case Left(failures) =>
-            // One or both still down — re-enter Faulted with a fresh reason
+            // One or both still down; re-enter Faulted with a fresh reason
             // (idempotent if already Faulted but re-applies per-axis
             // transitions consistently).  No safe-state ST;MO attempt here:
             // at least one connection is bad, so the send would IOException.
@@ -943,7 +896,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // Init severity: verify connections, then re-run the full init
         // sequence.  HCD transitions Faulted → Uninitialized for the
         // duration of the sequence (gates already reject all other
-        // commands during Uninitialized — this naturally prevents
+        // commands during Uninitialized; this naturally prevents
         // concurrent recoveries) and then either Uninitialized → Ready
         // on success or Uninitialized → Faulted on failure.
         log.info("faultReset Init: verifying controller connections")
@@ -963,7 +916,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // Reset severity: send RS to the controller, wait briefly for it to
         // come back, reconnect all three TCP handles (command + status +
         // console), then run the init sequence.  Per design (Q2): we still
-        // verify connections alive first — if the controller is already
+        // verify connections alive first; if the controller is already
         // unreachable, escalating to RS won't help and we fail fast.
         log.info("faultReset Reset: verifying controller connections")
 
@@ -985,11 +938,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // out-of-date and an Init alone won't help (Init re-runs setup
         // against whatever code is already loaded).
         //
-        // Reload does NOT perform RS — DL replaces the loaded program in
+        // Reload does NOT perform RS; DL replaces the loaded program in
         // controller RAM as part of the upload itself, so the new program
         // is already active by the time DL completes.  BP persists it to
         // EEPROM.  Adding RS on top is redundant (RS only re-loads from
-        // EEPROM, which we just burnt) and harmful — it forces an
+        // EEPROM, which we just burnt) and harmful; it forces an
         // unnecessary TCP reconnect cycle and can cause controller-side
         // TCPERR (error 123) due to half-closed sockets, as observed on
         // the STB.  TCP stays connected throughout Reload.
@@ -1004,7 +957,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
           case Right(_) =>
             // Suspend QR/AI polling on the status connection for the duration
-            // of the upload + burn + post-BP verify.  Rationale (Session 58):
+            // of the upload + burn + post-BP verify. Rationale:
             // the heavy DL transfer (~6KB streamed in chunks over ~3 seconds)
             // and the immediately-following UL during verifyEmbeddedProgram
             // both exercise the controller's TCP scheduler hard.  When QR
@@ -1012,9 +965,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             // controller's TCP input/output buffers can get out of sync,
             // triggering the embedded #TCPERR handler (controller error 123
             // "TCP lost sync or timeout").  When that fires, #TCPERR's
-            // `MG "HCD TCPERR ", _IA4` writes to all open TCP handles —
+            // `MG "HCD TCPERR ", _IA4` writes to all open TCP handles , 
             // including the command socket where UL's response is
-            // streaming — and corrupts the UL response stream.  Suspending
+            // streaming; and corrupts the UL response stream.  Suspending
             // polling around the heavy command-side work eliminates the
             // contention.  The init phase that follows (runRecoveryInitPhase
             // → runInitSequence) re-enables polling after its own
@@ -1080,7 +1033,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         commandResponseManager.updateCommand(Error(runId, errorMsg))
 
       case Right(_) =>
-        // RS issued — controller is rebooting.  Settle delay before first
+        // RS issued; controller is rebooting.  Settle delay before first
         // reconnect attempt; empirically reconnect can succeed anywhere from
         // ~5s to ~10s after RS on STB.  We start polling at 2s with 1s
         // retry interval, total budget 15s.
@@ -1104,7 +1057,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   /**
    * Reload primitive: load the embedded program from resources, send DL, then
    * send BP.  Returns Right(()) on full success or Left(reason) on any
-   * failure.  Used by Reload severity (Session 58).
+   * failure. Used by Reload severity.
    *
    * Both DL and BP run on the command connection.  BP takes 2-3s on real
    * hardware; the BurnProgram handler in CCA temporarily extends the socket
@@ -1192,7 +1145,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       // event raised while DL/BP/RS was disturbing the controller) would
       // leave its error message visible in the HMI banner even though the
       // HCD itself is Ready and functional.  Recovery completing
-      // successfully is the authoritative "all clear" — clear the message.
+      // successfully is the authoritative "all clear"; clear the message.
       internalStateActor ! InternalStateActor.UpdateHcdState(
         Map(
           "state"              -> HcdStateEnum.Ready,
@@ -1215,7 +1168,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   /**
    * Send the RS controller-reset command via ControllerCommandActor.
    * Returns Right(()) on success or Left(reason) on failure.  The caller
-   * must wait for the controller to come back and reconnect — RS drops
+   * must wait for the controller to come back and reconnect; RS drops
    * all TCP sessions on the controller.
    */
   private def sendControllerReset(): Either[String, Unit] = {
@@ -1242,7 +1195,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * RS, retrying each that fails until either all succeed or the wall-clock
    * budget is exhausted.  The console handle is informational and not
    * required for Ready state, but we attempt it as part of full recovery.
-   * Console failures are logged but do not fail the overall reconnect —
+   * Console failures are logged but do not fail the overall reconnect , 
    * Reset/Reload should not be blocked by an unrecoverable console handle.
    *
    * @param budgetMs total wall-clock budget across all retries
@@ -1276,7 +1229,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       Left(s"Required connections did not come back within ${budgetMs}ms — $failures")
     } else {
       // Required (command+status) connections are back.  Try console as a
-      // best-effort.  Console is informational — log but don't fail.
+      // best-effort.  Console is informational; log but don't fail.
       tryReconnectConsole() match {
         case Right(_)     => log.info("Reconnect-with-retry: console OK")
         case Left(reason) => log.warn(s"Reconnect-with-retry: console failed (informational, continuing): $reason")
@@ -1523,7 +1476,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * including inside MG string literals (a trailing tab/space in a string
    * becomes a single space). We model this with a simple collapse: strip all
    * whitespace from each line. This matches `diff -w` semantics and is correct
-   * for functional comparison — the only theoretical false-negative would be
+   * for functional comparison; the only theoretical false-negative would be
    * a string literal where spaces are load-bearing, which does not occur in
    * this codebase.
    */
@@ -1550,9 +1503,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *   matching lines (context):           "  <line>"
    *
    * Also writes three files to /tmp for offline review:
-   *   embedded_expected.dmc  — normalized resource program
-   *   embedded_actual.dmc    — normalized controller program
-   *   embedded_diff.txt      — the full diff output
+   *   embedded_expected.dmc ; normalized resource program
+   *   embedded_actual.dmc   ; normalized controller program
+   *   embedded_diff.txt     ; the full diff output
    */
   private def findDifferences(expected: String, actual: String): String = {
     val expectedLines = expected.split("\n").toIndexedSeq
@@ -1573,7 +1526,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         log.warn(s"Could not write diff files to /tmp: ${e.getMessage}")
     }
 
-    // Return a summary for the log — first few differences + counts
+    // Return a summary for the log; first few differences + counts
     val removedCount = diff.linesIterator.count(_.startsWith("- "))
     val addedCount = diff.linesIterator.count(_.startsWith("+ "))
     val summary = new StringBuilder()
@@ -1691,7 +1644,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * Read the controller's servo-loop sample period (`_TM`, microseconds per sample)
    * once at init and stash it in `HcdState.controllerSamplePeriodMicros`.
    *
-   * `_TM` is the time base for the entire Galil controller — every motion timing
+   * `_TM` is the time base for the entire Galil controller; every motion timing
    * primitive (jog speed, PVT segment duration, profiled-move duration, etc.) is
    * expressed in samples.  Default is 1000 µs/sample (1 kHz servo loop) on both
    * lab DMC-50040 and STB DMC-4080; the value is set by `TM <µs>` and can be
@@ -1756,13 +1709,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    * Write motion configuration from HCD config file to the controller's embedded variables.
    *
    * Called after #SetupX runs. The HCD config file is the authoritative source for all
-   * motion parameters — this write supplants whatever values the embedded #SetupX programs
+   * motion parameters; this write supplants whatever values the embedded #SetupX programs
    * initialised, making the config file the single source of truth when under HCD control.
    *
    * Three-tier parameter authority:
-   *   Tier 1 (embedded EEPROM defaults) — used for standalone Galil Tools testing, no HCD
-   *   Tier 2 (HCD config file)          — written here; effective for HCD standalone or with Assembly
-   *   Tier 3 (Assembly configAxis)      — runtime override for the current session
+   *   Tier 1 (embedded EEPROM defaults); used for standalone Galil Tools testing, no HCD
+   *   Tier 2 (HCD config file)         ; written here; effective for HCD standalone or with Assembly
+   *   Tier 3 (Assembly configAxis)     ; runtime override for the current session
    *
    * Embedded variables written per axis:
    *   speed[idx]  ← maxSpeed       (counts/sec)
@@ -1790,7 +1743,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
     // Collect per-axis failures across all active axes so init reports a single,
     // complete picture.  A non-empty list fails the returned Future, which fails
-    // initialization (and brings the HCD up Faulted) — motion config is not
+    // initialization (and brings the HCD up Faulted); motion config is not
     // optional: running on stale EEPROM values when the config write failed
     // would silently mis-drive the mechanism.
     val failures = scala.collection.mutable.ListBuffer[String]()
@@ -1889,7 +1842,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *
    * On any parse or I/O failure, we leave the AxisState defaults in place
    * (`forwardLimitEnabled=true`, `reverseLimitEnabled=true`) so the indicator
-   * still distinguishes hit vs clear. A WARN is logged but init does not fail —
+   * still distinguishes hit vs clear. A WARN is logged but init does not fail , 
    * limit decoration is informational, not safety-critical (the controller
    * enforces the actual `LD` config regardless of what the HCD knows).
    */
@@ -1959,20 +1912,20 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   /**
    * Set up all active axes on the controller by running the embedded #Setup program.
    *
-   * #Setup (thread 0) launches #SetupA–G on threads 1–7 with WT 2 spacing.
+   * #Setup (thread 0) launches #SetupA-G on threads 1-7 with WT 2 spacing.
    * Brushless servo axes run BZ (Brushless Zero) commutation which, per the Galil
    * manual, pauses all controller communication until complete. This means the
-   * firmware serializes BZ across axes regardless of thread count — #SetupB cannot
+   * firmware serializes BZ across axes regardless of thread count; #SetupB cannot
    * start until #SetupA's BZ finishes.
    *
    * Thread 0 therefore stays active for almost the entire setup duration (it is
    * blocked on each XQ call while BZ runs on the previous axis). We know setup is
-   * complete when ALL threads (0–7) are inactive per MG _NO.
+   * complete when ALL threads (0-7) are inactive per MG _NO.
    *
    * We poll MG _NO on the command connection rather than reading IS threadStatus,
    * because QR polling on the status connection is suspended during setup (BZ
    * pauses that connection too). A read timeout on MG _NO means BZ is in progress
-   * on that axis — we treat it as "still busy" and keep waiting.
+   * on that axis; we treat it as "still busy" and keep waiting.
    */
   private def setupAxes(): Future[Unit] = {
     import scala.concurrent.Await
@@ -1990,7 +1943,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val activeAxes = axisNames.zip(hcdConfig.activeAxes).filter(_._2).map(_._1)
     log.info(s"Active axes: ${activeAxes.mkString(", ")}")
 
-    // 1. Motors off before setup — required by many embedded setup commands.
+    // 1. Motors off before setup; required by many embedded setup commands.
     activeAxes.foreach { axisName =>
       val moCmd = s"MO$axisName"
       log.info(s"Motor off before setup: $moCmd")
@@ -2003,7 +1956,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
     // 2. Launch #Setup on thread 0. This spawns all #SetupX programs and returns
     //    its ack promptly (before any BZ starts). We don't use sendAndWaitForThread
-    //    here because completion is detected differently — see step 3.
+    //    here because completion is detected differently; see step 3.
     log.info("Running #Setup")
     val xqResult = Await.result(
       controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
@@ -2012,9 +1965,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     xqResult.error.foreach(err => throw new RuntimeException(s"XQ #Setup,0 failed: $err"))
     log.info("XQ #Setup,0 launched — waiting for all threads to complete")
 
-    // 3. Poll MG _NO until all threads (0–7) are inactive (_NO = 0).
+    // 3. Poll MG _NO until all threads (0-7) are inactive (_NO = 0).
     //    Thread 0 stays active until it has spawned all #SetupX programs.
-    //    Threads 1–7 go inactive as each axis completes.
+    //    Threads 1-7 go inactive as each axis completes.
     //
     //    BZ (Brushless Zero) pauses all controller communication per the Galil manual.
     //    To avoid desynchronizing the socket with stale pending commands, we set the
@@ -2022,14 +1975,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     //    Each MG _NO call will simply block through any BZ pause and return when the
     //    controller responds. We restore the normal 3s timeout when done.
     //
-    //    Overall timeout is enforced by the deadline — 120s covers 4 BZ axes at ~10s each.
+    //    Overall timeout is enforced by the deadline; 120s covers 4 BZ axes at ~10s each.
     def setReadTimeout(ms: Int): Unit =
       Await.result(
         controllerCommandActor.ask[GalilCommandMessage.SendCommandResult](
           ref => GalilCommandMessage.SetReadTimeout(ms, ref)),
         5.seconds)
 
-    // Use a large explicit timeout rather than 0 (infinite) — some JVM/OS combinations
+    // Use a large explicit timeout rather than 0 (infinite); some JVM/OS combinations
     // treat setSoTimeout(0) inconsistently. 60s comfortably covers the longest BZ pause.
     setReadTimeout(60 * 1000)
     log.info("Command connection read timeout set to 60s for setup")
@@ -2062,7 +2015,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     }
 
     // 4. Apply per-axis config now that hardware setup is done.  Also reset
-    //    each active axis's IS state to Lost — at startup this matches the
+    //    each active axis's IS state to Lost; at startup this matches the
     //    default (no-op); during faultReset Init recovery it clears any
     //    lingering Error/Homing/Moving/Tracking state from before the fault.
     //    Position/velocity will be refreshed by the next QR poll once
@@ -2105,7 +2058,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *
    * Used during initialization to execute embedded programs (#Init, #SetupX) and
    * wait for them to finish. This is different from the command-time flow which
-   * uses CommandWatcherActor — during init, we're blocking in initialize() and
+   * uses CommandWatcherActor; during init, we're blocking in initialize() and
    * there's no CRM or external caller to notify.
    *
    * The ControllerStatusActor is already running and updating threadStatus in the IS actor
@@ -2128,7 +2081,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     implicit val scheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
 
     scala.util.Try {
-      // 1. Send XQ via ExecuteProgram — allocates thread, sends "XQ;MG _XQ<thread>"
+      // 1. Send XQ via ExecuteProgram; allocates thread, sends "XQ;MG _XQ<thread>"
       //    as a single compound, returns threadWasActive=true if the parser-side
       //    follow-up _XQ query saw a non-(-1) line number.
       val execFuture = controllerCommandActor.ask[GalilCommandMessage.ExecuteProgramResult](
@@ -2143,16 +2096,16 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       val allocatedThread = execResult.thread
 
       if !execResult.threadWasActive then
-        // The post-XQ _XQ<thread> query returned -1 — thread N has already
+        // The post-XQ _XQ<thread> query returned -1; thread N has already
         // run and stopped. The host parser yields between commands on a line
         // (the no-switch rule applies to embedded code, not host TCP commands),
         // so a short program (e.g. #Init) can complete in microseconds before
         // the parser-side MG runs. Skip the polling loop and proceed to the
-        // TC 1 check below — if the program errored the latch will tell us.
+        // TC 1 check below; if the program errored the latch will tell us.
         log.info(s"Thread $allocatedThread: _XQ returned -1 immediately after XQ " +
           s"(program completed before the parser-side follow-up query)")
       else
-        // Thread confirmed active — poll IS until it clears
+        // Thread confirmed active; poll IS until it clears
         val deadline     = timeout.fromNow
         val pollInterval = 100 // ms
         var completed    = false
@@ -2195,7 +2148,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
       tcResult.error match {
         case Some(err) =>
-          // TC itself failed (unlikely — means the command connection is broken)
+          // TC itself failed (unlikely; means the command connection is broken)
           log.warn(s"TC 1 query after '#$label' failed: $err")
         case None =>
           val tcText = tcResult.response.trim
@@ -2223,7 +2176,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     log.info("Shutting down Galil HCD")
 
     // Stop HMI server first (clients will see disconnect).  We MUST await
-    // termination — without this, the old binding's existing connections
+    // termination; without this, the old binding's existing connections
     // (browser keep-alive HTTP, WebSocket) survive into the new TLA's
     // initialize() on Restart, and HTTP requests continue to be routed by
     // the OLD binding's route closures, which hold references to the
@@ -2242,7 +2195,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     if (statusMonitor != null) statusMonitor ! ControllerStatusActor.SetPolling(enabled = false)
     // Explicitly stop the console actor so its TCP handle is released immediately.
     // Without this, the actor's blocking read thread runs until socket timeout
-    // (~3s) before PostStop fires — leaving the controller handle open in the
+    // (~3s) before PostStop fires; leaving the controller handle open in the
     // interim. consoleActor is only created in hardware mode.
     if (consoleActor != null) consoleActor ! ControllerConsoleActor.Stop
     currentStatePublisher ! CurrentStatePublisherActor.Shutdown
@@ -2265,12 +2218,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         val commandName = setup.commandName.name
 
         // Gate: reject all commands when the HCD is not in Ready state.
-        //   Uninitialized — startup is still in progress (controller setup,
+        //   Uninitialized; startup is still in progress (controller setup,
         //                  motion config writes, etc.); accepting commands
         //                  here would race the init sequence.  No exemption:
         //                  faultReset doesn't make sense when there is no
         //                  fault yet.
-        //   Faulted      — operator must clear the fault first; only
+        //   Faulted     ; operator must clear the fault first; only
         //                  faultReset is permitted (legacy behavior).
         // Ready commands fall through to normal validation.
         // Gate decision is shared with the HMI path via CommandGate; see that
@@ -2306,7 +2259,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   /**
    * Synchronously query HcdState from InternalStateActor.
    * Used in validateCommand which runs on the CSW framework thread.
-   * Fails closed — on query failure returns a Faulted state so commands
+   * Fails closed; on query failure returns a Faulted state so commands
    * are blocked rather than silently allowed through.
    */
   private def queryHcdStateSync(): HcdState = {
@@ -2382,7 +2335,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   /**
    * Validate the faultReset command.
    *
-   * faultReset is the only HCD-administrative command — it does not target an
+   * faultReset is the only HCD-administrative command; it does not target an
    * axis and is not gated by axis state.  The ICD declares severity as a
    * required enum (None | Init | Reset | Reload), but for backwards
    * compatibility with the existing Clear Fault button (which omits the
@@ -2396,7 +2349,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
 
     try {
-      // severity is optional — default None — but if provided it must be one
+      // severity is optional; default None; but if provided it must be one
       // of the four ICD-defined values.  ChoiceKey enforces this at parse
       // time, so reading the parameter is sufficient validation.
       val _ = scala.util.Try(setup(FaultResetCommand.severityKey).head.name).getOrElse("None")
@@ -2507,7 +2460,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
       maybeState match {
         case Some(axisState) =>
-          // 1. State machine check first (SDD Figure 4-2) — shared with the
+          // 1. State machine check first (SDD Figure 4-2); shared with the
           // HMI path and the CHA backstop via the canonical enum method.
           CommandGate.checkAxisState(axisState, commandName) match {
             case Some(reason) =>
@@ -2535,7 +2488,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
           }
 
         case None =>
-          // Axis not initialized in IS — reject (axis should be initialized during HCD init)
+          // Axis not initialized in IS; reject (axis should be initialized during HCD init)
           CommandResponse.Invalid(runId,
             CommandIssue.OtherIssue(s"Axis $axis not initialized"))
       }
@@ -2554,7 +2507,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       case setup: Setup =>
         val commandName = setup.commandName.name
 
-        // faultReset is an HCD-administrative command — it does not target an
+        // faultReset is an HCD-administrative command; it does not target an
         // axis, does not allocate a controller thread, and does not go through
         // the normal CommandHandlerActor / CommandWatcherActor pipeline.  It is
         // dispatched directly here so that it can drive HCD lifecycle state

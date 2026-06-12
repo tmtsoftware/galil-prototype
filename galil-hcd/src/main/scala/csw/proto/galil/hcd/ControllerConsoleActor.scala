@@ -27,29 +27,29 @@ import scala.util.control.NonFatal
  * Startup synchronisation:
  *   The caller passes a CountDownLatch(1). The read thread counts it down
  *   immediately after CF I + CW 2 complete (handle is live and receiving).
- *   The CI actor's Behaviors.setup block waits on this latch (up to
+ *   The ControllerCommandActor's Behaviors.setup block waits on this latch (up to
  *   ReadyTimeoutMs) before returning. Because GalilHcd.initialize() blocks on
- *   GetIdentity after spawning CI actor, the wait is inline in that chain —
- *   guaranteeing the console handle is active before #Init or #SetupX execute.
+ *   GetIdentity after spawning the ControllerCommandActor, the wait is inline in
+ *   that chain, guaranteeing the console handle is active before #Init or #SetupX
+ *   execute.
  *
  *   On any connection failure the latch is also counted down, so the caller
  *   is never left blocking indefinitely; it logs a warning and continues.
  *
- * Reconnect (Session 58):
- *   Used by faultReset Reset and Reload severities — the controller's RS
- *   command drops all TCP sessions, so we need to be able to re-establish
- *   the console handle after the controller comes back.  The Reconnect
- *   message stops the existing reader thread (closing its socket so the
- *   in-progress read unblocks promptly), waits for it to terminate, then
- *   starts a fresh connect + CF I + CW 2 sequence.  Replies success/failure
- *   on a fresh CountDownLatch with a generous ReconnectTimeoutMs budget.
+ * Reconnect:
+ *   Used by faultReset Reset and Reload severities. The controller's RS command
+ *   drops all TCP sessions, so the console handle must be re-established after the
+ *   controller comes back. The Reconnect message stops the existing reader thread
+ *   (closing its socket so the in-progress read unblocks promptly), waits for it to
+ *   terminate, then starts a fresh connect + CF I + CW 2 sequence. Replies
+ *   success/failure on a fresh CountDownLatch with a generous ReconnectTimeoutMs budget.
  *
  * CF routing:
  *   Only one TCP handle receives MG output at a time (determined by CF I).
  *   On HCD shutdown this handle closes and CF reverts to the prior handle.
  *
  * Simulation:
- *   Not spawned in simulation mode (CI actor enforces this).
+ *   Not spawned in simulation mode (ControllerCommandActor enforces this).
  */
 object ControllerConsoleActor:
 
@@ -57,11 +57,10 @@ object ControllerConsoleActor:
   case object Stop extends Command
 
   /**
-   * Re-establish the console TCP handle.  Used by faultReset Reset and
-   * Reload severities (Session 58).  Stops any in-flight reader thread,
-   * waits briefly for it to terminate, then starts a fresh connect + CF I
-   * + CW 2 sequence.  Replies success/failure once the new handle is live
-   * (or has failed to come up).
+   * Re-establish the console TCP handle. Used by faultReset Reset and Reload
+   * severities. Stops any in-flight reader thread, waits briefly for it to
+   * terminate, then starts a fresh connect + CF I + CW 2 sequence. Replies
+   * success/failure once the new handle is live (or has failed to come up).
    *
    * Console is informational and excluded from isOperational, so callers
    * can choose to ignore failure here without losing operational status.
@@ -77,7 +76,7 @@ object ControllerConsoleActor:
 
   /**
    * Outcome the reader thread reports back to whoever asked it to start
-   * (initial setup or a Reconnect message).  Internal — not exposed.
+   * (initial setup or a Reconnect message). Internal, not exposed.
    */
   private sealed trait ConnectOutcome
   private case object ConnectSucceeded extends ConnectOutcome
@@ -285,8 +284,8 @@ object ControllerConsoleActor:
 
     /**
      * Stop the existing reader thread and wait briefly for it to terminate
-     * before returning.  Used by Reconnect — we want the old socket/thread
-     * fully gone before starting a fresh one to avoid two threads reading
+     * before returning. Used by Reconnect to ensure the old socket and thread
+     * are fully gone before starting a fresh one, avoiding two threads reading
      * the same (or different) sockets and racing on internalStateActor
      * notifications.
      */

@@ -15,9 +15,9 @@ import java.time.Instant
  * - Notifies interested actors when state changes occur
  *
  * Two independent notification channels:
- *   1. StateChanged (Subscribe/Unsubscribe) — for AxisState + HCD state changes.
+ *   1. StateChanged (Subscribe/Unsubscribe); for AxisState + HCD state changes.
  *      Used by CurrentStatePublisherActor.
- *   2. CmdStateChanged (SubscribeCmdState/UnsubscribeCmdState) — for AxisCmdState changes.
+ *   2. CmdStateChanged (SubscribeCmdState/UnsubscribeCmdState); for AxisCmdState changes.
  *      Used by CommandWatcher actors. Only fires when command-relevant fields change,
  *      avoiding noise from high-frequency position/velocity updates.
  * 
@@ -138,7 +138,7 @@ object InternalStateActor:
    *
    * Called once from GalilHcd.initialize() after CS is spawned. Without it,
    * IS will still function but won't forward thread register/clear events to
-   * CS — which means CS's axis→thread map stays empty and its ae[] decision
+   * CS; which means CS's axis→thread map stays empty and its ae[] decision
    * logic cannot attribute program errors to specific axes. Sent as a normal
    * message rather than baked into the constructor because IS is spawned at
    * HCD construction (before config is loaded), while CS is created later in
@@ -151,7 +151,7 @@ object InternalStateActor:
    * IS compares against registered threads to detect completions:
    * for each registered (thread→axis), if the thread's bit is now clear,
    * IS sets activeThread=0 on the owning axis and fires CmdStateChanged.
-   * Sent by StatusMonitor on every poll cycle.
+   * Sent by ControllerStatusActor on every poll cycle.
    */
   case class UpdateThreadStatus(threadStatusByte: Int) extends Command
 
@@ -182,13 +182,13 @@ object InternalStateActor:
    * Callers:
    *   - ControllerStatusActor.decideAxisAndControllerErrors when a controller
    *     error cannot be attributed to a single axis (0 or 2+ candidates).
-   *   - InternalStateActor.ReportConnectionStatus(Disconnected) handler — self-message
+   *   - InternalStateActor.ReportConnectionStatus(Disconnected) handler; self-message
    *     after the connection field is updated.
    *   - GalilHcd.handleFaultReset when recovery fails.
    *
    * Idempotent: if HcdState is already Faulted, the message still re-applies axis
    * state transitions (harmless) and the reason text (which may be updated). This
-   * simplifies callers — no need to check current state before sending.
+   * simplifies callers; no need to check current state before sending.
    */
   case class EnterFaulted(reason: String) extends Command
 
@@ -203,13 +203,13 @@ object InternalStateActor:
    *     advance the ledger: transition the axis to Error with axisError =
    *     "Tracking stream underrun" and clear the session.
    *
-   * Watermark warnings (low free-slot count) are deferred to a future enhancement —
+   * Watermark warnings (low free-slot count) are deferred to a future enhancement , 
    * the watermark policy hasn't been pinned down (1 slot? 2? configurable?), and the
    * preemptive TAI check catches every underrun before the FIFO actually empties,
    * so the warning is purely advance notice.
    *
    * If CS believes an axis is tracking but IS no longer does (race with stopAxis
-   * arrival), the IS-side handler simply ignores the entry for that axis — the
+   * arrival), the IS-side handler simply ignores the entry for that axis; the
    * authoritative source for the tracking lifecycle is IS, not the CS cache.
    *
    * @param readings Map[Axis, (freeFifoSlots, segmentsExecuted)]
@@ -291,7 +291,7 @@ object InternalStateActor:
     }
 
   /**
-   * Convenience overloads for unit tests — avoids requiring a LoggerFactory in every test.
+   * Convenience overloads for unit tests; avoids requiring a LoggerFactory in every test.
    * Uses a no-prefix LoggerFactory that satisfies the type contract but produces minimal output.
    */
   private def testLoggerFactory: LoggerFactory =
@@ -333,7 +333,7 @@ class InternalStateActor(
 
   // ControllerStatusActor reference, wired in via SetStatusActor after CS is
   // spawned. None until then; thread register/clear events are not forwarded
-  // until CS is wired. (CS still functions without these — its axis→thread
+  // until CS is wired. (CS still functions without these; its axis→thread
   // map stays empty, disabling the per-axis program-error attribution path.)
   private var statusActor: Option[ActorRef[ControllerStatusActor.Command]] = None
   
@@ -427,7 +427,7 @@ class InternalStateActor(
    * for any axes that were in motion-related states.
    *
    * State transitions per SDD Figure 4-2 (parallel to stopCompletionState):
-   *   Homing   → Lost    (position unknown — incomplete homing)
+   *   Homing   → Lost    (position unknown; incomplete homing)
    *   Moving   → Error   (interrupted mid-motion; was homed, so position known)
    *   Tracking → Error   (interrupted mid-track)
    *   Idle, Lost, Error → unchanged
@@ -468,7 +468,7 @@ class InternalStateActor(
         handleUpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
       }
 
-      // Clear activeCommand if set — regardless of prior axisState.
+      // Clear activeCommand if set; regardless of prior axisState.
       currentState.getCmdState(axis).foreach { cmdState =>
         if cmdState.activeCommand.isDefined then
           handleUpdateAxisCmdState(axis,
@@ -485,19 +485,19 @@ class InternalStateActor(
    * For each axis in the report we check: is the axis still in `axisState = Tracking`
    * AND does it have an active `trackingSession` AND is `observedAt` strictly later
    * than the session's `lastValidTime`?  If so, the FIFO has executed past the most
-   * recent submitted segment without a fresh `trackAxis` advancing the ledger — the
+   * recent submitted segment without a fresh `trackAxis` advancing the ledger; the
    * controller will silently stop the motor at the end of that segment (or already
    * has).  We transition the axis to Error and clear the session.
    *
    * "Preemptive" means: we declare the fault as soon as TAI now > lastValidTime,
    * which is at the instant the *last* segment finishes executing.  The controller
    * itself will continue to honor the trailing portion of that segment but won't
-   * emit any error — silent underrun.  By declaring Error preemptively the assembly
+   * emit any error; silent underrun.  By declaring Error preemptively the assembly
    * sees the fault immediately rather than after some indeterminate amount of
    * post-FIFO-empty silence.
    *
    * If CS believes an axis is tracking but IS no longer does (e.g. stopAxis just
-   * arrived), we ignore that entry — IS is authoritative for the lifecycle.
+   * arrived), we ignore that entry; IS is authoritative for the lifecycle.
    *
    * The free-FIFO-slots (`_PV`) and segments-executed (`_BT`) readings are not
    * acted on here in S64; they are retained in the message shape for future
@@ -511,7 +511,7 @@ class InternalStateActor(
       currentState.axes.get(axis).foreach { axisState =>
         if axisState.axisState == AxisStateEnum.Tracking then
           // Suppress underrun detection when a stop is in flight.  There is a
-          // ~10–20ms race window between #StopX physically halting the motor
+          // ~10-20ms race window between #StopX physically halting the motor
           // and the IS state update that transitions axisState from Tracking
           // to Idle: a CS poll inside this window sees Tracking + Some(session)
           // + observedAt past lastValidTime, which looks like an underrun but
@@ -562,11 +562,11 @@ class InternalStateActor(
                       context.system.ignoreRef
                     )
               case None =>
-                // axisState=Tracking but no session — invariant violation.  Log and let
+                // axisState=Tracking but no session; invariant violation.  Log and let
                 // the next stopAxis / fault clean up.
                 log.warn(s"PVT monitor axis $axis: axisState=Tracking but no trackingSession " +
                          s"(invariant violation); ignoring reading")
-        // else: axis no longer Tracking by IS's authoritative view — CS's cache is
+        // else: axis no longer Tracking by IS's authoritative view; CS's cache is
         // stale by one StateChanged delivery; ignore.
       }
     }
@@ -617,7 +617,7 @@ class InternalStateActor(
       // Applied here (rather than asking every handler to remember "and clear
       // axisError") so the invariant is declarative: "axisState != Error ⇒
       // axisError == ''".  If a caller has explicitly set axisError in the same
-      // update, that wins — the auto-clear only fires when no axisError key was
+      // update, that wins; the auto-clear only fires when no axisError key was
       // supplied (rare: only fault paths set it, and those simultaneously set
       // axisState=Error so the auto-clear branch doesn't fire anyway).
       val leavingError =
@@ -637,7 +637,7 @@ class InternalStateActor(
       // EnterFaulted, underrun detector).  But other transition paths
       // (CS.reportAxisError, CHA.setErrorState, IS.applySpontaneousMotion,
       // GalilHcd.applyAxisConfig) did not clear it.  Worse, EnterFaulted itself
-      // only clears trackingSession when the prior axisState was Tracking — so a
+      // only clears trackingSession when the prior axisState was Tracking; so a
       // sequence like "underrun fires → Error (clears session)" works, but
       // "embedded error fires → Error (does NOT clear session)" followed by a
       // later fault leaves a stale Some(_) indefinitely because EnterFaulted's
@@ -648,7 +648,7 @@ class InternalStateActor(
       // Make the invariant declarative: "axisState != Tracking ⇒
       // trackingSession == None".  If a caller has explicitly set trackingSession
       // in the same update (only handleTrackAxis does so, and only with axisState
-      // = Tracking), that wins — the auto-clear only fires on transitions OUT.
+      // = Tracking), that wins; the auto-clear only fires on transitions OUT.
       val leavingTracking =
         oldAxisState.exists(_.axisState == AxisStateEnum.Tracking) &&
         currentState.getAxis(axis).exists(_.axisState != AxisStateEnum.Tracking)
@@ -835,9 +835,9 @@ class InternalStateActor(
     Behaviors.same
 
   /**
-   * Process hardware thread status bitmask from StatusMonitor QR poll.
+   * Process hardware thread status bitmask from ControllerStatusActor QR poll.
    * For each registered (thread→axis): if the thread bit is now clear, the
-   * thread has finished — set activeThread=0 on the owning axis, remove from
+   * thread has finished; set activeThread=0 on the owning axis, remove from
    * registry, and fire CmdStateChanged so the watcher can evaluate its mask.
    *
    * Also forwards a ClearAxisThread to ControllerStatusActor (if wired) so

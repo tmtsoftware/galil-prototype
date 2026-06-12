@@ -123,7 +123,7 @@ class CurrentStatePublisherActor(
       // (e.g. Idle→Homing→Idle) is captured in CSP regardless of poll timer phase.
       // Without this, fast-completing commands (~100ms) can skip transient states
       // because the 10Hz timer hasn't fired between the state changes.
-      // Suppressed during Uninitialized — see Publish10Hz comment below.
+      // Suppressed during Uninitialized; see Publish10Hz comment below.
       if changedFields.contains("axisState") && newState.state != HcdStateEnum.Uninitialized then
         changedAxes.foreach { axis =>
           newState.getAxis(axis).foreach { axisState =>
@@ -135,14 +135,14 @@ class CurrentStatePublisherActor(
       
     case Publish1Hz =>
       // CurrentState (HCD lifecycle state, controllerId, controllerErrorMsg) is
-      // published unconditionally at 1Hz, including during Uninitialized — the
+      // published unconditionally at 1Hz, including during Uninitialized; the
       // ICD defines "Uninitialized" as a valid choice value precisely so
       // assemblies can see this state.  Late subscribers always receive a
       // message within 1 second.  Change-detection caused starvation: after
       // initialization state stabilizes, hcdChanged stays false and a
       // subscriber that arrives after the first publish never receives anything.
       //
-      // InputOutputState is suppressed during Uninitialized — digital/analog
+      // InputOutputState is suppressed during Uninitialized; digital/analog
       // values are at default zeros until the QR poll starts reading the
       // controller.  Once Ready, normal change-detection applies.
       latestState.foreach { state =>
@@ -162,13 +162,13 @@ class CurrentStatePublisherActor(
 
     case Publish10Hz =>
       // Per-axis publications (position/velocity/axisState/command state) are
-      // suppressed during Uninitialized — values are at construction defaults
+      // suppressed during Uninitialized; values are at construction defaults
       // (position=0, velocity=0, axisState=Lost) until the controller is read.
       // Publishing those would create noise for subscribing assemblies and could
       // misleadingly trigger logic that watches for axisState transitions
       // (e.g. "axis is Lost, home it").  Resumes once Ready.
       latestState.filter(_.state != HcdStateEnum.Uninitialized).foreach { state =>
-        // CurrentStateAxis[A-H] always published at 10 Hz — position/velocity is
+        // CurrentStateAxis[A-H] always published at 10 Hz; position/velocity is
         // a continuous stream that Assemblies need at rate, not just on change.
         publishAllAxisStates(state)
 
@@ -195,7 +195,7 @@ class CurrentStatePublisherActor(
    */
   private def publishCurrentState(hcdState: HcdState): Unit =
     // Map internal enum to ICD choice string.  Names are identical to the
-    // ICD's stateKey choices (Uninitialized, Ready, Faulted) — see
+    // ICD's stateKey choices (Uninitialized, Ready, Faulted); see
     // GalilMotionKeys.CurrentStateCurrentState.stateKey.
     val stateValue = hcdState.state match
       case HcdStateEnum.Uninitialized => "Uninitialized"
@@ -320,7 +320,7 @@ class CurrentStatePublisherActor(
         CurrentStateAxisHCurrentState.axisErrorMsgKey
       )
 
-    // Keys for rotating-axis fields — countsPerRevKey for A,B,D-H; axis C pending ICD fix
+    // Keys for rotating-axis fields; countsPerRevKey for A,B,D-H; axis C pending ICD fix
     val (angPosKey, cpdKey) = axis match
       case Axis.A => (CurrentStateAxisACurrentState.angularPositionKey, CurrentStateAxisACurrentState.countsPerRevKey)
       case Axis.B => (CurrentStateAxisBCurrentState.angularPositionKey, CurrentStateAxisBCurrentState.countsPerRevKey)
@@ -331,7 +331,7 @@ class CurrentStatePublisherActor(
       case Axis.G => (CurrentStateAxisGCurrentState.angularPositionKey, CurrentStateAxisGCurrentState.countsPerRevKey)
       case Axis.H => (CurrentStateAxisHCurrentState.angularPositionKey, CurrentStateAxisHCurrentState.countsPerRevKey)
 
-    // homed flag — reflects AxisState.homed (true iff a valid home reference exists).
+    // homed flag; reflects AxisState.homed (true iff a valid home reference exists).
     // Published so assemblies can surface their `indexed` field from HCD truth rather than inferring it.
     val homedKey = axis match
       case Axis.A => CurrentStateAxisACurrentState.homedKey
@@ -364,11 +364,11 @@ class CurrentStatePublisherActor(
         stateKey.set(stateValue),
         inPosKey.set(axisState.inPosition),
         errKey.set(axisState.axisError),
-        // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
+        // Angular position [0,360°); non-zero only for rotating axes with countsPerRevolution set
         angPosKey.set(axisState.angularPosition.getOrElse(0.0).toFloat),
-        // Counts per revolution — integer, published so Assembly can do its own unit conversions
+        // Counts per revolution; integer, published so Assembly can do its own unit conversions
         cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat),
-        // Valid-home-reference flag (S68) — assemblies map this to their `indexed` field
+        // Valid-home-reference flag; assemblies map this to their `indexed` field
         homedKey.set(axisState.homed)
       )
     )

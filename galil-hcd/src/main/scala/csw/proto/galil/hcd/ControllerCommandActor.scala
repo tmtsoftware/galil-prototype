@@ -21,7 +21,7 @@ import scala.concurrent.duration._
  *   - Reports commandConnection status to InternalStateActor on startup
  *
  * QR polling and analog input queries are handled by ControllerStatusActor on its
- * own independent TCP handle — no status traffic passes through this actor.
+ * own independent TCP handle; no status traffic passes through this actor.
  * Console MG output capture is handled by ControllerConsoleActor (hardware-only),
  * spawned as a sibling by GalilHcd after this actor is ready.
  */
@@ -88,14 +88,14 @@ private[hcd] object ControllerCommandActor {
          *   DMC4080  → 8 axes   (400 series: 4-digit suffix, last digit before 0 = axes)
          *   DMC50040 → 4 axes   (500 series: 5-digit suffix, 4th digit = axes)
          *
-         * ID returns connector/board inventory (format differs by series) — logged for
+         * ID returns connector/board inventory (format differs by series); logged for
          * diagnostics but not parsed for model/axes.
          *
          * @return ControllerIdentity with parsed fields
          * @throws IOException if the controller does not respond or returns unexpected data
          */
         def identifyController(): ControllerIdentity = {
-          // Step 1: ^R^V — authoritative firmware version and model string
+          // Step 1: ^R^V; authoritative firmware version and model string
           val rvResponse = galilSend("\u0012\u0016")
           if (rvResponse.isEmpty || rvResponse == "?")
             throw new IOException(
@@ -122,7 +122,7 @@ private[hcd] object ControllerCommandActor {
           val model = if modelToken.toUpperCase.startsWith("DMC") then modelToken.drop(3)
                       else modelToken
 
-          // Step 2: ID — board/connector inventory; format varies by series, log as-is
+          // Step 2: ID; board/connector inventory; format varies by series, log as-is
           val idResponse = galilSend("ID")
           val idLines = if idResponse.isEmpty || idResponse == "?" then Seq.empty
                         else idResponse.split("\r?\n").map(_.trim).filter(_.nonEmpty).toSeq
@@ -142,7 +142,7 @@ private[hcd] object ControllerCommandActor {
 
         val controllerIdentity =
           if simulate then
-            // Simulator does not implement ^R^V or ID — return a synthetic identity.
+            // Simulator does not implement ^R^V or ID; return a synthetic identity.
             // axisCount=-1 signals "unknown" to GalilHcd (no controllerAxisCount pushed to IS).
             log.info("Simulation mode — skipping controller identification (^R^V / ID)")
             ControllerIdentity(
@@ -159,7 +159,7 @@ private[hcd] object ControllerCommandActor {
         // ========================================
         // Thread 0 is reserved for #Init / general purpose.
         // Threads 1-7 are available for embedded programs.
-        // Allocation queries MG _NO directly — the hardware IS the pool.
+        // Allocation queries MG _NO directly; the hardware IS the pool.
         // No separate bookkeeping needed; MG _NO is always authoritative.
 
         /**
@@ -207,7 +207,7 @@ private[hcd] object ControllerCommandActor {
         }
 
         Behaviors.receiveMessage[GalilCommandMessage] {
-          // Return controller identity — confirms actor setup is complete
+          // Return controller identity; confirms actor setup is complete
           case GalilCommandMessage.GetIdentity(replyTo) =>
             replyTo ! controllerIdentity
             Behaviors.same
@@ -221,7 +221,7 @@ private[hcd] object ControllerCommandActor {
           case GalilCommandMessage.DownloadProgram(replyTo) =>
             try {
               // Pre-UL drain: a clean buffer is a precondition for UL.
-              // Under normal operation this should always be empty — the
+              // Under normal operation this should always be empty; the
               // post-DL drain in galilIo.uploadProgram and the TCP-actor
               // protocol discipline keep the buffer clean across commands.
               // Logged when non-empty so any future protocol drift is
@@ -280,11 +280,11 @@ private[hcd] object ControllerCommandActor {
             Behaviors.same
 
           // Burn the loaded volatile program to EEPROM (BP command).  Takes
-          // 2–3 seconds on hardware; we extend the read timeout to 5s for
+          // 2-3 seconds on hardware; we extend the read timeout to 5s for
           // the burn and restore the original 3s afterward.  All three
           // operations (set timeout, send BP, restore timeout) run inside
           // a single galilIo.synchronized block so no other actor traffic
-          // can interleave.  Used by faultReset Reload severity (Session 58).
+          // can interleave. Used by faultReset Reload severity.
           case GalilCommandMessage.BurnProgram(replyTo) =>
             try {
               log.info("Burning program to EEPROM (BP)")
@@ -293,7 +293,7 @@ private[hcd] object ControllerCommandActor {
                 try {
                   // sendAndWaitForPrompt returns Unit on ":" success and
                   // throws RuntimeException on "?" rejection.  No data
-                  // response — BP just acks with the prompt when done.
+                  // response; BP just acks with the prompt when done.
                   galilIo.sendAndWaitForPrompt("BP")
                 } finally {
                   galilIo.setReadTimeout(3000)
@@ -317,7 +317,7 @@ private[hcd] object ControllerCommandActor {
           // sessions on the controller as part of the reset, so we use
           // writeRaw (no wait for response) and proactively report the
           // command connection as Disconnected.  Caller must wait for the
-          // controller to come back (~5–10s on STB per empirical testing)
+          // controller to come back (~5-10s on STB)
           // and then reconnect via Reconnect on this actor and on the
           // status / console actors.  Used by faultReset Reset and Reload.
           case GalilCommandMessage.SendReset(replyTo) =>
@@ -326,31 +326,29 @@ private[hcd] object ControllerCommandActor {
               galilIo.synchronized {
                 galilIo.writeRaw("RS")
               }
-              // RS resets the controller's embedded state but on DMC-500
-              // series the TCP session is preserved (verified empirically
-              // via GalilTools session — `:RS` returns to a live `:` prompt
-              // without reconnect).  We do NOT close the local socket here.
+              // RS resets the controller's embedded state, but on the DMC-500
+              // series the TCP session is preserved (`:RS` returns to a live `:`
+              // prompt without reconnect), so the local socket is not closed here.
               //
-              // We still mark commandConnection as Disconnected so the rest
-              // of the system pauses traffic during the controller's reset
-              // window; the upcoming Reconnect call will re-mark Connected
-              // once the controller is responsive again.  Reconnect's drain
-              // step (Session 58) clears any pre-RS bytes that may still be
-              // sitting in our receive buffer.
+              // commandConnection is still marked Disconnected so the rest of the
+              // system pauses traffic during the controller's reset window; the
+              // upcoming Reconnect call re-marks Connected once the controller is
+              // responsive again. Reconnect's drain step clears any pre-RS bytes
+              // that may still be sitting in the receive buffer.
               internalStateActor ! InternalStateActor.ReportConnectionStatus(
                 "commandConnection", ConnectionStatus.Disconnected)
               replyTo ! GalilCommandMessage.SendResetResult(success = true)
             } catch {
               case ex: IOException =>
                 // If the write itself failed the socket is genuinely dead
-                // (RS write is a tiny payload — IOException here means TCP
+                // (RS write is a tiny payload; IOException here means TCP
                 // is broken, not a controller-side issue).  Mark Disconnected
                 // and let the next Reconnect open a fresh socket.
                 log.warn(s"RS write — IOException (socket may already be dead): ${ex.getMessage}")
                 try galilIo.close() catch case _: Exception => ()
                 internalStateActor ! InternalStateActor.ReportConnectionStatus(
                   "commandConnection", ConnectionStatus.Disconnected)
-                // Still report success — RS was attempted; the caller's job
+                // Still report success; RS was attempted; the caller's job
                 // is to reconnect, which will tell us whether the controller
                 // came back.  Returning failure here would short-circuit
                 // recovery for a probably-cosmetic reason.
@@ -538,7 +536,7 @@ private[hcd] object ControllerCommandActor {
           // Halt an active execution thread (SDD 4.8.1).
           //
           // The thread parameter comes from IS.activeThread (set by CommandHandlerActor when
-          // the program started). CI confirms via MG _NO before sending HX — if the thread
+          // the program started). It confirms via MG _NO before sending HX; if the thread
           // bit is no longer set, the program already finished and HX is skipped.
           //
           // This handler only kills the thread. The caller is responsible for any motor
@@ -587,11 +585,11 @@ private[hcd] object ControllerCommandActor {
           // Step 2: if test fails, close dead socket, open fresh GalilIoTcp, retest.
           // Reports commandConnection Connected/Disconnected to IS in either outcome.
           //
-          // Buffer hygiene (Session 58): drain the receive buffer before testing
+          // Buffer hygiene: drain the receive buffer before testing
           // and after a successful test to clear any stale data left over from
           // pre-fault traffic.  Without this, a stale response chunk ending in
           // ":" can confuse the next multi-chunk read (notably UL during
-          // verifyEmbeddedProgram) and short-circuit termination — the post-RS
+          // verifyEmbeddedProgram) and short-circuit termination; the post-RS
           // STB regression that motivated this drain.  Status actor already
           // does this; command actor now mirrors the pattern.
           case GalilCommandMessage.Reconnect(replyTo) =>
@@ -629,7 +627,7 @@ private[hcd] object ControllerCommandActor {
             if testCurrentSocket() then
               log.info("Reconnect: existing command socket is working")
               // Post-drain: clear anything that arrived during/after the MG 0
-              // exchange — for example, late data from before the disconnect.
+              // exchange; for example, late data from before the disconnect.
               galilIo.synchronized { drainBuffer(galilIo) }
               internalStateActor ! InternalStateActor.ReportConnectionStatus(
                 "commandConnection", ConnectionStatus.Connected
@@ -642,7 +640,7 @@ private[hcd] object ControllerCommandActor {
               openFreshSocket() match
                 case Right(newIo) =>
                   galilIo = newIo
-                  // Post-drain on fresh socket too — controllers can emit an
+                  // Post-drain on fresh socket too; controllers can emit an
                   // initial prompt on accept that we want consumed before any
                   // commands flow.
                   galilIo.synchronized { drainBuffer(galilIo) }
@@ -669,11 +667,11 @@ private[hcd] object ControllerCommandActor {
 
         }.receiveSignal {
           case (_, org.apache.pekko.actor.typed.PostStop) =>
-            // Send ST;MO before closing the socket — this is the safe-state
+            // Send ST;MO before closing the socket; this is the safe-state
             // policy that protects motors on every shutdown path (HMI Shutdown
             // button, supervisor Restart, FailureStop exception, container
             // shutdown, etc.). The send is synchronous because PostStop has
-            // no mailbox processing — we go directly through galilIo.
+            // no mailbox processing; we go directly through galilIo.
             //
             // Idempotent: ST on stationary axes and MO on already-disabled
             // drives are both no-ops on the controller side.

@@ -32,7 +32,7 @@ object HmiJsonProtocol {
 
     Json.obj(
       // Wrapped position in encoder counts [0, cpr) for rotating axes; equals raw position for linear.
-      // Matches the demand space used by positionAxis/offsetAxis commands — no confusing wrap offsets.
+      // Matches the demand space used by positionAxis/offsetAxis commands; no confusing wrap offsets.
       "position"           -> s.motorPosition,
       // Raw accumulated encoder counts from controller (accumulates across revolutions for rotating axes).
       // Useful for diagnostics and verifying the wrapping logic.
@@ -40,7 +40,7 @@ object HmiJsonProtocol {
       "velocity"     -> s.velocity,
       "axisState"    -> s.axisState.toString,
       "inPosition"   -> s.inPosition,
-      // Wrapped demand [0, cpr) for rotating axes — matches motorPosition frame for HMI display.
+      // Wrapped demand [0, cpr) for rotating axes; matches motorPosition frame for HMI display.
       "demand"       -> s.motorDemand,
       "axisErrorMsg" -> s.axisError,
       "forwardLimit" -> s.forwardLimit,
@@ -53,7 +53,7 @@ object HmiJsonProtocol {
       // Mechanism configuration
       "mechanismType" -> s.mechanismType.toString,
       "algorithm"     -> s.algorithm.map(_.toString).getOrElse(""),
-      // Angular position [0,360°) — non-zero only for rotating axes with countsPerRevolution set
+      // Angular position [0,360°); non-zero only for rotating axes with countsPerRevolution set
       "angularPosition"  -> s.angularPosition.getOrElse(0.0),
       "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
       // Soft limits (linear axes only)
@@ -68,7 +68,7 @@ object HmiJsonProtocol {
       "indexSpeed"           -> s.indexSpeed.getOrElse[Double](0.0),
       "inPositionThreshold" -> s.inPositionThreshold,
       "axisName"            -> s.axisName.getOrElse(""),
-      // PVT tracking telemetry — populated by IS from CS's _PV/_BT readings during
+      // PVT tracking telemetry; populated by IS from CS's _PV/_BT readings during
       // Tracking.  pvFreeSlots = 255 and btSegmentsExecuted = 0 outside of Tracking
       // (auto-reset on transition out).  trackingSession is null outside Tracking.
       "trackingSession"     -> trackingSessionJson,
@@ -177,7 +177,7 @@ object HmiJsonProtocol {
    * @param severity  CSW severity string: "TRACE","DEBUG","INFO","WARN","ERROR","FATAL"
    * @param timestamp ISO-8601 timestamp string (set by CSW logger at call time)
    * @param message   Log message text extracted from the CSW log JsObject
-   * @param actor     Last Pekko actor path segment, e.g. "StatusMonitor"; "Console" for non-actor loggers
+   * @param actor     Last Pekko actor path segment, e.g. "ControllerStatusActor"; "Console" for non-actor loggers
    */
   def logLineToJson(severity: String, timestamp: String, message: String, actor: String): String =
     Json.obj(

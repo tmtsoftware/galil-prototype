@@ -42,7 +42,7 @@ object ControllerStatusActor:
   /**
    * Internal: result of the "safe all motors" command (ST;MO) sent when the HCD
    * transitions to Faulted due to an unattributable controller error. Fire-and-
-   * forget from the decision logic's perspective — this handler just logs the
+   * forget from the decision logic's perspective; this handler just logs the
    * outcome. Failure here does not propagate; the HCD is already Faulted.
    */
   private case class SafeAllResult(result: GalilCommandMessage.SendCommandResult, reason: String) extends Command
@@ -106,7 +106,7 @@ object ControllerStatusActor:
    * Attempt to verify and if necessary re-establish the status TCP connection.
    *
    * Step 1: test the existing socket with a QR command.
-   *   - If that succeeds the connection never actually dropped — report Connected,
+   *   - If that succeeds the connection never actually dropped; report Connected,
    *     restart polling, done.
    * Step 2: if the test fails, close the dead socket and open a fresh GalilIoTcp.
    *   - Retest with QR. Report Connected + restart polling on success,
@@ -152,13 +152,13 @@ object ControllerStatusActor:
    * Without this notification, the next QR scan would see "axis X registered
    * with thread N, but thread N is no longer running" and could attribute
    * residual ae[X]==1 (the entry-time flag from the program we just halted) as
-   * an unexplained program failure on whatever command runs next on this axis —
+   * an unexplained program failure on whatever command runs next on this axis , 
    * particularly when the next command happens to reuse the same thread number.
    *
    * The handler prunes the axis from CS's axisThreads map. CH owns the
    * lifecycle: it will RegisterAxisThread again when it launches the next
    * program. The reply (NotifyAxisHaltedAck) confirms the notification has been
-   * processed (synchronization point for the caller — needed so CH can be sure
+   * processed (synchronization point for the caller; needed so CH can be sure
    * the prune is in place before launching the next program).
    *
    * Note: ae[] values >= 2 (#POSERR/#LIMSWI/#MCTIME) are independent of program
@@ -168,7 +168,7 @@ object ControllerStatusActor:
   case class NotifyAxisHalted(axis: Axis, replyTo: ActorRef[NotifyAxisHaltedAck]) extends Command
 
   /**
-   * Acknowledgement of NotifyAxisHalted. Carries no information — the caller
+   * Acknowledgement of NotifyAxisHalted. Carries no information; the caller
    * just needs a synchronization point confirming the notification has been
    * processed.
    */
@@ -233,9 +233,9 @@ object ControllerStatusActor:
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
-        // Dummy galilConfig for test — reconnect is not exercised in unit tests
+        // Dummy galilConfig for test; reconnect is not exercised in unit tests
         val testConfig = GalilConfig("127.0.0.1", 8888)
-        // Dummy command actor for test — probe is not exercised in unit tests
+        // Dummy command actor for test; probe is not exercised in unit tests
         val dummyCommandActor = context.system.deadLetters.asInstanceOf[ActorRef[GalilCommandMessage]]
         new ControllerStatusActor(context, timers, statusIo, testConfig, internalState,
           loggerFactory, standbyPollingRateHz, actionPollingRateHz, dummyCommandActor, configuredAxes,
@@ -258,14 +258,14 @@ class ControllerStatusActor(
   commandActor: ActorRef[GalilCommandMessage],
   configuredAxes: Set[Axis],
   // Initial value of embeddedArraysReady.  Production leaves this false (the
-  // safe default — see the var below); the test factory defaults it true so
+  // safe default; see the var below); the test factory defaults it true so
   // unit tests model a controller whose #Init has already dimensioned ae[].
   initialEmbeddedArraysReady: Boolean = false
 ) extends AbstractBehavior[ControllerStatusActor.Command](context):
 
   import ControllerStatusActor._
 
-  // Mutable socket reference — replaced on successful reconnect
+  // Mutable socket reference; replaced on successful reconnect
   private var statusIo: GalilIo = initialStatusIo
 
   private val log = loggerFactory.getLogger(context)
@@ -292,14 +292,14 @@ class ControllerStatusActor(
 
   // --- Status-connection timeout resilience -------------------------------
   // A read timeout (SocketTimeoutException) means the controller did not reply
-  // within the socket read timeout — NOT that the socket is dead.  A single slow
+  // within the socket read timeout; NOT that the socket is dead.  A single slow
   // read was observed faulting a healthy controller for hours; the recovery found
   // the same socket still working.  We now drain any late response (to avoid a
   // desync on the next read) and tolerate a brief run of timeouts, escalating to
   // Faulted only on the MaxConsecutiveTimeouts-th in a row.  Each timeout blocks
   // the actor for up to the socket read timeout (~3s), so the threshold is kept
-  // small.  Per-poll-type counts (QR vs AI) so each escalates independently — the
-  // analog channels may be live control inputs — and a single successful read of
+  // small.  Per-poll-type counts (QR vs AI) so each escalates independently; the
+  // analog channels may be live control inputs; and a single successful read of
   // that type resets its count.  A genuine disconnect (remote close / broken pipe)
   // is a distinct exception and still faults immediately.
   private val MaxConsecutiveTimeouts = 2
@@ -308,7 +308,7 @@ class ControllerStatusActor(
 
   // A malformed/misaligned QR DataRecord (DataRecordFormatException) is a different
   // failure from a timeout: data IS arriving, but the receive buffer is dirty with
-  // stale/partial bytes — typically right after a brief link interruption.  It is
+  // stale/partial bytes; typically right after a brief link interruption.  It is
   // recoverable by draining the buffer to resync, so we tolerate a few in a row and
   // fault only if the controller is persistently streaming garbage that draining
   // cannot fix.  The threshold is a little more lenient than for timeouts because a
@@ -317,7 +317,7 @@ class ControllerStatusActor(
   private var qrFormatErrorCount: Int = 0
 
   // Set true after the first controller error is detected and reported.
-  // Suppresses repeat TC 1 calls on subsequent QR polls — a running embedded error
+  // Suppresses repeat TC 1 calls on subsequent QR polls; a running embedded error
   // handler can fire CMDERR every few seconds, leaving errorCode nonzero on every poll.
   // The HCD requires restart to clear a fault; there is no recovery path.
   private var controllerFaulted: Boolean = false
@@ -435,7 +435,7 @@ class ControllerStatusActor(
       case NotifyAxisHalted(axis, replyTo) =>
         // Notification from CommandHandlerActor that it has just halted the
         // active thread on this axis. Any ae[axis]==1 residue is the entry-time
-        // flag from a program we deliberately stopped — not an error.
+        // flag from a program we deliberately stopped; not an error.
         // (ae >= 2 codes from #POSERR/#LIMSWI/#MCTIME are independent of program
         // execution and are caught by the regular QR scan's Step 2; no special
         // handling is needed here.)
@@ -468,12 +468,12 @@ class ControllerStatusActor(
   /**
    * Attempt to verify and if necessary re-establish the status TCP connection.
    *
-   * Step 1 — verify existing socket: send QR and parse the DataRecord response.
+   * Step 1; verify existing socket: send QR and parse the DataRecord response.
    *   If this succeeds the connection was never truly lost (cable blip, OS recovery).
    *   Drain the receive buffer to discard any stale accumulated data before resuming
    *   polling, then report Connected and restart polling.
    *
-   * Step 2 — if step 1 fails: close the dead socket, open a fresh GalilIoTcp,
+   * Step 2; if step 1 fails: close the dead socket, open a fresh GalilIoTcp,
    *   retest with QR. On success: replace statusIo, drain buffer, report Connected,
    *   restart polling. On failure: report Disconnected, reply failure.
    *
@@ -645,12 +645,12 @@ class ControllerStatusActor(
         handleQRResponse(dr)
       catch
         case ex: java.net.SocketTimeoutException =>
-          // Slow reply, socket likely alive — tolerate up to MaxConsecutiveTimeouts.
+          // Slow reply, socket likely alive; tolerate up to MaxConsecutiveTimeouts.
           qrTimeoutCount += 1
           handleStatusTimeout("QR", qrTimeoutCount, ex.getMessage)
           Behaviors.same
         case ex: DataRecordFormatException =>
-          // Malformed/misaligned record — data is flowing but the buffer is dirty
+          // Malformed/misaligned record; data is flowing but the buffer is dirty
           // (e.g. stale bytes after a brief link blip).  Drain + resync + tolerate;
           // a dirty record is not a connection loss.
           handleStatusFormatError(ex.getMessage)
@@ -682,7 +682,7 @@ class ControllerStatusActor(
    * Handle QR response from controller.
    *
    * Per scan, in order:
-   *   1. Parse QR DataRecord — captures threadStatus and errorCode at one moment.
+   *   1. Parse QR DataRecord; captures threadStatus and errorCode at one moment.
    *   2. Compute the set of registered axes whose threads just transitioned from
    *      active to cleared since the previous scan.
    *   3. Read MG ae[i] for each configured axis (single compound read). Done after
@@ -691,7 +691,7 @@ class ControllerStatusActor(
    *   4. Run the error decision logic (see decideAxisAndControllerErrors).
    *   5. Push HCD-level updates (position, I/O, timing).
    *   6. Push per-axis QR-derived updates (position, velocity, switches).
-   *   7. Push UpdateThreadStatus to IS — this clears activeThread for completed
+   *   7. Push UpdateThreadStatus to IS; this clears activeThread for completed
    *      threads. Must happen LAST so any axisErrorMsg from step 4 lands first
    *      and the CommandWatcher fails the command before seeing the cleared thread.
    */
@@ -711,7 +711,7 @@ class ControllerStatusActor(
       // Why not use rawThreadStatusByte (from QR)?
       //   Empirically, on this controller firmware, after CMDERR halts a thread,
       //   the thread bit in QR's threadStatus byte (and in `MG _NO`) can remain
-      //   set for many seconds — until other unrelated activity settles. This
+      //   set for many seconds; until other unrelated activity settles. This
       //   is especially common when other threads are concurrently running
       //   motion. _XQ<n> is the authoritative per-thread status: -1 means
       //   stopped, regardless of what _NO claims.
@@ -723,14 +723,14 @@ class ControllerStatusActor(
       // Synthesize a threadStatus byte from _XQ results: bit N set if _XQ<n>
       // returned a non-(-1) value (thread is executing). Threads we didn't
       // query (i.e. not in axisThreads) appear as 0 in this synthesized byte.
-      // This is what we send to IS — it's the only place the byte is consumed,
+      // This is what we send to IS; it's the only place the byte is consumed,
       // and IS only cares about registered threads (via threadRegistry) anyway.
       // If readXqValues returned empty (e.g. parse failure) we fall back to
       // the raw QR byte to fail-closed.
       val threadStatusByte: Int =
         if axisThreads.isEmpty then 0
         else if xqValues.size != axisThreads.size then
-          // Couldn't determine state for all registered threads — fall back to
+          // Couldn't determine state for all registered threads; fall back to
           // the raw QR byte. This is the safer behavior because if the QR byte
           // says "still running" we won't fire spurious completion/error.
           log.debug(s"_XQ query returned ${xqValues.size} of ${axisThreads.size} expected; " +
@@ -781,10 +781,10 @@ class ControllerStatusActor(
           s"aeValues=$aeValues, " +
           s"pendingControllerError=$pendingControllerError")
 
-      // Step 5: error decision logic — may push axisErrorMsg/axisState updates.
+      // Step 5: error decision logic; may push axisErrorMsg/axisState updates.
       decideAxisAndControllerErrors(rawErrorCode, aeValues, axesWithClearedThread)
 
-      // Steps 6–7: existing HCD-level + per-axis updates from QR
+      // Steps 6-7: existing HCD-level + per-axis updates from QR
       updateHcdState(dataRecord.generalState, activeAxisChars)
       activeAxisChars
         .zip(dataRecord.axisStatuses)
@@ -792,7 +792,7 @@ class ControllerStatusActor(
           updateAxisState(axisChar, axisStatus)
         }
 
-      // Step 8: thread status — IS clears activeThread for any registered
+      // Step 8: thread status; IS clears activeThread for any registered
       // threads whose bits are now zero (and forwards ClearAxisThread to us).
       // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries above)
       // rather than the raw QR threadStatus byte, so IS sees accurate per-thread
@@ -828,7 +828,7 @@ class ControllerStatusActor(
    * Read MG ae[i] for each configured axis and return a Map[Axis, Int].
    *
    * Issued as a single compound `MG ae[0],ae[1],...` round-trip on the status
-   * connection. Returns Map.empty on any parse or I/O failure — the simulator
+   * connection. Returns Map.empty on any parse or I/O failure; the simulator
    * does not implement ae[] storage, and we do not want to fault on its absence.
    *
    * IOExceptions propagate to handlePollController via handleQRResponse's catch
@@ -877,14 +877,14 @@ class ControllerStatusActor(
    *
    * Why this exists: empirically, after a CMDERR halts a thread on this
    * controller firmware, the thread bit in QR's `threadStatus` byte (and in
-   * `MG _NO`) can remain set for many seconds — until other unrelated activity
+   * `MG _NO`) can remain set for many seconds; until other unrelated activity
    * settles. `_XQ<n>` is the authoritative per-thread status: -1 means the
    * thread has stopped, regardless of what _NO claims.
    *
    * Behavior:
    *   - If no threads are registered: skip the round-trip, return Map.empty.
    *   - On parse failure: returns Map.empty (treat as "couldn't determine"
-   *     — calling code falls back to QR's threadStatus, fail-closed).
+   *    ; calling code falls back to QR's threadStatus, fail-closed).
    *   - On IOException: rethrows so the outer QR loop reports connection loss.
    *
    * Sorted by thread number so the response tokens line up with the request.
@@ -932,7 +932,7 @@ class ControllerStatusActor(
    * Companion to `readAeValues` / `readXqValues`: single compound MG round-trip
    * on the status connection.  The IS-side underrun detector reads the
    * forwarded values relative to the per-session `lastValidTime`; we do not
-   * make the determination here (interpretation belongs with the data — IS
+   * make the determination here (interpretation belongs with the data; IS
    * owns the session ledger, S61 lesson).
    *
    * Behavior:
@@ -992,7 +992,7 @@ class ControllerStatusActor(
    *         attributable to a single program failure).
    *   2. For each axis where ae[i] in {2, 3, 4}: report as per-axis error
    *      (POSERR/LIMSWI/MCTIME) with the appropriate description. Independent
-   *      of errorCode — these handlers set ae[] without invoking #CMDERR.
+   *      of errorCode; these handlers set ae[] without invoking #CMDERR.
    *   3. Edge case: ae[i]==1 AND thread just cleared AND errorCode==0 →
    *      program ended without clearing ae[] and without controller error.
    *      Should not happen with current embedded design; log warn and treat
@@ -1013,14 +1013,14 @@ class ControllerStatusActor(
     //
     //   First time we see this: defer one scan. The QR snapshot returns
     //   errorCode and threadStatus from the same moment, but the controller
-    //   updates these on slightly different cycles — errorCode latches the
+    //   updates these on slightly different cycles; errorCode latches the
     //   instant a command fails, while _XQ<n> may not yet report -1 for the
     //   dead thread until the next servo cycle. If we attribute too eagerly
     //   we miss the axis whose thread cleared in the very next scan. Setting
     //   the pendingControllerError flag without consuming TC lets the next
     //   scan try again with one more cycle of _XQ<n> state available.
     //
-    //   Second consecutive scan still 0: genuinely unattributable —
+    //   Second consecutive scan still 0: genuinely unattributable , 
     //   consume TC, fault HCD, safe motors.
     //
     //   The 1-candidate (clean attribution) and 2+ (multi-axis ambiguity)
@@ -1032,7 +1032,7 @@ class ControllerStatusActor(
       )
 
       if programErrorCandidates.size == 1 then
-        // Per-axis attribution — consume TC, report on the affected axis.
+        // Per-axis attribution; consume TC, report on the affected axis.
         val tcText = fetchTcMessage(errorCode)
         val axis = programErrorCandidates.head
         val msg  = s"Embedded program error: $tcText"
@@ -1040,7 +1040,7 @@ class ControllerStatusActor(
         reportAxisError(axis, msg)
         pendingControllerError = false
       else if programErrorCandidates.isEmpty && !pendingControllerError then
-        // First scan with unattributable error — defer one scan.
+        // First scan with unattributable error; defer one scan.
         // Do NOT consume TC; we need the latch persistent for the retry.
         pendingControllerError = true
         log.debug(s"errorCode=$errorCode but no axis program just completed " +
@@ -1061,7 +1061,7 @@ class ControllerStatusActor(
         internalState ! InternalStateActor.EnterFaulted(faultMsg)
         // Connection is still alive (we just got a QR back and fetched TC).
         // Safe all motors: ST stops any motion, MO disables the motor drives.
-        // Fire-and-forget — we're already faulted, the result is informational.
+        // Fire-and-forget; we're already faulted, the result is informational.
         safeAllMotors(faultMsg)
     else if errorCode == 0 && pendingControllerError then
       // The latch cleared on its own (e.g. another path consumed it). Reset
@@ -1070,7 +1070,7 @@ class ControllerStatusActor(
       pendingControllerError = false
 
     // Step 2: independent ae[] codes (POSERR/LIMSWI/MCTIME) on configured axes.
-    // Reported regardless of errorCode — these handlers set ae[] but do not
+    // Reported regardless of errorCode; these handlers set ae[] but do not
     // generate a controller error code. Skip ae==1 here: that's program-flow
     // (handled above when the thread clears) or in-flight (ignored until clear).
     aeValues.foreach { case (axis, ae) =>
@@ -1081,7 +1081,7 @@ class ControllerStatusActor(
           reportAxisError(axis, msg)
     }
 
-    // Step 3: edge case — program ended with ae[i]==1 but no controller error.
+    // Step 3: edge case; program ended with ae[i]==1 but no controller error.
     // Means embedded program exited (thread cleared) without clearing ae[i] and
     // without any TC error. Defensive: treat as per-axis error.
     //
@@ -1166,7 +1166,7 @@ class ControllerStatusActor(
    *
    * Only called on the "status connection healthy, controller reachable" fault
    * path. The two other Faulted-entry paths (connection loss, faultReset
-   * recovery failure) involve a dead connection — sending would IOException
+   * recovery failure) involve a dead connection; sending would IOException
    * and offer no benefit.
    */
   private def safeAllMotors(reason: String): Unit =
@@ -1223,7 +1223,7 @@ class ControllerStatusActor(
     val hcdState = stateChanged.hcdState
 
     // Clear lastReportedAxisError for any axis that has left Error state.
-    // The dedupe cache should not persist past an operator recovery — without
+    // The dedupe cache should not persist past an operator recovery; without
     // this, the next occurrence of the same error on the same axis would not
     // be reported because the cached message still matches. Triggered by the
     // axisState field on any of the state-change notifications IS sends.
@@ -1239,7 +1239,7 @@ class ControllerStatusActor(
 
     // Update cache of which axes are in Tracking, used by handleQRResponse to
     // decide whether to poll _PV<x>/_BT<x>.  Recomputed on every state change
-    // (subscription is filtered to axisState changes only — cheap).
+    // (subscription is filtered to axisState changes only; cheap).
     trackingAxes = hcdState.axes.collect {
       case (axis, ax) if ax.axisState == AxisStateEnum.Tracking => axis
     }.toSet
@@ -1272,10 +1272,10 @@ class ControllerStatusActor(
     if !pollingEnabled then return Behaviors.same
     log.debug("AI poll: sending compound MG @AN query")
 
-    // Single compound MG command — one round-trip instead of 8 sequential calls.
+    // Single compound MG command; one round-trip instead of 8 sequential calls.
     // Hardware returns space-separated values on one line: "2.5839 2.5839 0.0000 ..."
     //
-    // Called directly on statusIo on the actor thread — NOT in a Future.
+    // Called directly on statusIo on the actor thread; NOT in a Future.
     // Rationale: statusIo (a plain Socket) is not thread-safe. Running the AI poll
     // in a Future on the execution context created a data race with PollController,
     // which also calls statusIo.send() on the actor thread. Since PollController
@@ -1298,13 +1298,13 @@ class ControllerStatusActor(
       )
     catch
       case ex: java.net.SocketTimeoutException =>
-        // Slow reply, socket likely alive — tolerate up to MaxConsecutiveTimeouts.
+        // Slow reply, socket likely alive; tolerate up to MaxConsecutiveTimeouts.
         // AI escalates on its own count: these channels may be live control inputs,
         // so persistent AI loss must fault even if QR happens to stay healthy.
         aiTimeoutCount += 1
         handleStatusTimeout("AI", aiTimeoutCount, ex.getMessage)
       case ex: java.io.IOException =>
-        // Genuine disconnect, not a timeout — socket is gone.
+        // Genuine disconnect, not a timeout; socket is gone.
         log.error(s"AI poll — status connection lost: ${ex.getMessage}")
         stopPolling()
         pollingEnabled = false
@@ -1391,8 +1391,8 @@ class ControllerStatusActor(
     internalState ! InternalStateActor.UpdateAxisState(axis, axisUpdates, context.system.ignoreRef)
     
     // Build command state update.
-    // moving: bit 15 of status word ("Move in Progress") — reliable for ALL motor types.
-    // activeThread is NOT set here — IS owns the thread→axis registry and updates
+    // moving: bit 15 of status word ("Move in Progress"); reliable for ALL motor types.
+    // activeThread is NOT set here; IS owns the thread→axis registry and updates
     // activeThread via RegisterThread (set) and UpdateThreadStatus (clear).
     // inPosition is mirrored automatically by InternalStateActor from AxisState.
     val cmdUpdates = Map[String, Any](
@@ -1484,12 +1484,12 @@ class ControllerStatusActor(
    * names match their meaning (forwardLimit=true means "limit hit"), matching
    * how the rest of the codebase (HMI, axisError reporting) uses them.
    *
-   * NOTE: These are RAW I/O states for the limit bits — the CN configuration
+   * NOTE: These are RAW I/O states for the limit bits; the CN configuration
    * determines which physical input level (high/low) constitutes "active",
    * but the manual-documented semantic of the BIT is "INACTIVE", which is
    * what we invert.
    *
-   * The TS command has its own different bit layout — do not conflate.
+   * The TS command has its own different bit layout; do not conflate.
    */
   private case class SwitchData(
     latchOccurred: Boolean,     // bit 7

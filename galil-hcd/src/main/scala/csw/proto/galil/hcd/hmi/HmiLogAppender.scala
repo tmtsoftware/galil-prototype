@@ -19,7 +19,7 @@ import scala.concurrent.Future
  *
  * The CSW framework instantiates this class via reflection, so it cannot
  * receive the WebSocket broadcast callback through its constructor. Instead,
- * HmiServer sets HmiLogAppender.broadcast during start() — a controlled
+ * HmiServer sets HmiLogAppender.broadcast during start(); a controlled
  * companion-object var, justified by the framework's reflection constraint.
  *
  * Each log message is forwarded as a "logLine" JSON WebSocket frame:
@@ -28,7 +28,7 @@ import scala.concurrent.Future
  *
  * The frontend renders these in a unified log panel alongside state updates.
  * Controller MG output (from ControllerConsoleActor) appears here automatically
- * since it is emitted via log.info("[GALIL:prefix] text") — no separate console
+ * since it is emitted via log.info("[GALIL:prefix] text"); no separate console
  * stream needed.
  *
  * Level filtering is performed in append() against the minimum level set via
@@ -41,7 +41,7 @@ import scala.concurrent.Future
  */
 object HmiLogAppender extends LogAppenderBuilder {
 
-  /** Severity ordering — used for minSeverity filtering in append(). */
+  /** Severity ordering; used for minSeverity filtering in append(). */
   private val severityOrder: Map[String, Int] = Map(
     "TRACE" -> 0,
     "DEBUG" -> 1,
@@ -58,14 +58,14 @@ object HmiLogAppender extends LogAppenderBuilder {
    */
   @volatile var broadcast: String => Unit = null
 
-  /** Called by HmiServer.stop() — prevents pushing to a torn-down WebSocket. */
+  /** Called by HmiServer.stop(); prevents pushing to a torn-down WebSocket. */
   def clearBroadcast(): Unit = broadcast = null
 
   /**
    * Minimum severity for HMI display. Messages below this level are dropped
    * before reaching the WebSocket, keeping the HMI panel readable.
    *
-   * Default: INFO — filters out DEBUG/TRACE noise in normal operation.
+   * Default: INFO; filters out DEBUG/TRACE noise in normal operation.
    * Set by the HMI log-level dropdown (does NOT affect FileAppender output).
    */
   @volatile var minSeverity: String = "INFO"
@@ -76,12 +76,12 @@ object HmiLogAppender extends LogAppenderBuilder {
    * that cannot be controlled via LogAdminUtil (they belong to the framework's
    * own component prefix, not ours).
    *
-   * Default: pub-sub-component — the CSW CurrentState pub/sub actor fires a
+   * Default: pub-sub-component; the CSW CurrentState pub/sub actor fires a
    * DEBUG message for every published CurrentState (8+ per QR poll cycle at
    * 10Hz = ~80 messages/second at action rate). These are pure framework
    * plumbing with no diagnostic value in the HMI log panel.
    *
-   * Can be modified at runtime — the set is @volatile.
+   * Can be modified at runtime; the set is @volatile.
    */
   @volatile var excludedActors: Set[String] = Set("pub-sub-component")
 
@@ -108,17 +108,17 @@ class HmiLogAppender(stdHeaders: JsObject) extends LogAppender {
     // Walk backwards past noise segments to find the last meaningful actor name.
     //
     // Noise predicates (all observed empirically):
-    //   starts with "$"         — Pekko synthetic refs ($$a-adapter, $a, etc.)
-    //   contains "#"            — actor incarnation suffixes (actorName#12345)
-    //   equals "user"           — Pekko guardian segment
-    //   empty                   — leading slash artifact
+    //   starts with "$"        ; Pekko synthetic refs ($$a-adapter, $a, etc.)
+    //   contains "#"           ; actor incarnation suffixes (actorName#12345)
+    //   equals "user"          ; Pekko guardian segment
+    //   empty                  ; leading slash artifact
     //
     // CSW structural segments (contain ".") are handled separately:
     //   ends with "-component-actor"  → "ComponentActor"  (GalilHcdHandlers runs here)
     //   otherwise (just the prefix)   → "Supervisor"      (CSW lifecycle messages)
     //
     // Console output: ControllerConsoleActor emits MG lines via log.info with the message
-    // text matching "[prefix] ..." — these technically show ControllerInterfaceActor as the
+    // text matching "[prefix] ..."; these technically show ControllerInterfaceActor as the
     // actor path (shared logger context), but we relabel them "Console" to reflect true origin.
     val rawActor: String = (baseMsg \ "actor").asOpt[String] match {
       case Some(path) =>
@@ -134,12 +134,12 @@ class HmiLogAppender(stdHeaders: JsObject) extends LogAppender {
               .headOption.getOrElse("Console")
         }
       case None =>
-        // No actor field — should not occur now that all actors use getLogger(ctx).
+        // No actor field; should not occur now that all actors use getLogger(ctx).
         "Unknown"
     }
 
     // Override: ControllerConsoleActor MG lines are logged via ControllerInterfaceActor's
-    // logger context, but their message always starts with "[prefix] " — relabel as "Console"
+    // logger context, but their message always starts with "[prefix] "; relabel as "Console"
     // to reflect the true origin (embedded Galil program MG output).
     val actor = if (message.matches("""\[[\w.:]+\] .*""")) "Console" else rawActor
 

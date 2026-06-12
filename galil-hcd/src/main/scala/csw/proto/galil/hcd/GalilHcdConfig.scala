@@ -52,7 +52,7 @@ case class ControllerConfig(
  * @param upperLimit Upper soft limit in encoder counts. Required for linear; optional for
  *   rotating (defaults to 0.0). For linear axes, soft-limit enforcement is active when
  *   upperLimit > lowerLimit; a degenerate 0.0/0.0 disables enforcement (treated as the
- *   "limits not configured" sentinel). Same units as positionAxis.target — counts in the
+ *   "limits not configured" sentinel). Same units as positionAxis.target; counts in the
  *   raw motor `position` space.
  * @param lowerLimit Lower soft limit in encoder counts. Required for linear; optional for
  *   rotating (defaults to 0.0). Same units as upperLimit.
@@ -62,15 +62,15 @@ case class ControllerConfig(
  * @param inPositionThreshold Threshold for in-position status
  * @param indexOffset Offset applied after homing
  *
- * Motion parameters — written to the controller's embedded variables at HCD init
+ * Motion parameters; written to the controller's embedded variables at HCD init
  * (writeMotionConfig(), Tier 2 authority). These values supplant the embedded
  * EEPROM defaults (#SetupX) and remain effective until overridden by an Assembly
  * via configAxis (Tier 3).
  *
  * Three-tier authority:
- *   Tier 1: Embedded EEPROM defaults  — standalone Galil Tools use only
- *   Tier 2: HCD config file (here)    — written at HCD init
- *   Tier 3: Assembly configAxis       — runtime session override
+ *   Tier 1: Embedded EEPROM defaults ; standalone Galil Tools use only
+ *   Tier 2: HCD config file (here)   ; written at HCD init
+ *   Tier 3: Assembly configAxis      ; runtime session override
  *
  * @param maxSpeed     Maximum move speed (counts/sec)
  * @param acceleration Acceleration rate (counts/sec²)
@@ -78,7 +78,7 @@ case class ControllerConfig(
  * @param motionDelay  Post-move settling time (ms)
  * @param indexSpeed   Homing speed (counts/sec)
  * @param countsPerRevolution Encoder counts for one full 360° revolution (rotating axes only).
- *   Integer value — e.g. 400 for a 400-step/rev stepper, 3600 for simulator.
+ *   Integer value; e.g. 400 for a 400-step/rev stepper, 3600 for simulator.
  *   Written to cpr[] on the controller at init. 0.0 = not configured (warn for rotating).
  */
 case class AxisConfig(
@@ -89,7 +89,7 @@ case class AxisConfig(
   inPositionThreshold: Double, // Positional tolerance
   indexOffset: Double,         // Offset after homing
   axisName: Option[String] = None, // Human-readable mechanism name (e.g. "ANT Linear")
-  // Motion parameters (optional — hardware values overwritten from controller at init)
+  // Motion parameters (optional; hardware values overwritten from controller at init)
   maxSpeed: Double     = 1000.0,  // counts/sec
   acceleration: Double = 9216.0,  // counts/sec²
   deceleration: Double = 9216.0,  // counts/sec²
@@ -169,7 +169,7 @@ object GalilHcdConfig {
             inPositionThreshold = axisConf.getDouble("inPositionThreshold"),
             indexOffset         = axisConf.getDouble("indexOffset"),
             axisName            = if axisConf.hasPath("name") then Some(axisConf.getString("name")) else None,
-            // Motion params — optional, fall back to case class defaults
+            // Motion params; optional, fall back to case class defaults
             maxSpeed            = optDouble("maxSpeed",     1000.0),
             acceleration        = optDouble("acceleration", 9216.0),
             deceleration        = optDouble("deceleration", 9216.0),

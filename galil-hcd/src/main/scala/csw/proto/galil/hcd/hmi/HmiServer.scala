@@ -52,7 +52,7 @@ class HmiServer(
   // Direct handle for HMI-internal engineering operations (engJog/engStop)
   // that bypass CommandHandlerActor and the embedded-program path entirely.
   // These low-level operations issue JG/BG/ST directly on the command
-  // connection — the engineer takes responsibility for soft-limit and
+  // connection; the engineer takes responsibility for soft-limit and
   // tuning correctness. Reserved for lab/test use; not exposed via CSW.
   controllerCommandActor: ActorRef[GalilCommandMessage],
   hcdPrefix: Prefix,
@@ -60,7 +60,7 @@ class HmiServer(
   locationService: LocationService,
   componentInfo: ComponentInfo,
   port: Int = 9090,
-  // faultReset is dispatched directly to GalilHcd (Session 58) — it does not
+  // faultReset is dispatched directly to GalilHcd; it does not
   // flow through CommandHandlerActor because it drives HCD-level lifecycle
   // state and re-uses the shared init sequence.  GalilHcd provides this
   // callback at construction time.  The callback is responsible for kicking
@@ -104,7 +104,7 @@ class HmiServer(
       }
   })(ec)
 
-  // Register HmiLogAppender broadcast — the appender is instantiated by the CSW
+  // Register HmiLogAppender broadcast; the appender is instantiated by the CSW
   // framework before HmiServer exists, so wiring is done here at start time.
   // All HCD log messages (including [GALIL:prefix] controller console lines) will
   // be pushed to connected WebSocket clients as "logLine" JSON messages.
@@ -177,7 +177,7 @@ class HmiServer(
     //
     // Returns immediately after the message is sent; the actual teardown
     // happens asynchronously and the WebSocket will drop within a few seconds.
-    // Available even when the HCD is in a Faulted state — Shutdown is an
+    // Available even when the HCD is in a Faulted state; Shutdown is an
     // admin operation, not a regular command, and is not gated.
     path("api" / "shutdown") {
       post {
@@ -198,10 +198,10 @@ class HmiServer(
     // from the Location Service, stops the TLA (PostStop → onShutdown), then
     // re-creates a fresh TLA and runs initialize() again.  Net effect: HCD
     // internal state, controller TCP connections, and embedded program load
-    // are all reset, but the JVM stays alive — the HMI WebSocket client will
+    // are all reset, but the JVM stays alive; the HMI WebSocket client will
     // see a brief disconnect (auto-reconnects after 2s) and then resume.
     //
-    // Available even when the HCD is in a Faulted state — Restart is an admin
+    // Available even when the HCD is in a Faulted state; Restart is an admin
     // operation and a strictly bigger hammer than faultReset for HCD-internal
     // issues.  Like Shutdown, it is not gated by the Faulted guard.
     path("api" / "restart") {
@@ -249,7 +249,7 @@ class HmiServer(
    * The parameter type is `ComponentMessage` rather than the more specific
    * `SupervisorContainerCommonMessages` because the latter is an `object`
    * (containing the case objects), not a sealed-trait type.  `ComponentMessage`
-   * is the common parent the supervisor's `ActorRef` accepts — both `Shutdown`
+   * is the common parent the supervisor's `ActorRef` accepts; both `Shutdown`
    * and `Restart` extend it, as do the other administrative messages we may
    * later add (e.g. `GoOffline` / `GoOnline` if exposed in the HMI).
    *
@@ -290,12 +290,12 @@ class HmiServer(
       val runId = Id()
 
       // Gate: reject all commands when the HCD is not in Ready state.
-      //   Uninitialized — startup is still in progress.  No exemptions:
+      //   Uninitialized; startup is still in progress.  No exemptions:
       //                  faultReset has nothing to reset, setSoftLimits
       //                  could race the initial axis-config writes, and
       //                  no other command should reach the controller
       //                  before init completes.
-      //   Faulted      — operator must clear the fault first; faultReset
+      //   Faulted     ; operator must clear the fault first; faultReset
       //                  is permitted, and setSoftLimits is permitted
       //                  because it's an HMI-internal flag flip useful
       //                  for preparing limit-switch tests before recovery.
@@ -348,7 +348,7 @@ class HmiServer(
       // drives HCD lifecycle state and re-uses the shared init sequence.
       // The callback runs the recovery off-thread; we return Started here
       // and the eventual Completed/Error arrives via the CRM (which the
-      // HMI doesn't currently observe — state changes are visible through
+      // HMI doesn't currently observe; state changes are visible through
       // the WebSocket stream as the recovery progresses).
       if (request.commandName == "faultReset") {
         onFaultReset(setup, runId)
@@ -371,7 +371,7 @@ class HmiServer(
 
   /**
    * HMI-internal handler for the setSoftLimits action.  Updates the per-axis
-   * softLimitsEnabled flag directly in InternalState — not a CSW command.  No
+   * softLimitsEnabled flag directly in InternalState; not a CSW command.  No
    * controller interaction; the flag is consulted at command-validation time only.
    */
   private def handleSetSoftLimits(params: Map[String, JsValue], runId: Id): String = {
@@ -399,7 +399,7 @@ class HmiServer(
    * HMI-internal handler: low-level engineering jog.
    *
    * Issues JG/BG (with conditional SH if motor off) directly on the command
-   * connection via controllerCommandActor.SendCommand — bypassing
+   * connection via controllerCommandActor.SendCommand; bypassing
    * CommandHandlerActor and the embedded-program path entirely.  No thread is
    * allocated, no CommandWatcher is spawned; the engineer drives the motion
    * with their own start/stop decisions.
@@ -516,7 +516,7 @@ class HmiServer(
       result.error match
         case Some(err) =>
           log.warn(s"HMI engJog axis=$axisChar: controller rejected '$cmdString' — $err")
-          // Revert axisState — we never actually started moving
+          // Revert axisState; we never actually started moving
           internalStateActor ! InternalStateActor.UpdateAxisState(axis,
             Map("axisState" -> priorState),
             system.ignoreRef)
@@ -542,12 +542,12 @@ class HmiServer(
    * Frontend sends:
    *   { commandName: "engStop", params: { axis: "A" } }
    *
-   * Permitted from any state — ST is fundamentally a safety command and the
+   * Permitted from any state; ST is fundamentally a safety command and the
    * engineer may want to stop a jog they did not start (e.g. an externally-
    * issued JG that triggered the spontaneous-motion detector).  The gating
    * predicate here is intentionally minimal.
    *
-   * For symmetry with CSW stopAxis, motor remains energised after engStop —
+   * For symmetry with CSW stopAxis, motor remains energised after engStop , 
    * the engineer can issue another jog or any other command without an
    * intervening SH.
    */
@@ -593,7 +593,7 @@ class HmiServer(
           log.warn(s"HMI engStop axis=$axisChar: controller rejected '$cmdString' — $err")
           commandResponseJson(runId.id, "Error", s"engStop: $err")
         case None =>
-          // ST succeeded — transition axisState.  The QR poll will follow with
+          // ST succeeded; transition axisState.  The QR poll will follow with
           // moving=false shortly; no need to also clear cmdStates.moving here
           // (CS owns that field).
           internalStateActor ! InternalStateActor.UpdateAxisState(axis,
@@ -669,7 +669,7 @@ class HmiServer(
 
   /**
    * Synchronously query HcdState from InternalStateActor for HMI command gating.
-   * Fails closed — on query failure returns Faulted so commands are blocked.
+   * Fails closed; on query failure returns Faulted so commands are blocked.
    */
   private def queryHcdStateForHmi(): HcdState =
     import scala.concurrent.Await
@@ -767,7 +767,7 @@ class HmiServer(
         intParam("value").foreach(v => setup = setup.add(SetBitCommand.valueKey.set(v)))
 
       case "faultReset" =>
-        // severity defaults to "None" if not provided — least intrusive recovery
+        // severity defaults to "None" if not provided; least intrusive recovery
         val severity = stringParam("severity").getOrElse("None")
         setup = setup.add(FaultResetCommand.severityKey.set(severity))
 
@@ -783,7 +783,7 @@ class HmiServer(
   private var bindingFuture: Option[Future[Http.ServerBinding]] = None
 
   def start(): Unit = {
-    // Wire HmiLogAppender broadcast — now all CSW log messages (including
+    // Wire HmiLogAppender broadcast; now all CSW log messages (including
     // [GALIL:prefix] controller console lines from ControllerConsoleActor)
     // stream to connected HMI clients as "logLine" WebSocket messages.
     HmiLogAppender.broadcast = broadcastLogLine
@@ -812,18 +812,18 @@ class HmiServer(
    *     persistent browser keep-alive HTTP connection and the WebSocket)
    *     remain alive until the client closes them.  On Restart this matters
    *     because the new HmiServer's bind() succeeds even though the old
-   *     binding still holds open connections — and HTTP requests on those
+   *     binding still holds open connections; and HTTP requests on those
    *     persistent connections continue to be routed by the OLD binding's
    *     route closures, which capture the OLD (now-terminated) actor refs.
    *     Result: post-Restart commands fail with "InternalStateActor had
    *     already been terminated."
    *   - terminate(hardDeadline) actively closes existing connections after
-   *     the deadline, which forces the browser to reconnect — and the next
+   *     the deadline, which forces the browser to reconnect; and the next
    *     connection lands on the new binding with the new actor refs.
    *
    * The hard deadline is short (2s) because:
    *   1. We're tearing down for either a Shutdown (HCD is stopping) or a
-   *      Restart (we want the new server up quickly) — neither needs a
+   *      Restart (we want the new server up quickly); neither needs a
    *      lengthy in-flight-request grace period.
    *   2. Real HMI requests are sub-second; if anything is in flight at
    *      this moment it's almost certainly stalled.

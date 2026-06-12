@@ -51,7 +51,7 @@ object CommandWatcherActor:
   private case class HcdStateUpdate(notification: InternalStateActor.StateChanged) extends Command
 
   /**
-   * Timeout timer fired — command took too long.
+   * Timeout timer fired; command took too long.
    */
   private case object CommandTimeout extends Command
 
@@ -74,7 +74,7 @@ object CommandWatcherActor:
 
   /**
    * Defines the expected AxisCmdState values for command completion.
-   * Each field is optional — None means "don't check this field".
+   * Each field is optional; None means "don't check this field".
    * All specified conditions must be true simultaneously for completion.
    */
   case class CompletionMask(
@@ -104,7 +104,7 @@ object CommandWatcherActor:
       moving = Some(false)
     )
 
-    /** homeAxis: thread released, no error, not moving (inPosition not checked — home sets position) */
+    /** homeAxis: thread released, no error, not moving (inPosition not checked; home sets position) */
     val homeAxis: CompletionMask = CompletionMask(
       activeThread = Some(0),
       axisErrorMsg = Some(""),
@@ -120,7 +120,7 @@ object CommandWatcherActor:
     /**
      * selectWheel: thread released, no error, not moving.
      * Like homeAxis, inPosition is NOT checked because the HCD doesn't know the
-     * angular target — the #SelectX embedded program uses an internal lookup table
+     * angular target; the #SelectX embedded program uses an internal lookup table
      * to map position numbers to angular positions.
      */
     val selectWheel: CompletionMask = CompletionMask(
@@ -187,14 +187,14 @@ object CommandWatcherActor:
         val hcdStateAdapter = ctx.messageAdapter[InternalStateActor.StateChanged](HcdStateUpdate(_))
         config.internalStateActor ! InternalStateActor.Subscribe(hcdStateAdapter, None)
 
-        // Request initial snapshot — handles the race where the command completes
+        // Request initial snapshot; handles the race where the command completes
         // before the watcher subscribes (fast commands like homeAxis on steppers).
         // The snapshot reply arrives as a message through initialStateAdapter.
         val initialStateAdapter = ctx.messageAdapter[Option[AxisCmdState]] {
           case Some(cmdState) =>
             CmdStateUpdate(InternalStateActor.CmdStateChanged(config.axis, cmdState, Set("initial")))
           case None =>
-            // Axis not found — will be handled by timeout
+            // Axis not found; will be handled by timeout
             CmdStateUpdate(InternalStateActor.CmdStateChanged(config.axis, AxisCmdState(), Set("initial")))
         }
         config.internalStateActor ! InternalStateActor.GetAxisCmdState(config.axis, initialStateAdapter)
@@ -225,7 +225,7 @@ object CommandWatcherActor:
       msg match
         case HcdStateUpdate(InternalStateActor.StateChanged(hcdState, _, _)) =>
           if hcdState.state == HcdStateEnum.Faulted then
-            // Controller reported an error via QR errorCode — ControllerStatusActor
+            // Controller reported an error via QR errorCode; ControllerStatusActor
             // has already called TC 1 and set controllerErrorMsg. Fail the command.
             val errorMsg = s"${config.commandName} on axis ${config.axis} failed: ${hcdState.controllerErrorMsg}"
             log.warn(s"Watch ${config.commandName}/${config.axis}: CONTROLLER FAULT — ${hcdState.controllerErrorMsg}")
@@ -263,7 +263,7 @@ object CommandWatcherActor:
           // Check 2: Axis error detected
           else if cmdState.axisErrorMsg.nonEmpty &&
                   config.mask.axisErrorMsg.contains("") then
-            // Mask expects empty error but we have one — this is a failure
+            // Mask expects empty error but we have one; this is a failure
             log.warn(s"Watch ${config.commandName}/${config.axis}: FAILED — '${cmdState.axisErrorMsg}' " +
               s"(inPos=${cmdState.inPosition} moving=${cmdState.moving})")
             // Clear activeCommand in IS actor
@@ -300,7 +300,7 @@ object CommandWatcherActor:
             Behaviors.stopped
 
           else
-            // Still waiting — continue monitoring
+            // Still waiting; continue monitoring
             Behaviors.same
 
         case CommandTimeout =>

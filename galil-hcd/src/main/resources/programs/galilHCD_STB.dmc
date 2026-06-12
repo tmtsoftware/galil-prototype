@@ -428,7 +428,7 @@ EN
 REM Axis G done
 
 REM ----------------------------------------------------------------------------
-REM Specify custom Home, Move, Track and Stop subroutines for all motors
+REM Specify custom Home, Move and Stop subroutines for all motors
 REM ----------------------------------------------------------------------------
 REM ----------------------------------------------------------------------------
 REM Axis A - ANT

@@ -53,7 +53,7 @@ object CommandHandlerActor {
   // ========================================
 
   // Commands handled by CommandHandlerActor (axis-targeting commands and
-  // simple I/O).  faultReset is NOT in either set — it is handled directly
+  // simple I/O).  faultReset is NOT in either set; it is handled directly
   // by GalilHcd because it drives HCD lifecycle state transitions and
   // re-runs the shared init sequence; routing it through CHA would force
   // CHA to reach across into GalilHcd-owned helpers.
@@ -84,7 +84,7 @@ object CommandHandlerActor {
   //
   // At TM = 1000 µs, the n2 cap means MAX_PER_SEGMENT_DURATION ≈ 2.048 sec.
   // Any latency that pushes (validTime - prev_lastValidTime) past ~2 seconds
-  // produces an out-of-range T and a controller-side reject — so this guard
+  // produces an out-of-range T and a controller-side reject; so this guard
   // catches BOTH wild HCD math (e.g. stale TrackingSession reference times)
   // AND legitimate but excessive validTime gaps from the client.
   val PvaMaxDeltaPosition: Long = 44_000_000L
@@ -193,7 +193,7 @@ object CommandHandlerActor {
     }
 
   // ========================================
-  // configAxis — SDD 4.8.2
+  // configAxis; SDD 4.8.2
   // ========================================
 
   /**
@@ -287,7 +287,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // configRotatingAxis — InternalState only
+  // configRotatingAxis; InternalState only
   // ========================================
 
   private def handleConfigRotatingAxis(
@@ -320,7 +320,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // configLinearAxis — InternalState only
+  // configLinearAxis; InternalState only
   // ========================================
 
   private def handleConfigLinearAxis(
@@ -348,7 +348,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // setBit — SB or CB based on value
+  // setBit; SB or CB based on value
   // ========================================
 
   /**
@@ -380,7 +380,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // setAO — AO command
+  // setAO; AO command
   // ========================================
 
   /**
@@ -440,7 +440,7 @@ object CommandHandlerActor {
 
   // ========================================
   // ========================================
-  // Axis state guard — enforced at execution time (SDD Figure 4-2)
+  // Axis state guard; enforced at execution time (SDD Figure 4-2)
   // ========================================
 
   /**
@@ -450,8 +450,8 @@ object CommandHandlerActor {
    * onValidate() queries IS and accepts/rejects, but the IS update setting the
    * axis to Moving/Homing is a fire-and-forget message that may not have been
    * applied by the time the next command's onValidate() runs.  Re-checking here
-   * — inside the single-threaded CommandHandlerActor, after the previous handler
-   * has written its state update — gives a much tighter guarantee.
+   *; inside the single-threaded CommandHandlerActor, after the previous handler
+   * has written its state update; gives a much tighter guarantee.
    *
    * Returns None if accepted, or Some(error response) if rejected.
    */
@@ -503,12 +503,12 @@ object CommandHandlerActor {
    * Interrupt the currently active command on this axis before starting a new one.
    *
    * Called by positionAxis, offsetAxis, selectWheel, and stopAxis when the axis is
-   * in Moving, Homing, or Tracking state — SDD 4.8.1 permits these commands to
+   * in Moving, Homing, or Tracking state; SDD 4.8.1 permits these commands to
    * preempt an active move.
    *
    * @param sendST  If true, sends ST after HX to leave the motor stationary for
    *                the next embedded program.  Pass false when the next program
-   *                handles the motor stop itself — true for all three of the
+   *                handles the motor stop itself; true for all three of the
    *                current call sites (positionAxis, offsetAxis, selectWheel
    *                want the motor parked before their #MoveX/#SelectX runs;
    *                stopAxis wants #StopX to do its own STx).
@@ -520,14 +520,14 @@ object CommandHandlerActor {
    *      tracking, so the next QR scan doesn't misattribute the halted program's
    *      ae[] residue to whatever command runs next on this axis.
    *   4. If sendST: send ST to stop motor motion
-   *   5. Set commandHalted=true — active CommandWatcher sees this and reports CommandFailure
+   *   5. Set commandHalted=true; active CommandWatcher sees this and reports CommandFailure
    *   6. 10ms delay for watcher to observe the flag
-   *   7. Clear commandHalted — new command will set its own activeCommand
+   *   7. Clear commandHalted; new command will set its own activeCommand
    *
    * Tracking special case: no embedded thread is running (PVT executes from the
    * controller's per-axis FIFO, not an embedded program), so activeThread=0 and
    * HX is skipped.  The motor is still physically moving, but the caller is
-   * responsible for the actual stop — either by sending ST directly (sendST=true)
+   * responsible for the actual stop; either by sending ST directly (sendST=true)
    * or by running a follow-on program like #StopX that begins with STx.
    */
   private def checkAndInterrupt(
@@ -585,9 +585,9 @@ object CommandHandlerActor {
     // see "axis registered with thread N, but thread N just cleared, ae==1" and
     // misattribute the residue (the entry-time flag from the program we just
     // halted) as an unexplained failure of whatever command runs next on this
-    // axis — particularly when the next command happens to reuse the same
+    // axis; particularly when the next command happens to reuse the same
     // thread number. Skipped on HX failure (nothing was halted) and on the
-    // already-released path (no activeThread to begin with — Tracking case).
+    // already-released path (no activeThread to begin with; Tracking case).
     if haltSucceeded then
       val notifyResult = Try {
         val future = AskPattern.Askable(statusMonitor).ask[ControllerStatusActor.NotifyAxisHaltedAck](
@@ -624,7 +624,7 @@ object CommandHandlerActor {
     // Step 6: Brief delay for watcher to observe the flag and self-terminate
     Thread.sleep(10)
 
-    // Step 7: Clear flag — new command handler will set its own activeCommand
+    // Step 7: Clear flag; new command handler will set its own activeCommand
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> false),
       ctx.system.ignoreRef)
@@ -639,7 +639,7 @@ object CommandHandlerActor {
 
   private val defaultMotionTimeout = 3.minutes
 
-  /** Minimum timeout floor — even very short moves get this much time */
+  /** Minimum timeout floor; even very short moves get this much time */
   private val minimumMotionTimeout = 3.seconds
 
   /** Safety multiplier applied to estimated move time to account for real-world variation */
@@ -681,12 +681,12 @@ object CommandHandlerActor {
     val dDecel = 0.5 * deceleration * tDecel * tDecel
 
     val moveTime = if (dAccel + dDecel <= distance) {
-      // Trapezoidal profile — reaches max speed
+      // Trapezoidal profile; reaches max speed
       val dCruise = distance - dAccel - dDecel
       val tCruise = dCruise / maxSpeed
       tAccel + tCruise + tDecel
     } else {
-      // Triangular profile — doesn't reach max speed
+      // Triangular profile; doesn't reach max speed
       // Peak velocity: v_peak where d_accel + d_decel = distance
       //   0.5 * v² / accel + 0.5 * v² / decel = distance
       //   v² * (1/(2*accel) + 1/(2*decel)) = distance
@@ -740,9 +740,9 @@ object CommandHandlerActor {
    * For rotating mechanisms the same angular position can be reached from either direction.
    * Given a raw target (absolute encoder counts) and the axis's current position, this method
    * returns the count value that the motor should actually move to, according to:
-   *   Forward  — always approach from below (increasing counts)
-   *   Reverse  — always approach from above (decreasing counts)
-   *   Shortest — take the shorter of the two arcs
+   *   Forward ; always approach from below (increasing counts)
+   *   Reverse ; always approach from above (decreasing counts)
+   *   Shortest; take the shorter of the two arcs
    *
    * The result may differ from the raw target by a whole number of revolutions
    * (countsPerRev = 360 * cpd). The IS demand and the embedded dmd[] variable are set
@@ -750,7 +750,7 @@ object CommandHandlerActor {
    *
    * @param rawTarget      Raw count demand supplied by the Assembly
    * @param currentPos     Current encoder position (from IS AxisState.position)
-   * @param countsPerRev   Counts per revolution (AxisState.countsPerRevolution) — integer value
+   * @param countsPerRev   Counts per revolution (AxisState.countsPerRevolution); integer value
    * @param algorithm      Configured approach algorithm
    * @return               Adjusted absolute count target
    */
@@ -793,7 +793,7 @@ object CommandHandlerActor {
    * This is the standard pattern for long-running commands that invoke
    * embedded programs (homeAxis, positionAxis, offsetAxis, selectWheel,
    * positionWheel, stopAxis).  Note: trackAxis under PVT does NOT use this
-   * path — it writes PVA segments directly to the controller via sendToController
+   * path; it writes PVA segments directly to the controller via sendToController
    * and completes immediately on FIFO acceptance.
    *
    * Flow:
@@ -843,7 +843,7 @@ object CommandHandlerActor {
     preCommands: Option[String] = None,
     onSuccessAxisUpdates: Map[String, Any] = Map.empty
   ): Unit = {
-    // Step 1: Pre-escalate polling rate so StatusMonitor is at action rate
+    // Step 1: Pre-escalate polling rate so ControllerStatusActor is at action rate
     // before the program starts. This ensures IS updates flow quickly.
     statusMonitor ! ControllerStatusActor.SetPollingRate(10.0)
 
@@ -871,7 +871,7 @@ object CommandHandlerActor {
         // XQ accepted. Whether the parser-side _XQ<n> follow-up caught the thread
         // mid-execution (line >= 0) or saw it already completed (-1), we always
         // register and spawn the watcher. The watcher evaluates the completion
-        // mask only after IS observes the next QR scan — which is also when CS
+        // mask only after IS observes the next QR scan; which is also when CS
         // reads ae[] for this axis and reports any program error. Without this
         // uniform path, a fast-completing program that errored could be reported
         // as Completed before the next QR scan surfaces the error. (SDD: a
@@ -919,7 +919,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // positionAxis — SDD 4.8.4, ICD 2.2.1.7
+  // positionAxis; SDD 4.8.4, ICD 2.2.1.7
   // ========================================
 
   /**
@@ -995,7 +995,7 @@ object CommandHandlerActor {
     // Defensive soft-limit check.  Both entry paths run the same envelope check
     // before accepting the command (CSW: GalilHcd.validateAxisStateAndLimits;
     // HMI: HmiServer.axisCommandRejection), each via CommandGate.checkSoftLimit.
-    // This backstop catches any path that bypasses both — and is itself a no-op
+    // This backstop catches any path that bypasses both; and is itself a no-op
     // for rotating axes, axes with softLimitsEnabled=false, or axes whose limits
     // are not configured.
     maybeAxisState.flatMap(_.checkSoftLimit(target)) match {
@@ -1042,7 +1042,7 @@ object CommandHandlerActor {
 
     // 3. Execute embedded program with computed timeout.
     // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
-    // block, atomically before XQ — eliminating a separate CI round-trip.
+    // block, atomically before XQ; eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -1065,7 +1065,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // homeAxis — SDD 4.8.3, ICD 2.2.1.6
+  // homeAxis; SDD 4.8.3, ICD 2.2.1.6
   // ========================================
 
   /**
@@ -1136,24 +1136,24 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // stopAxis — SDD 4.8.5, ICD 2.2.1.11
+  // stopAxis; SDD 4.8.5, ICD 2.2.1.11
   // ========================================
 
   /**
    * Stops any active motion on the specified axis by executing the embedded #StopX program.
    *
    * If the axis is Moving or Homing, the active embedded program is halted first via
-   * checkAndInterrupt (HX only — no ST) before #StopX runs. #StopX handles motor
+   * checkAndInterrupt (HX only; no ST) before #StopX runs. #StopX handles motor
    * deceleration itself, so a separate ST would be redundant.
    *
-   * For Tracking, #StopX runs directly — there is no embedded thread (PVT runs
+   * For Tracking, #StopX runs directly; there is no embedded thread (PVT runs
    * FIFO-driven on the controller, not via an #TrackX program), so there's
    * nothing to interrupt.  STx inside #StopX is what physically stops the
    * motor and drains any pending PVT FIFO segments.
    *
    * Sequence:
    *   1. Query axisState to determine whether interruption is needed and the completion state
-   *   2. If Moving or Homing: checkAndInterrupt (HX active thread only — no ST, #StopX handles deceleration)
+   *   2. If Moving or Homing: checkAndInterrupt (HX active thread only; no ST, #StopX handles deceleration)
    *   3. Execute embedded #StopX program (full application stop: deceleration, brakes, I/O)
    *   4. Spawn CommandWatcher with stopAxis mask
    *
@@ -1192,7 +1192,7 @@ object CommandHandlerActor {
     then return
 
     // Query axisState to determine: (a) whether interruption is needed, (b) completion state.
-    // The completion state depends on both the current axisState and the homed flag —
+    // The completion state depends on both the current axisState and the homed flag , 
     // e.g. Error → Lost if the last home failed, Error → Idle if the axis was homed before the fault.
     val (completionState, currentAxisState) = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
@@ -1208,7 +1208,7 @@ object CommandHandlerActor {
 
     // Interrupt-before-#StopX: only needed when an embedded program is currently
     // running on the axis (Moving = #MoveX, Homing = #HomeX).  For Tracking,
-    // there's no embedded thread — PVT runs FIFO-driven on the controller — so
+    // there's no embedded thread; PVT runs FIFO-driven on the controller; so
     // there's nothing to interrupt.  #StopX (run next) begins with STx, which
     // handles the actual motor stop in all three cases.
     if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
@@ -1251,7 +1251,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // offsetAxis — ICD 2.2.1.8
+  // offsetAxis; ICD 2.2.1.8
   // ========================================
 
   /**
@@ -1327,7 +1327,7 @@ object CommandHandlerActor {
       case _ => rawTarget
     }
 
-    // Defensive soft-limit check.  See handlePositionAxis for the full rationale —
+    // Defensive soft-limit check.  See handlePositionAxis for the full rationale , 
     // the validate-time check should already have caught any violation; this is a
     // backstop and a no-op for any axis that doesn't have soft limits configured
     // and enabled.
@@ -1340,7 +1340,7 @@ object CommandHandlerActor {
       case None => // accepted; continue
     }
 
-    // Zero-distance offset — already at target, complete immediately
+    // Zero-distance offset; already at target, complete immediately
     if Math.abs(distance) <= currentState.get.inPositionThreshold then
       log.info(s"offsetAxis $axis: zero distance, already at target (distance=$distance)")
       internalStateActor ! InternalStateActor.UpdateAxisState(axis,
@@ -1362,7 +1362,7 @@ object CommandHandlerActor {
 
     // Execute move with thread confirmation + watcher (same mask as positionAxis).
     // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
-    // block, atomically before XQ — eliminating a separate CI round-trip.
+    // block, atomically before XQ; eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -1385,7 +1385,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // selectWheel — SDD 3.3.2.5, ICD 2.2.1.9
+  // selectWheel; SDD 3.3.2.5, ICD 2.2.1.9
   // ========================================
 
   /**
@@ -1453,7 +1453,7 @@ object CommandHandlerActor {
 
     // 3. Execute embedded program with thread confirmation + watcher.
     // dmd[idx]=position is sent as preCommands inside ExecuteProgram's galilIo.synchronized
-    // block, atomically before XQ — eliminating a separate CI round-trip.
+    // block, atomically before XQ; eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Select${axis.char}",
       axis = axis,
@@ -1475,7 +1475,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // positionWheel — ICD 2.2.1.10
+  // positionWheel; ICD 2.2.1.10
   // ========================================
 
   /**
@@ -1599,7 +1599,7 @@ object CommandHandlerActor {
 
     // 3. Execute embedded program with computed timeout (same #MoveX as positionAxis).
     // dmd[idx]=target is sent as preCommands inside ExecuteProgram's galilIo.synchronized
-    // block, atomically before XQ — eliminating a separate CI round-trip.
+    // block, atomically before XQ; eliminating a separate CI round-trip.
     executeProgramAndWatch(
       label = s"Move${axis.char}",
       axis = axis,
@@ -1622,7 +1622,7 @@ object CommandHandlerActor {
   }
 
   // ========================================
-  // trackAxis — SDD §3.3.2.3, ICD 2.2.1.10 (PVT — Session 64)
+  // trackAxis (PVT); see SDD §3.4
   // ========================================
 
   /**
@@ -1652,16 +1652,16 @@ object CommandHandlerActor {
    *     set AxisCmdState.activeCommand = Track, complete the CSW command.
    *
    * Guards (any one of which Errors the command):
-   *   - HCD not initialized — controllerSamplePeriodMicros == 0
+   *   - HCD not initialized; controllerSamplePeriodMicros == 0
    *   - validTime not strictly increasing past prior session's lastValidTime
-   *   - rate × T translates to a segment where (ΔP, V, T) collapse to (0, 0, 0) —
+   *   - rate × T translates to a segment where (ΔP, V, T) collapse to (0, 0, 0) , 
    *     PVA=0,0,0 is the active end-of-trajectory marker and would truncate the queue
    *   - axisState ∉ {Idle, Tracking} at execution time (handled by guardAxisState)
    *
    * Future extensions (deferred):
    *   - Velocity-limit pre-check against AxisState.maxSpeed
    *   - Configurable upper bound on `validTime - now` (Assembly lookahead horizon)
-   *   - Linear axes are unit-blind passthrough — exercised under tests but not on lab
+   *   - Linear axes are unit-blind passthrough; exercised under tests but not on lab
    *     hardware in S64 (lab has two rotating steppers only)
    */
   private def handleTrackAxis(
@@ -1694,7 +1694,7 @@ object CommandHandlerActor {
     then return
 
     // Fetch AxisState (for position, cpr, mechanismType, trackingSession) and HcdState
-    // (for controllerSamplePeriodMicros).  Two serial asks — IS processes serially so
+    // (for controllerSamplePeriodMicros).  Two serial asks; IS processes serially so
     // these reflect a consistent snapshot relative to other CHA actions.
     val axisStateOpt: Option[AxisState] = Try {
       val f = internalStateActor.ask[Option[AxisState]](
@@ -1730,12 +1730,12 @@ object CommandHandlerActor {
 
     // Unit conversion (user frame → controller counts frame).
     // Rotating axes: degrees → counts via countsPerRevolution / 360, integer arithmetic.
-    // Linear axes: passthrough — HCD is unit-blind for linear (S63 design decision #3).
+    // Linear axes: passthrough; HCD is unit-blind for linear (S63 design decision #3).
     val isRotating = axisState.mechanismType == MechanismType.Rotating
     val cprOpt = axisState.countsPerRevolution
 
     // For rotating axes without a known countsPerRevolution we cannot do the conversion.
-    // This means the axis is mid-init — the embedded `cpd[]` read hasn't completed.
+    // This means the axis is mid-init; the embedded `cpd[]` read hasn't completed.
     if isRotating && cprOpt.isEmpty then
       val msg = s"trackAxis $axis: rotating axis has no countsPerRevolution " +
                 s"(motion config not yet read from controller)"
@@ -1783,7 +1783,7 @@ object CommandHandlerActor {
     // If we used it directly as the segment endpoint, then for a mechanism that's
     // accumulated several revolutions of count, `deltaP = positionCounts0 - prev`
     // would unwind multiple revolutions to reach a far smaller absolute count value
-    // — visible to the operator as the motor doing an unexpected ~360° back-rotation.
+    //; visible to the operator as the motor doing an unexpected ~360° back-rotation.
     //
     // The intended behavior is: the Assembly says "go to physical angle θ"; the HCD
     // chooses the equivalent absolute count nearest to where the motor currently is
@@ -1793,7 +1793,7 @@ object CommandHandlerActor {
     //
     // Applies on every segment, not just the first.  Continuation segments encounter
     // the same wrap when the trajectory's degrees crosses 0/360 (segment N at 359°,
-    // segment N+1 at 1°, both in 0..360) — the Assembly hands us 1° meaning "+2°
+    // segment N+1 at 1°, both in 0..360); the Assembly hands us 1° meaning "+2°
     // ahead of where you are", not "-358° back".  The same logic resolves both.
     //
     // Non-rotating axes pass through unchanged: counts are already in absolute frame.
@@ -1865,7 +1865,7 @@ object CommandHandlerActor {
     // 'TC 6 Number out of range' faults the HCD.  Reject BEFORE the wire write so
     // the failure surfaces as a clean command error with diagnostic text instead
     // of as a fault.  The T cap (2,048 samples ≈ 2.048s @ TM=1000) is the
-    // binding constraint for normal tracking — a validTime gap > ~2s exceeds it.
+    // binding constraint for normal tracking; a validTime gap > ~2s exceeds it.
     //   ΔP: ±44,000,000 counts
     //   V : ±22,000,000 counts/sec
     //   T :   1..2,048 samples
@@ -1908,7 +1908,7 @@ object CommandHandlerActor {
     //       at the segment endpoint on time.  Catches the SEEDING-from-stale-
     //       position failure mode: if axisState.position lags reality (or if the
     //       Assembly's first target is far from where the mechanism actually is),
-    //       the first segment computes a small T and a huge ΔP — the controller
+    //       the first segment computes a small T and a huge ΔP; the controller
     //       would dutifully slam toward the target at unsafe velocity.  Without
     //       this guard, the only mitigation was to physically move the mechanism
     //       to "near zero" before launching a TrackInjector run.
@@ -1962,7 +1962,7 @@ object CommandHandlerActor {
 
     // Guard: avoid the (0, 0, 0) terminator collision.  If a user-supplied segment
     // legitimately has zero delta AND zero rate AND we round T to anything, the PVA
-    // wire form would be 0,0,0 — the active end-of-trajectory marker — which would
+    // wire form would be 0,0,0; the active end-of-trajectory marker; which would
     // truncate the FIFO instead of expressing the intended "hold position" segment.
     // The fix is to ensure T is non-zero (we already guard tSamples >= 1), so
     // PVA=0,0,T with T > 0 expresses "hold here for T samples" unambiguously.
@@ -1976,15 +1976,15 @@ object CommandHandlerActor {
 
     // Build the wire command.  Galil PVT wire format:
     //   PV<axis>=ΔP,V,T   where the third letter of the command name IS the axis
-    //                     designator (PVA = axis A, PVB = axis B, etc.) — there is
+    //                     designator (PVA = axis A, PVB = axis B, etc.); there is
     //                     no separate axis argument.
     //   BT<axis>          Begin Trajectory for the named axis only.  Bare BT (no
-    //                     axis) would start all axes with pending segments — never
+    //                     axis) would start all axes with pending segments; never
     //                     used in this project; we always operate per-axis.
     //
     // First segment of a session emits PVA + BT atomically in one TCP frame so the
     // FIFO starts executing immediately on receipt.  Subsequent segments are PVA
-    // only — BT is only meaningful at session start.
+    // only; BT is only meaningful at session start.
     val pvaCmd = s"PV${axis.char}=$deltaP,$rateCountsPerSec,$tSamples"
     val wireCmd =
       if isFirstSegment then s"$pvaCmd;BT${axis.char}"
@@ -2006,7 +2006,7 @@ object CommandHandlerActor {
         log.debug(s"trackAxis $axis: controller responded '$response'")
     }
 
-    // Update IS — atomic from CHA's perspective.  Session ledger, demand, axis state.
+    // Update IS; atomic from CHA's perspective.  Session ledger, demand, axis state.
     val btFiredAt = if isFirstSegment then nowInstant else
       axisState.trackingSession.map(_.btFiredAt).getOrElse(nowInstant)
     val newSegmentCount =
@@ -2079,10 +2079,7 @@ object CommandHandlerActor {
     log.info(s"Spawned $watcherName for $commandName on axis $axis")
   }
 
-  // NOTE: faultReset is no longer handled here.  As of Session 58 it is
-  // dispatched directly from GalilHcd.onSubmit because it drives HCD-level
-  // lifecycle state (Faulted → Uninitialized → Ready) and re-uses the
-  // shared runInitSequence().  Routing it through CommandHandlerActor would
-  // require CHA to reach across into GalilHcd-owned helpers.  See
-  // GalilHcd.handleFaultReset for the current implementation.
+  // faultReset is handled by GalilHcd.onSubmit, not here, because it drives
+  // HCD-level lifecycle state (Faulted → Uninitialized → Ready) and re-uses the
+  // shared runInitSequence(). See GalilHcd.handleFaultReset.
 }

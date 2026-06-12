@@ -26,39 +26,32 @@ enum HcdStateEnum:
 
 /**
  * Connection status for a single TCP handle to the Galil DMC-500x0.
+ *   Disconnected: initial state before the connect attempt, or after a detected drop.
+ *   Connected:    TCP handle open and responding.
  *
- * Disconnected — initial state before connect attempt, or after a detected drop.
- * Connected    — TCP handle open and responding.
- *
- * Note: The console connection is hardware-only and informational; its status
- * does not affect HCD operational readiness. Command and status connections
- * are both required for normal operation.
+ * The console connection is hardware-only and informational; its status does not
+ * affect HCD operational readiness. The command and status connections are both
+ * required for normal operation.
  */
 enum ConnectionStatus:
   case Disconnected, Connected
 
 /**
- * Axis operational state (SDD Figure 4-2).
- * Published in CurrentStateAxis[A-H].axisState.
- * Transitions are command-lifecycle driven.
+ * Axis operational state, published in CurrentStateAxis[A-H].axisState.
+ * Transitions are command-lifecycle driven (SDD Figure 4-2).
  *
- * State machine (Figure 4-2 — implementation refinement):
+ * Transitions:
  *   startup → Lost
  *   Lost:     homeAxis → Homing
- *   Homing:   success → Idle,  stopAxis → Lost,  fault → Error (or Lost via EnterFaulted)
- *   Idle:     homeAxis → Homing,  motionCmd → Moving,  trackAxis → Tracking
+ *   Homing:   success → Idle,  stopAxis → Lost,  fault → Error
+ *   Idle:     homeAxis → Homing,  motion command → Moving,  trackAxis → Tracking
  *   Moving:   success → Idle,  stopAxis → Idle,  fault → Error
  *   Tracking: stopAxis → Idle,  trackAxis → Tracking,  fault → Error
  *   Error:    homeAxis → Homing
- *             stopAxis → Lost  if the axis was never successfully homed (or last home failed)
- *                      → Idle  if the axis had a valid home before entering Error
+ *             stopAxis → Idle if the axis has a valid home reference, else Lost
  *
- * Error → Lost/Idle disambiguation uses the per-axis `homed` flag on AxisState.
- * This closes an SDD-diagram oversight: a home that fails transitions Homing → Error
- * (via ControllerStatusActor.reportAxisError when ae[i]>0), but the diagram's direct
- * Homing → Lost arrow implied home failures skip Error entirely. With Error as the
- * latch for any fault, the correct recovery state coming out of Error depends on
- * whether a valid home exists — which `homed` records.
+ * Error is the latch for any fault. The recovery state out of Error via stopAxis
+ * depends on whether a valid home exists, recorded by the per-axis `homed` flag.
  */
 enum AxisStateEnum:
   case Lost, Homing, Idle, Moving, Tracking, Error
@@ -75,13 +68,13 @@ enum AxisStateEnum:
   def validateCommand(commandName: String): Option[String] =
     import AxisStateEnum._
     (this, commandName) match
-      // stopAxis: valid from ANY state — it is a safety command.
-      // Also required to escape Error state (Error → Idle via stopAxis, SDD Figure 4-2).
-      // CommandHandler executes interruption protocol when a program is active.
+      // stopAxis: valid from ANY state; it is a safety command and is also
+      // required to escape Error (Error → Idle via stopAxis, SDD Figure 4-2).
+      // CommandHandler executes the interruption protocol when a program is active.
       case (_, "stopAxis") => None
 
       // homeAxis: accepted from Lost, Idle, Error only (SDD Figure 4-2).
-      // Cannot interrupt Homing or Moving — those require stopAxis first.
+      // Cannot interrupt Homing or Moving; those require stopAxis first.
       case (Lost,  "homeAxis") => None
       case (Idle,  "homeAxis") => None
       case (Error, "homeAxis") => None
@@ -105,26 +98,22 @@ enum AxisStateEnum:
         Some(s"$cmd command not valid in $state state")
 
   /**
-   * Determine the axis state after a stopAxis command completes,
-   * based on the state the axis was in when stop was issued and whether
-   * it has a valid home reference.
+   * Determine the axis state after a stopAxis command completes, based on the
+   * state the axis was in when stop was issued and whether it has a valid home
+   * reference (SDD Figure 4-2).
+   *   Lost     → Lost   (not homed; stop is safe but changes nothing)
+   *   Homing   → Lost   (homing interrupted; axis position unknown)
+   *   Moving   → Idle   (homed; position is known)
+   *   Tracking → Idle   (homed; position is known)
+   *   Error    → Idle if homed, else Lost
+   *   Idle     → Idle   (already stopped)
    *
-   * Per SDD Figure 4-2 (refined — see AxisStateEnum scaladoc):
-   *   Lost     → stopAxis → Lost                 (still not homed; stop is safe but changes nothing)
-   *   Homing   → stopAxis → Lost                 (homing interrupted; axis position unknown)
-   *   Moving   → stopAxis → Idle                 (was homed; position is known)
-   *   Tracking → stopAxis → Idle                 (was homed; position is known)
-   *   Error    → stopAxis → Idle  if homed       (fault hit a previously-homed axis; stop clears the fault)
-   *                      → Lost  if not homed    (the home attempt itself failed; axis position unknown)
-   *   Idle     → stopAxis → Idle                 (no-op; already stopped)
-   *
-   * @param homed true iff the axis has a valid home reference (last homeAxis succeeded
-   *              and no subsequent home attempt has been started that hasn't yet succeeded).
+   * @param homed true iff the axis has a valid home reference.
    */
   def stopCompletionState(homed: Boolean): AxisStateEnum =
     this match
-      case Lost    => Lost                         // stopAxis on Lost axis — remains Lost; only homeAxis escapes
-      case Homing  => Lost                         // homing interrupted — axis position unknown
+      case Lost    => Lost                         // remains Lost; only homeAxis escapes
+      case Homing  => Lost                         // homing interrupted; axis position unknown
       case Error   => if homed then Idle else Lost // disambiguate by home status
       case _       => Idle                         // Moving, Tracking, Idle → all transition to Idle
 
@@ -164,84 +153,73 @@ object Axis:
 
 /**
  * Operational state for a single axis (A-H).
- * Published via CSW CurrentStateAxis[A-H] by the CurrentStatePublisherActor.
- * Updated at QR polling rate by StatusMonitor.
- * 
+ * Published via CSW CurrentStateAxis[A-H] by the CurrentStatePublisherActor, and
+ * updated at the QR polling rate by the ControllerStatusActor.
+ *
  * @param axisState Current operational state (command-lifecycle driven)
  * @param axisError Error message if in error state
  * @param homed True iff the axis has a valid home reference. Cleared at the start of every
  *   homeAxis attempt, set to true only on homeAxis success. Used by stopCompletionState to
- *   disambiguate Error → Lost vs Error → Idle. Internal HCD flag — not published in CurrentStateAxis.
- * @param position Raw accumulated motor position in encoder counts, as reported directly by the
- *   DMC-500x0. For rotating axes this value accumulates across revolutions (e.g. 800 after two
- *   full revolutions of a 400-count axis). Used unchanged for all internal math: inPosition,
- *   applyApproachAlgorithm, distance/timeout calculations. Also called "rawMotorPosition" in
- *   comments — this is the authoritative source of truth for where the motor physically is.
- *   See motorPosition for the wrapped 0..cpr display value.
+ *   determine the post-stop state out of Error (Idle if a valid home exists, else Lost).
+ *   Published in CurrentStateAxis so assemblies can derive their indexed status from HCD truth.
+ * @param position Raw accumulated motor position in encoder counts, as reported by the
+ *   DMC-500x0. For rotating axes this accumulates across revolutions (e.g. 800 after two
+ *   full revolutions of a 400-count axis). Used unchanged for all internal math (inPosition,
+ *   applyApproachAlgorithm, distance/timeout). See motorPosition for the wrapped 0..cpr value.
  * @param velocity Current motor velocity (counts/sec)
  * @param positionError Current position error
- * @param demand Requested motor target in accumulated encoder counts (matches position space).
+ * @param demand Requested motor target in accumulated encoder counts (same space as position).
  *   Set by CommandHandlerActor to the algorithm-adjusted absolute count after applyApproachAlgorithm.
- *   Internal only — not published in CurrentStateAxis. inPosition is calculated as
- *   |position - demand| <= inPositionThreshold, both in accumulated-count space.
+ *   Internal only, not published. inPosition is |position - demand| <= inPositionThreshold.
  * @param inPositionThreshold Threshold for calculating inPosition
- * @param inPosition Whether axis is within threshold of demand (calculated)
- * @param forwardLimit Forward limit switch HIT (true = limit active, prevents +motion).
- *   Derived from QR switches byte bit 3, which the Galil reports as "Forward Limit
- *   switch INACTIVE" (1 = OK to move, 0 = limit hit). parseSwitches inverts the bit
- *   so the field name matches its meaning.
- * @param reverseLimit Reverse limit switch HIT (true = limit active, prevents -motion).
+ * @param inPosition Whether the axis is within threshold of demand (calculated)
+ * @param forwardLimit Forward limit switch hit (true = limit active, prevents +motion).
+ *   Derived from QR switches byte bit 3, which the Galil reports in the inactive sense;
+ *   parseSwitches inverts the bit so the field name matches its meaning.
+ * @param reverseLimit Reverse limit switch hit (true = limit active, prevents -motion).
  *   Derived from QR switches byte bit 2, same inversion as forwardLimit.
  * @param homeSwitch Home switch active (QR switches bit 1)
  * @param isStepper True if stepper motor type (QR switches bit 0)
  * @param negativeDirection True if moving in negative direction (axis status word bit 7)
  * @param motorOff True if motor amplifier is off / not energized (axis status word bit 0)
- * @param forwardLimitEnabled True if the forward limit is wired/active per controller
- *   _LDx config. Read once at init from MG _LDx (bit 0 of LD = forward disabled).
- *   Defaults to true so a missed read leaves the indicator informative rather than grey.
- * @param reverseLimitEnabled True if the reverse limit is wired/active per controller
- *   _LDx config. Read once at init (bit 1 of LD = reverse disabled).
+ * @param forwardLimitEnabled True if the forward limit is enabled per the controller _LD config.
+ *   Read once at init from MG _LDx (bit 0 of LD = forward disabled). Defaults to true.
+ * @param reverseLimitEnabled True if the reverse limit is enabled per the controller _LD config.
+ *   Read once at init (bit 1 of LD = reverse disabled). Defaults to true.
  * @param mechanismType Type of mechanism (linear or rotating)
- * @param upperLimit Upper soft limit in encoder counts (linear mechanisms only).
- *   Seeded from AxisConfig.upperLimit at HCD init. Same units as positionAxis.target
- *   and the raw motor `position` field. Soft-limit enforcement is active only when
- *   upperLimit > lowerLimit (a degenerate 0.0/0.0 disables enforcement, matching the
- *   "not configured" sentinel pattern used elsewhere) and softLimitsEnabled is true.
+ * @param upperLimit Upper soft limit in encoder counts (linear mechanisms only). Seeded from
+ *   AxisConfig at init, in the same units as positionAxis.target and position. Soft-limit
+ *   enforcement is active only when upperLimit > lowerLimit (a degenerate 0.0/0.0 disables
+ *   enforcement) and softLimitsEnabled is true.
  * @param lowerLimit Lower soft limit in encoder counts (linear mechanisms only).
- *   Seeded from AxisConfig.lowerLimit at HCD init. Same units as upperLimit.
  * @param algorithm Target approach algorithm (for rotating mechanisms)
  * @param softLimitsEnabled Per-axis runtime bypass for soft-limit enforcement (linear axes only).
- *   When true (default), positionAxis and offsetAxis targets that fall outside [lowerLimit,
- *   upperLimit] are rejected at validate-time before any motion is initiated. When false,
- *   the limits are not consulted — the axis is then protected only by its hardware limit
- *   switches (#LIMSWI), which is the necessary condition for testing those switches.
- *   Operator-controlled via the HMI; not exposed in the assembly ICD. Internal HCD flag —
- *   not published in CurrentStateAxis. Has no effect on rotating axes (which have no
- *   soft limits) or on homeAxis (which is permitted to seek limits by design).
+ *   When true (default), positionAxis and offsetAxis targets outside [lowerLimit, upperLimit]
+ *   are rejected at validate-time. When false, the limits are not consulted, leaving the axis
+ *   protected only by its hardware limit switches (#LIMSWI), which is the condition required to
+ *   test those switches. Operator-controlled via the HMI, not exposed in the assembly ICD, and
+ *   internal only. Has no effect on rotating axes or on homeAxis.
  *
- * Motion configuration (mirrors embedded variables from SDD Table 3-2,
- * set by configAxis command, used for timeout calculation):
- * @param maxSpeed Configured max speed for motion programs (counts/sec), set via configAxis velocity param
+ * Motion configuration (mirrors the embedded variables in SDD Table 3-2, set by configAxis,
+ * used for timeout calculation):
+ * @param maxSpeed Configured max speed for motion programs (counts/sec)
  * @param acceleration Acceleration for motion programs (counts/sec²)
  * @param deceleration Deceleration for motion programs (counts/sec²)
- * @param indexOffset Home offset applied after finding home switch (encoder counts)
+ * @param indexOffset Home offset applied after finding the home switch (encoder counts)
  * @param indexSpeed Homing speed for accurate detection of home switches (counts/sec)
- * @param motionDelay Settling time after motion stopped before reporting done (ms)
- * @param countsPerRevolution Encoder counts per revolution of rotation (rotating axes only).
- *   Read from controller embedded cpd[] array via readMotionConfig() after #Init.
- *   Used by: (1) applyApproachAlgorithm in CommandHandlerActor to resolve the
- *   algorithm-adjusted count target for positionAxis/offsetAxis; (2) computing
- *   angularPosition (0-360°) for publication. Not used for linear axes.
+ * @param motionDelay Settling time after motion before reporting done (ms)
+ * @param countsPerRevolution Encoder counts per revolution (rotating axes only), read from the
+ *   controller cpd[] array after #Init. Used by applyApproachAlgorithm to resolve the target for
+ *   positionAxis/offsetAxis, and to compute angularPosition for publication.
  */
 case class AxisState(
   axisState: AxisStateEnum = AxisStateEnum.Lost,
   axisError: String = "",
-  /** True iff the axis has a valid home reference. Cleared to false at the start of
-    * every homeAxis attempt; set to true only when homeAxis completes successfully.
-    * Used by stopCompletionState to disambiguate Error → Lost vs Error → Idle: a home
-    * failure latches Error with homed=false, and stopAxis out of Error must then go
-    * to Lost (not Idle) because the axis position is unknown. Internal HCD flag — not
-    * published in CurrentStateAxis. */
+  /** True iff the axis has a valid home reference. Cleared at the start of every homeAxis
+    * attempt; set to true only when homeAxis completes successfully. Used by
+    * stopCompletionState for the post-stop state out of Error (Idle if a valid home exists,
+    * else Lost). Published in CurrentStateAxis so assemblies can derive their indexed status
+    * from HCD truth. */
   homed: Boolean = false,
   position: Double = 0.0,
   velocity: Double = 0.0,
@@ -256,10 +234,9 @@ case class AxisState(
   isStepper: Boolean = false,
   negativeDirection: Boolean = false,
   motorOff: Boolean = true,  // Default: motor amplifier off
-  // Limit switch implementation status — read once at init from controller _LDx
-  // (LD = Limit Disable). Decoded bits: bit 0 = forward disabled, bit 1 = reverse
-  // disabled. Defaults to true (enabled) so a missed read still distinguishes
-  // hit vs clear in the HMI rather than going grey.
+  // Limit-switch enabled status, read once at init from controller _LDx (LD = Limit
+  // Disable). Decoded bits: bit 0 = forward disabled, bit 1 = reverse disabled.
+  // Defaults to true (enabled).
   forwardLimitEnabled: Boolean = true,
   reverseLimitEnabled: Boolean = true,
   // Mechanism configuration
@@ -292,22 +269,19 @@ case class AxisState(
    */
   trackingSession: Option[TrackingSession] = None,
   /**
-   * Live readings from the Galil PVT monitoring path.  Populated by IS from
-   * `ReportPvtMonitoring` messages CS sends during action-rate polling when this
-   * axis is Tracking.  Held at default values (`pvFreeSlots = 255`,
-   * `btSegmentsExecuted = 0`) outside of Tracking sessions — the controller
-   * resets `_BT<x>` to 0 each BT, and an empty FIFO reports 255 free slots.
+   * Live readings from the Galil PVT monitoring path, populated by the InternalStateActor
+   * from ReportPvtMonitoring messages the ControllerStatusActor sends during action-rate
+   * polling while the axis is Tracking. Held at default values (`pvFreeSlots = 255`,
+   * `btSegmentsExecuted = 0`) outside a tracking session, since the controller resets
+   * `_BT<x>` to 0 on each BT and an empty FIFO reports 255 free slots.
    *
    * Surfaced to the HMI tracking telemetry panel; not part of the CSW ICD.
    *
-   *   pvFreeSlots         _PV<x>: free segment slots in the controller's PVT buffer.
-   *                       Range 0..255 (buffer capacity 255 segments; active
-   *                       segment isn't counted as queued).
-   *   btSegmentsExecuted  _BT<x>: count of PVT segments the controller has executed
-   *                       since the most recent `BT<x>`.  Combined with
-   *                       `trackingSession.segmentsSubmitted`, the difference
-   *                       gives a real-time measure of FIFO depth from the
-   *                       HCD-vs-controller perspective.
+   *   pvFreeSlots         _PV<x>: free segment slots in the controller's PVT buffer,
+   *                       range 0..255 (capacity 255; the active segment is not counted).
+   *   btSegmentsExecuted  _BT<x>: PVT segments the controller has executed since the most
+   *                       recent BT<x>. Compared with trackingSession.segmentsSubmitted,
+   *                       the difference measures FIFO depth.
    */
   pvFreeSlots: Int = 255,
   btSegmentsExecuted: Int = 0
@@ -333,9 +307,9 @@ case class AxisState(
    * Wrapped motor position in encoder counts, for HMI display and CSW publication.
    *
    * For rotating axes: position modulo countsPerRevolution, in range [0, cpr).
-   * This is what the user or Assembly perceives as "current position" — it matches
-   * the demand space (0..cpr) used by positionAxis / offsetAxis commands.
-   * Example: rawMotorPosition=800 on a 400-count axis → motorPosition=0 (two full wraps).
+   * This matches the demand space (0..cpr) used by positionAxis and offsetAxis, and is
+   * what the user or Assembly perceives as the current position.
+   * Example: position 800 on a 400-count axis gives motorPosition 0 (two full wraps).
    *
    * For linear axes: identical to position (no wrapping; countsPerRevolution is not set).
    *
@@ -393,7 +367,7 @@ case class AxisState(
         else if target < lo then
           Some(f"target $target%.0f below lower soft limit $lo%.0f")
         else None
-      case _ => None  // limits not configured — enforcement disabled
+      case _ => None  // limits not configured; enforcement disabled
 
   /**
    * Update this axis state with new values.
@@ -435,9 +409,8 @@ case class AxisState(
       case ("indexSpeed", v: Double) => updated = updated.copy(indexSpeed = Some(v))
       case ("motionDelay", v: Double) => updated = updated.copy(motionDelay = Some(v))
       case ("countsPerRevolution", v: Double) =>
-        // Only store nonzero values — 0.0 means "not configured" (linear axis or
-        // uninitialized simulator). Storing Some(0.0) would mislead callers even
-        // though angularPosition already filters it; None is the clearer sentinel.
+        // Only store nonzero values; 0.0 means "not configured" (linear axis or
+        // uninitialized simulator). None is the clearer sentinel.
         if v > 0.0 then updated = updated.copy(countsPerRevolution = Some(v))
       case ("axisName", v: String) =>
         if v.nonEmpty then updated = updated.copy(axisName = Some(v))
@@ -453,8 +426,8 @@ case class AxisState(
         updated = updated.copy(trackingSession = None)
       case ("trackingSession", v: Option[?]) =>
         updated = updated.copy(trackingSession = v.asInstanceOf[Option[TrackingSession]])
-      // PVT monitoring readings — written by IS.handleReportPvtMonitoring when the
-      // axis is Tracking.  Outside Tracking, defaults apply (255 free / 0 executed).
+      // PVT monitoring readings, written by InternalStateActor.handleReportPvtMonitoring
+      // when the axis is Tracking. Outside Tracking, defaults apply (255 free / 0 executed).
       case ("pvFreeSlots", v: Int) =>
         updated = updated.copy(pvFreeSlots = v)
       case ("btSegmentsExecuted", v: Int) =>
@@ -487,36 +460,33 @@ case class AxisState(
  *     (→ Homing), and `MarkUnderrun` (→ Error).  Holding axisState = Tracking with
  *     no TrackingSession is an invariant violation.
  *
- * The session is the HCD-side ledger that lets us compute ΔP and T_samples for each
- * outgoing PVA write from the absolute targets the Assembly supplies.  The Assembly
- * cannot keep this state itself — its notion of "last sent" can diverge from what
- * the HCD actually queued (HCD rejection, controller fault, mid-stream restart).
- * The HCD is the only layer that knows both what the Assembly asked for and what
- * the controller actually has.
+ * The session is the HCD-side ledger used to compute ΔP and T_samples for each outgoing
+ * PVA write from the absolute targets the Assembly supplies. The Assembly cannot keep
+ * this state itself, since its notion of "last sent" can diverge from what the HCD
+ * actually queued (HCD rejection, controller fault, mid-stream restart). The HCD is the
+ * only layer that knows both what the Assembly asked for and what the controller has.
  *
  * @param lastTargetCounts Encoder counts of the last segment endpoint successfully
- *   written to the controller's PVT FIFO.  For rotating axes this is in raw motor
- *   counts (unwrapped — accumulates across revolutions); the Assembly supplies
- *   degrees, the HCD converts via `countsPerRevolution`.  For linear axes this is
- *   the absolute target counts (passthrough — HCD is unit-blind for linear).  Used
- *   as the prev-endpoint for the next segment's ΔP calculation.
+ *   written to the controller's PVT FIFO. For rotating axes this is in raw motor counts
+ *   (unwrapped, accumulating across revolutions); the Assembly supplies degrees and the
+ *   HCD converts via countsPerRevolution. For linear axes this is the absolute target
+ *   counts (passthrough). Used as the previous endpoint for the next segment's ΔP.
  *
  * @param lastValidTime TAI instant at which the last submitted segment is supposed
- *   to end (the `validTime` carried on the trackAxis that placed it in the FIFO).
- *   Used for: (a) computing T_samples = (newValidTime - lastValidTime) × samples/sec
- *   for the next segment, (b) underrun pre-detection in IS — when TAI now exceeds
- *   `lastValidTime` and no new segment has arrived, the controller will subsequently
- *   underrun silently, so IS transitions the axis to Error proactively.
+ *   to end (the validTime carried on the trackAxis that placed it in the FIFO).
+ *   Used for (a) computing T_samples = (newValidTime - lastValidTime) × samples/sec
+ *   for the next segment, and (b) underrun pre-detection: when TAI now exceeds
+ *   lastValidTime and no new segment has arrived, the controller would subsequently
+ *   underrun silently, so the InternalStateActor transitions the axis to Error proactively.
  *
- * @param btFiredAt TAI instant when `BT<axis>` was sent to start trajectory execution.
- *   Diagnostic only — useful for correlating HCD log timing with controller `_BT<x>`
+ * @param btFiredAt TAI instant when BT<axis> was sent to start trajectory execution.
+ *   Diagnostic only, for correlating HCD log timing with the controller _BT<x>
  *   segment-completion counter.
  *
- * @param segmentsSubmitted Monotonic count of PVA segments accepted into the FIFO
- *   during this session.  Diagnostic only — for cross-checking against `_BT<x>` and
- *   for log forensics if a session ends unexpectedly.  Resets to zero on session
- *   start (it counts within a single BT epoch, parallel to how `_BT<x>` resets on
- *   each new BT).
+ * @param segmentsSubmitted Monotonic count of PVA segments accepted into the FIFO during
+ *   this session. Diagnostic only, for cross-checking against _BT<x> and for log forensics
+ *   if a session ends unexpectedly. Resets to zero on session start (it counts within a
+ *   single BT epoch, parallel to how _BT<x> resets on each new BT).
  */
 case class TrackingSession(
   lastTargetCounts: Long,
@@ -591,13 +561,10 @@ case class AxisCmdState(
  * @param controllerId Controller number (1-4)
  * @param controllerErrorMsg Controller error message
  * @param version Embedded version number
- * @param controllerAxisCount Axis count reported by controller ID command (e.g. 4 or 8); -1 if unknown.
- *   Parsed from firmware model string: DMC500x0 → x axes. Determines the number of DI/DO
- *   channels available on this controller model:
- *     DMC-50040 (4-axis): 8 DI, 8 DO
- *     DMC-50080 (8-axis): 16 DI, 16 DO
- *   No expansion board is involved — channel count is intrinsic to the controller model.
- *   Used by HMI to determine which I/O bits are active.
+ * @param controllerAxisCount Axis count reported by the controller ID command (4 or 8); -1 if unknown.
+ *   Parsed from the firmware model string (DMC-500x0 gives x axes). Determines the number of
+ *   DI/DO channels intrinsic to the controller model (DMC-50040: 8 DI, 8 DO; DMC-50080: 16 DI,
+ *   16 DO), used by the HMI to determine which I/O bits are active.
  * @param activeAxes Which axes (A-H) are configured for use
  * @param digitalInputs Current values of optoisolated inputs (16 bits)
  * @param digitalOutputs Current values of optoisolated outputs (16 bits)
@@ -616,12 +583,11 @@ case class HcdState(
   state: HcdStateEnum = HcdStateEnum.Uninitialized,
   controllerId: Int = 1,
   controllerErrorMsg: String = "",
-  // Free-form reason for the current Initializing state.  Populated by
-  // GalilHcd at startup ("startup") and by handleFaultReset during recovery
-  // ("faultReset Init", etc).  Cleared when the HCD transitions to Ready.
-  // Only meaningful when state == Initializing; HMI uses this to render
-  // a more descriptive banner during the otherwise-opaque Initializing
-  // window.  Internal-only — not published over CSW (not in ICD).
+  // Free-form reason for the current Uninitialized state, populated by GalilHcd
+  // at startup ("startup") and by handleFaultReset during recovery ("faultReset
+  // Init", etc), and cleared when the HCD transitions to Ready. The HMI uses it
+  // to render a descriptive banner while the HCD is Uninitialized. Internal only,
+  // not published over CSW.
   initializingReason: String = "",
   version: Int = 0,
   controllerAxisCount: Int = -1,
@@ -645,15 +611,15 @@ case class HcdState(
    * Controller servo-loop sample period in microseconds, read from the `_TM` operand
    * during HCD initialization.  The default Galil servo loop runs at 1 kHz (TM=1000
    * µs/sample); both lab DMC-50040 and STB DMC-4080 are configured this way and the
-   * PVT design assumes this value, but it can be reconfigured per-controller, so we
-   * read rather than hardcode.
+   * PVT design assumes this value, but it can be reconfigured per controller, so it is
+   * read rather than hardcoded.
    *
-   * Used by `handleTrackAxis` to convert a delta in TAI time into the integer
-   * `T_samples` argument of `PVA<x>=ΔP,V,T`:
+   * Used by handleTrackAxis to convert a delta in TAI time into the integer T_samples
+   * argument of PVA<x>=ΔP,V,T:
    *     T_samples = round((newValidTime - prevValidTime) × 1e6 / controllerSamplePeriodMicros)
    *
-   * Default 0 means "not yet read" — handleTrackAxis must check for this and
-   * complete Invalid (the HCD hasn't finished initializing) rather than divide by zero.
+   * Default 0 means "not yet read"; handleTrackAxis checks for this and completes Invalid
+   * (the HCD has not finished initializing) rather than dividing by zero.
    */
   controllerSamplePeriodMicros: Int = 0
 ):
