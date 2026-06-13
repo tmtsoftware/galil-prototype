@@ -1,0 +1,57 @@
+{
+  "name": "aps-ics-ui",
+  "author": "TMT",
+  "version": "0.1.0",
+  "license": "Apache License, Version 2.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tmtsoftware/esw-ts": "github:tmtsoftware/esw-ts#v1.0.2",
+    "antd": "^5.24.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.2.0",
+    "@ant-design/v5-patch-for-react-19": "^1.0.3"
+  },
+  "scripts": {
+    "start": "vite",
+    "build": "vite build",
+    "clean": "rm -rf dist && mkdir dist",
+    "prebuild": "npm-run-all --parallel fix",
+    "test": "web-test-runner 'test/**/*.test.{ts,tsx}'",
+    "test:jenkins": "npm run test -- --config wtr-jenkins.config.js",
+    "fix": "npm-run-all --parallel clean fix:eslint fix:prettier",
+    "fix:eslint": "eslint --fix --config eslint.config.mjs './**/*.{ts,tsx}'",
+    "fix:prettier": "prettier --write --config .prettierrc './**/*.{ts,tsx}' "
+  },
+  "browserslist": [
+    "last 1 chrome version"
+  ],
+  "devDependencies": {
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/chai": "^5.0.1",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@types/react-router-dom": "^5.3.3",
+    "@typescript-eslint/parser": "^8.30.1",
+    "@web/test-runner": "^0.20.0",
+    "chai": "^5.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint-config-prettier": "^10.1.2",
+    "eslint-import-resolver-typescript": "^4.3.2",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-plugin-prettier": "^5.2.6",
+    "eslint-plugin-react": "^7.37.4",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-testing-library": "^7.1.1",
+    "@eslint/compat": "^1.2.7",
+    "npm-run-all": "^4.1.5",
+    "prettier": "^3.5.3",
+    "vite": "^6.2.6",
+    "@remcovaes/web-test-runner-vite-plugin": "^1.2.2",
+    "@johanblumenberg/ts-mockito": "^1.0.45",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.25.0"
+  }
+}
