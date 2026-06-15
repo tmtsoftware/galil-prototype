@@ -884,6 +884,9 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
               ),
               ctx.system.ignoreRef
             )
+            // Best-effort console check (informational, non-gating): refresh the
+            // reported console status and reconnect the handle if it died silently.
+            verifyAndReuseConsole()
             log.info("faultReset None: connections OK — HCD Ready")
             commandResponseManager.updateCommand(Completed(runId))
 
@@ -915,6 +918,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
             commandResponseManager.updateCommand(Error(runId, errorMsg))
 
           case Right(_) =>
+            verifyAndReuseConsole()
             runRecoveryInitPhase(runId, "faultReset Init")
         }
 
@@ -1353,6 +1357,51 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         if (!stsOk) Some(s"Status: ${stsResult.error.getOrElse("failed")}")  else None
       ).flatten.mkString("; ")
     )
+  }
+
+  /**
+   * Best-effort console-handle check for faultReset None/Init.
+   *
+   * The console handle is informational (excluded from isOperational), so a
+   * dead console must NOT fail the reset.  Probe-and-reuse: ask the console
+   * actor to confirm its handle is live; only reconnect if the probe is dead.
+   * Either way the outcome is logged and the console actor reports its
+   * consoleConnection status, so the HMI reflects reality after a reset.
+   */
+  private def verifyAndReuseConsole(): Unit = {
+    if (consoleActor == null) {
+      log.warn("faultReset: console actor not available — skipping console check")
+      return
+    }
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    val askScheduler: org.apache.pekko.actor.typed.Scheduler = ctx.system.scheduler
+
+    val alive = Try {
+      Await.result(
+        consoleActor.ask[ControllerConsoleActor.VerifyResult](
+          ref => ControllerConsoleActor.VerifyConnection(ref)
+        )(org.apache.pekko.util.Timeout(5.seconds), askScheduler),
+        6.seconds
+      ).alive
+    }.getOrElse(false)
+
+    if (alive) {
+      log.info("faultReset: console handle verified alive — reusing")
+    } else {
+      log.warn("faultReset: console handle not responding — reconnecting (informational, non-gating)")
+      val reconnected = Try {
+        Await.result(
+          consoleActor.ask[ControllerConsoleActor.ReconnectResult](
+            ref => ControllerConsoleActor.Reconnect(ref)
+          )(org.apache.pekko.util.Timeout((ControllerConsoleActor.ReconnectTimeoutMs + 1000).millis), askScheduler),
+          (ControllerConsoleActor.ReconnectTimeoutMs + 2000).millis
+        ).success
+      }.getOrElse(false)
+      log.info(
+        if (reconnected) "faultReset: console reconnect succeeded"
+        else "faultReset: console reconnect failed — console remains down (HCD still operational)"
+      )
+    }
   }
 
   // ========================================

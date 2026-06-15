@@ -75,6 +75,21 @@ object ControllerConsoleActor:
   case class ReconnectResult(success: Boolean, error: Option[String] = None)
 
   /**
+   * Probe-and-reuse liveness check. Used by faultReset None/Init to confirm
+   * the existing console handle is still live WITHOUT tearing it down. The
+   * actor round-trips a unique token via MG (the controller echoes MG output
+   * to the CF-designated handle, which is this one); a live handle returns the
+   * token within ProbeTimeoutMs, a silently half-open one never does.
+   *
+   * Console is informational (excluded from isOperational), so callers treat
+   * a dead result as "reconnect best-effort", never as a reset failure.
+   */
+  case class VerifyConnection(replyTo: ActorRef[VerifyResult]) extends Command
+
+  /** alive=true means the MG token round-tripped on the current handle. */
+  case class VerifyResult(alive: Boolean)
+
+  /**
    * Outcome the reader thread reports back to whoever asked it to start
    * (initial setup or a Reconnect message). Internal, not exposed.
    */
@@ -97,6 +112,12 @@ object ControllerConsoleActor:
    * be blocked in a socket read; we interrupt it and wait briefly.
    */
   val StopWaitMs = 5000
+
+  /** Maximum time to wait for the MG probe token to round-trip on the existing
+   *  console handle during a VerifyConnection check. Short: on a healthy LAN
+   *  the echo returns in milliseconds; a dead handle just waits this out and
+   *  reports not-alive so the caller can reconnect. */
+  val ProbeTimeoutMs = 2000
 
   /** CI actor waits at most this long for CF I + CW 2 to complete before
    *  proceeding with #Init. Well under the CSW 10s init timeout. */
@@ -125,6 +146,11 @@ object ControllerConsoleActor:
     @volatile var connectionLostFlag = false
     @volatile var readerThread: Thread = null
     @volatile var currentSocket: Socket = null
+
+    // VerifyConnection probe coordination: the message handler sets these, the
+    // reader thread counts the latch down when it sees the matching token line.
+    @volatile var probeToken: String = null
+    @volatile var probeLatch: CountDownLatch = null
 
     /**
      * Start a reader thread.  onOutcome is called once per startReading
@@ -159,6 +185,11 @@ object ControllerConsoleActor:
             socket = new Socket()
             socket.connect(new InetSocketAddress(InetAddress.getByName(host), port), ConnectTimeoutMs)
             socket.setSoTimeout(ReadTimeoutMs)
+            // Match command/status sockets (GalilIo.scala) — without keepalive a
+            // receive-only handle that goes silently half-open (peer gone, no
+            // FIN/RST) never surfaces an error on read(), so the loop below would
+            // spin on SocketTimeoutException forever and never report Disconnected.
+            socket.setKeepAlive(true)
             currentSocket = socket
             log.info(s"$logTag ControllerConsoleActor: connected")
 
@@ -221,8 +252,15 @@ object ControllerConsoleActor:
                   while nlIdx >= 0 do
                     val line = lineBuffer.substring(0, nlIdx).stripSuffix("\r").trim
                     lineBuffer.delete(0, nlIdx + 1)
+                    val tok = probeToken
+                    if tok != null && line == tok then
+                      // VerifyConnection probe round-trip confirmed: CF still
+                      // routes MG to this handle and the socket is live. Signal
+                      // the waiting handler and suppress (it's not real MG).
+                      val l = probeLatch
+                      if l != null then l.countDown()
                     // Filter prompts (:) and error echoes (?) — log everything else
-                    if line.nonEmpty && line != ":" && line != "?" then
+                    else if line.nonEmpty && line != ":" && line != "?" then
                       log.info(s"$logTag $line")
                     nlIdx = lineBuffer.indexOf('\n')
 
@@ -249,9 +287,17 @@ object ControllerConsoleActor:
           catch
             case e: IOException =>
               log.error(s"$logTag ControllerConsoleActor: connection failed: ${e.getMessage}")
+              // Report Disconnected so a failed (re)connect can't leave the HMI
+              // showing a stale green from an earlier successful handshake.
+              internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                "consoleConnection", ConnectionStatus.Disconnected
+              )
               report(ConnectFailed(e.getMessage)) // never leave caller blocking
             case NonFatal(e) =>
               log.error(s"$logTag ControllerConsoleActor: unexpected error: ${e.getMessage}")
+              internalStateActor ! InternalStateActor.ReportConnectionStatus(
+                "consoleConnection", ConnectionStatus.Disconnected
+              )
               report(ConnectFailed(e.getMessage)) // never leave caller blocking
           finally
             if socket != null && !socket.isClosed then
@@ -309,6 +355,35 @@ object ControllerConsoleActor:
         case Stop =>
           stopReading()
           Behaviors.stopped
+
+        case VerifyConnection(replyTo) =>
+          // Probe-and-reuse: round-trip a unique token via MG to confirm the
+          // current handle is live, without tearing it down. A live handle
+          // echoes the token back to the reader thread (CF routes MG here); a
+          // silently half-open handle never returns it and we time out.
+          if !running || currentSocket == null then
+            replyTo ! VerifyResult(alive = false)
+          else
+            val token = s"CONSOLEPROBE${System.nanoTime()}"
+            val latch = new CountDownLatch(1)
+            probeToken = token
+            probeLatch = latch
+            val alive =
+              try
+                val s = currentSocket
+                s.getOutputStream.write(s"MG \"$token\"\r".getBytes("UTF-8"))
+                s.getOutputStream.flush()
+                latch.await(ProbeTimeoutMs.toLong, java.util.concurrent.TimeUnit.MILLISECONDS)
+              catch
+                case NonFatal(e) =>
+                  log.warn(s"$logTag ControllerConsoleActor: verify probe write failed: ${e.getMessage}")
+                  false
+              finally
+                probeToken = null
+                probeLatch = null
+            log.info(s"$logTag ControllerConsoleActor: console verify probe → ${if alive then "alive" else "dead"}")
+            replyTo ! VerifyResult(alive = alive)
+          Behaviors.same
 
         case Reconnect(replyTo) =>
           // Synchronous-style reconnect handled inside the actor message

@@ -157,8 +157,11 @@ class CommandHandlerActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     queryVariable("decel[0]") shouldBe testDecel +- 0.01
     info("All three parameters verified on controller")
 
-    // Restore
-    galilIo.send(s"speed[0]=$origSpeed;accel[0]=$origAccel;decel[0]=$origDecel")
+    // Restore — chunk like production configAxis so large original values
+    // can't exceed the 80-char line limit on teardown.
+    GalilIo.chunkCompound(Seq(
+      s"speed[0]=$origSpeed", s"accel[0]=$origAccel", s"decel[0]=$origDecel"
+    )).foreach(galilIo.send)
   }
 
   test("compound command with all five configAxis parameters") {
@@ -183,8 +186,13 @@ class CommandHandlerActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     queryVariable("hspd[0]") shouldBe 300.0 +- 0.01
     info("All five parameters verified")
 
-    // Restore
-    galilIo.send(s"speed[0]=$origSpeed;accel[0]=$origAccel;decel[0]=$origDecel;hoff[0]=$origHoff;hspd[0]=$origHspd")
+    // Restore — chunk like production configAxis so large original values
+    // (e.g. 100000.0 each) can't exceed the 80-char line limit and leave the
+    // controller in the modified state on teardown.
+    GalilIo.chunkCompound(Seq(
+      s"speed[0]=$origSpeed", s"accel[0]=$origAccel", s"decel[0]=$origDecel",
+      s"hoff[0]=$origHoff",   s"hspd[0]=$origHspd"
+    )).foreach(galilIo.send)
   }
 
 
