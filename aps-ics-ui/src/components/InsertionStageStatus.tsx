@@ -1,77 +1,61 @@
 /*
- * InsertionStage status panel — pure display of the latest `status` and
- * `axisStatus` telemetry. State machines as colour-coded tags; axis readout as a
- * description list. Driven by snapshots Main keeps from the event subscription.
+ * Assembly Status section (SDD §4.3). Pure display of the assembly's PUBLISHED
+ * telemetry: the `status` event (assemblyState / hcdState / commandState) and the
+ * `axisStatus` event (axisState / position / velocity / indexed / inPosition).
+ *
+ * Two non-telemetry rows are shown but clearly marked:
+ *   - HCD label — config-derived (the bound HCD, not a live value).
+ *   - Lifecycle (CSW) — the supervisor lifecycle state from AdminService, polled
+ *     by Main; '—' if the admin route is unavailable.
+ * State colouring is shared via ./statusBits so every stage panel matches.
  */
-import { Card, Descriptions, Space, Tag, Typography } from 'antd'
+import { Descriptions, Space, Tag, Typography } from 'antd'
 import React from 'react'
+import { BoolTag, colorFor, fmt } from './statusBits'
+import { IS_HCD_LABEL } from '../models/insertionStage'
 import type { AxisSnapshot, StatusSnapshot } from '../models/insertionStage'
-
-const colorFor = (v?: string): string => {
-  switch (v) {
-    case 'OPERATIONAL':
-    case 'READY':
-    case 'IDLE':
-      return 'green'
-    case 'PRE_HOMED':
-    case 'UNINITIALIZED':
-    case 'HOMING':
-    case 'MOVING':
-      return 'blue'
-    case 'PROCESSING':
-    case 'ERROR_RECOVERY':
-    case 'DEGRADED':
-      return 'orange'
-    case 'FAULTED':
-    case 'FAILED':
-    case 'ERROR':
-    case 'LOST':
-      return 'red'
-    default:
-      return 'default'
-  }
-}
-
-const StateTag = ({ label, value }: { label: string; value?: string }): React.JSX.Element => (
-  <Space>
-    <Typography.Text type='secondary'>{label}</Typography.Text>
-    <Tag color={colorFor(value)}>{value ?? '—'}</Tag>
-  </Space>
-)
-
-const fmt = (n?: number, d = 3): string =>
-  n === undefined || Number.isNaN(n) ? '—' : n.toFixed(d)
-
-const BoolTag = ({ b }: { b?: boolean }): React.JSX.Element =>
-  b === undefined ? <Tag>—</Tag> : <Tag color={b ? 'green' : 'default'}>{String(b)}</Tag>
+import type { SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
 
 export const InsertionStageStatus = ({
   status,
-  axis
+  axis,
+  lifecycle
 }: {
   status: StatusSnapshot
   axis: AxisSnapshot
+  lifecycle?: SupervisorLifecycleState
 }): React.JSX.Element => (
-  <Card title='InsertionStage — Status' style={{ width: '28rem' }}>
-    <Space direction='vertical' size='middle' style={{ width: '100%' }}>
-      <Space size='large' wrap>
-        <StateTag label='assembly' value={status.assemblyState} />
-        <StateTag label='hcd' value={status.hcdState} />
-        <StateTag label='command' value={status.commandState} />
-      </Space>
-      <Descriptions column={1} size='small' bordered>
-        <Descriptions.Item label='axisState'>
-          <Tag color={colorFor(axis.axisState)}>{axis.axisState ?? '—'}</Tag>
-        </Descriptions.Item>
-        <Descriptions.Item label='position (mm)'>{fmt(axis.position)}</Descriptions.Item>
-        <Descriptions.Item label='velocity'>{fmt(axis.velocity)}</Descriptions.Item>
-        <Descriptions.Item label='indexed'>
-          <BoolTag b={axis.indexed} />
-        </Descriptions.Item>
-        <Descriptions.Item label='inPosition'>
-          <BoolTag b={axis.inPosition} />
-        </Descriptions.Item>
-      </Descriptions>
-    </Space>
-  </Card>
+  <Space direction='vertical' size={8} style={{ width: '100%' }}>
+    <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+      ASSEMBLY STATUS
+    </Typography.Text>
+    <Descriptions column={1} size='small' bordered>
+      <Descriptions.Item label='Assembly state'>
+        <Tag color={colorFor(status.assemblyState)}>{status.assemblyState ?? '—'}</Tag>
+      </Descriptions.Item>
+      <Descriptions.Item label='HCD state'>
+        <Tag color={colorFor(status.hcdState)}>{status.hcdState ?? '—'}</Tag>
+      </Descriptions.Item>
+      <Descriptions.Item label='Command state'>
+        <Tag color={colorFor(status.commandState)}>{status.commandState ?? '—'}</Tag>
+      </Descriptions.Item>
+      <Descriptions.Item label='Axis state'>
+        <Tag color={colorFor(axis.axisState)}>{axis.axisState ?? '—'}</Tag>
+      </Descriptions.Item>
+      <Descriptions.Item label='Position (mm)'>{fmt(axis.position)}</Descriptions.Item>
+      <Descriptions.Item label='Velocity'>{fmt(axis.velocity)}</Descriptions.Item>
+      <Descriptions.Item label='Indexed'>
+        <BoolTag b={axis.indexed} />
+      </Descriptions.Item>
+      <Descriptions.Item label='In position'>
+        <BoolTag b={axis.inPosition} />
+      </Descriptions.Item>
+      <Descriptions.Item label={<span>HCD <Typography.Text type='secondary' style={{ fontSize: 11 }}>(config)</Typography.Text></span>}>
+        {IS_HCD_LABEL}
+      </Descriptions.Item>
+      <Descriptions.Item label={<span>Lifecycle <Typography.Text type='secondary' style={{ fontSize: 11 }}>(CSW)</Typography.Text></span>}>
+        {lifecycle ?? '—'}
+      </Descriptions.Item>
+    </Descriptions>
+  </Space>
 )

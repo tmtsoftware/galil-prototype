@@ -36,7 +36,9 @@ class InsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: Cs
 
   override def initialize(): Unit =
     super.initialize()
-    val c = ConfigFactory.load(configResource)
+    // Read the IS-specific keys from the config the base already loaded
+    // (Config Service active version or fallback) — no second load.
+    val c = componentConfig
     if c.hasPath("stimulusPosition") then stimulusPositionMm = c.getDouble("stimulusPosition")
     if c.hasPath("skyPosition") then skyPositionMm = c.getDouble("skyPosition")
     log.info(s"$assemblyPrefix: stimulus=$stimulusPositionMm mm, sky=$skyPositionMm mm")

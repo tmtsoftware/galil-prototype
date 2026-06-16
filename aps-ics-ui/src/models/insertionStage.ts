@@ -1,12 +1,20 @@
 /*
- * InsertionStage model: constants, Setup builders, event readers, and command
- * gating for the APS.ICS.STIM.InsertionStage assembly.
+ * InsertionStage model: constants, Setup builders, command gating and the
+ * config snapshot for the APS.ICS.STIM.InsertionStage assembly.
  *
- * Key names and choice domains mirror ics-assemblies InsertionStageKeys.scala
- * EXACTLY — a mismatched key name yields Invalid(MissingKey) at the assembly.
+ * Shared stage telemetry (StatusSnapshot / AxisSnapshot / readStatus / readAxis)
+ * and the command-gating primitive live in ./stage and are re-exported here, so
+ * existing importers of this module are unaffected. Key names and choice domains
+ * mirror ics-assemblies InsertionStageKeys.scala EXACTLY.
  */
 import { ComponentId, Prefix, Setup, choiceKey, floatKey, Units } from '@tmtsoftware/esw-ts'
-import type { Event } from '@tmtsoftware/esw-ts'
+import { gateByKind } from './stage'
+import type { CmdKind, ConfigSection, StatusSnapshot } from './stage'
+
+// Re-export the shared telemetry shapes/readers under this module's surface so
+// Main and the InsertionStage panels keep importing them from here.
+export { readStatus, readAxis } from './stage'
+export type { StatusSnapshot, AxisSnapshot, ConfigRow, ConfigSection } from './stage'
 
 export const IS_PREFIX_STR = 'APS.ICS.STIM.InsertionStage'
 export const IS_PREFIX = Prefix.fromString(IS_PREFIX_STR)
@@ -15,6 +23,9 @@ export const IS_COMPONENT_ID = new ComponentId(IS_PREFIX, 'Assembly')
 // Event names published by InsertionStageHandlers.publishTelemetry
 export const STATUS_EVENT = 'status'
 export const AXIS_EVENT = 'axisStatus'
+
+// Config Service path (prefix-mirrored: '.' -> '/', '<prefix>.conf').
+export const IS_CONFIG_PATH = 'APS/ICS/STIM/InsertionStage.conf'
 
 // Choice domains — must match ChoiceKey.make(...) in InsertionStageKeys.scala
 export const LIGHT_SOURCES = ['SKY', 'STIMULUS'] as const
@@ -38,43 +49,7 @@ export const positionStageCmd = (method: PositionMethod, mm: number): Setup =>
     floatKey('value', Units.millimeter).set([mm])
   ])
 
-// ---- Event reading: pull the first value of a param by name ----
-const firstValue = (e: Event, name: string): unknown =>
-  e.paramSet.find((p) => p.keyName === name)?.values?.[0]
-
-export type StatusSnapshot = {
-  assemblyState?: string
-  hcdState?: string
-  commandState?: string
-}
-export type AxisSnapshot = {
-  axisState?: string
-  position?: number
-  velocity?: number
-  indexed?: boolean
-  inPosition?: boolean
-}
-
-export const readStatus = (e: Event): StatusSnapshot => ({
-  assemblyState: firstValue(e, 'assemblyState') as string | undefined,
-  hcdState: firstValue(e, 'hcdState') as string | undefined,
-  commandState: firstValue(e, 'commandState') as string | undefined
-})
-
-export const readAxis = (e: Event): AxisSnapshot => ({
-  axisState: firstValue(e, 'axisState') as string | undefined,
-  position: firstValue(e, 'position') as number | undefined,
-  velocity: firstValue(e, 'velocity') as number | undefined,
-  indexed: firstValue(e, 'indexed') as boolean | undefined,
-  inPosition: firstValue(e, 'inPosition') as boolean | undefined
-})
-
-// ---- Command gating: mirrors StageAssemblyHandlers.validateCommand ----
-//  Faulted        -> reject all
-//  Processing     -> reject all (assembly serialises commands)
-//  ErrorRecovery  -> only abortErrorRecovery
-//  PreHomed       -> only configure / home
-//  Operational    -> all motion commands
+// ---- Command gating: mirrors StageAssemblyHandlers.validateCommand ----------
 export type CmdName =
   | 'configure'
   | 'home'
@@ -84,17 +59,65 @@ export type CmdName =
   | 'stop'
   | 'abortErrorRecovery'
 
+const kindOf = (cmd: CmdName): CmdKind =>
+  cmd === 'configure' || cmd === 'home'
+    ? 'configHome'
+    : cmd === 'abortErrorRecovery'
+      ? 'abort'
+      : 'motion'
+
 export const commandEnabled = (
   cmd: CmdName,
   s: StatusSnapshot,
   ready: boolean,
   busy: boolean
-): boolean => {
-  if (!ready || busy) return false
-  if (s.assemblyState === 'FAULTED') return false
-  if (s.commandState === 'PROCESSING') return false
-  if (s.commandState === 'ERROR_RECOVERY') return cmd === 'abortErrorRecovery'
-  if (cmd === 'abortErrorRecovery') return false
-  if (cmd === 'configure' || cmd === 'home') return true
-  return s.assemblyState === 'OPERATIONAL' // motion commands require a homed axis
-}
+): boolean => gateByKind(kindOf(cmd), s, ready, busy)
+
+// ===========================================================================
+// Selector/HCD label and the read-only config snapshot.
+// ===========================================================================
+
+// The HCD this assembly is bound to (from the container ComponentInfo
+// connection; controller 2 / shared FO&C per SDD Fig 2-2). Static label only.
+export const IS_HCD_PREFIX_STR = 'APS.ICS.HCD.GalilMotion.2'
+export const IS_HCD_LABEL = 'Galil HCD 2'
+
+// Static mirror of ics-assemblies InsertionStage.conf, shown when the Config
+// Service has no seeded active version. Simulator bring-up values, NOT calibrated.
+export const IS_CONFIG_VIEW: ConfigSection[] = [
+  {
+    title: 'Axis "stage" — linear (SDD Table 6-1)',
+    rows: [
+      { label: 'Counts per mm', value: '1000.0 counts/mm' },
+      { label: 'Is rotational', value: 'false' },
+      { label: 'Software limit (lower)', value: '-100.0 mm' },
+      { label: 'Software limit (upper)', value: '100.0 mm' },
+      { label: 'Default position', value: '0.0 mm' },
+      { label: 'In-position threshold', value: '0.01 mm' }
+    ]
+  },
+  {
+    title: 'Assembly → HCD binding (SDD Table 6-1)',
+    rows: [
+      { label: 'Galil HCD', value: 'APS.ICS.HCD.GalilMotion.2' },
+      { label: 'Galil channel', value: 'A (provisional)' }
+    ]
+  },
+  {
+    title: 'Motion (SDD Table 6-1)',
+    rows: [
+      { label: 'Velocity', value: '20.0 mm/sec' },
+      { label: 'Acceleration', value: '100.0 mm/sec²' },
+      { label: 'Deceleration', value: '100.0 mm/sec²' },
+      { label: 'Index offset', value: '100.0 mm' },
+      { label: 'Index speed', value: '2.0 mm/sec' }
+    ]
+  },
+  {
+    title: 'Source positions (SDD Table 6-24)',
+    rows: [
+      { label: 'Stimulus position', value: '60.0 mm' },
+      { label: 'Sky position', value: '-60.0 mm' }
+    ]
+  }
+]

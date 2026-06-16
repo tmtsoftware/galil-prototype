@@ -3,6 +3,7 @@ package csw.proto.galil.hcd
 import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.{Config, ConfigFactory}
+import csw.proto.galil.config.ConfigServiceLoader
 import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.deploy.containercmd.ContainerCmd
 import csw.framework.models.CswContext
@@ -379,18 +380,26 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
    *   configClient.getActive(Paths.get("galil/GalilHcdConfig-Hardware.conf"))
    */
   private def loadConfiguration(): GalilHcdConfig = {
-    // Get config file path from system property, default to GalilHcdConfig.conf
-    val configPath = sys.props.getOrElse("galil.config.path", "GalilHcdConfig.conf")
-    
-    log.info(s"Loading HCD configuration from $configPath")
-    
+    // Per-instance config selection, derived from THIS HCD's prefix
+    // (...GalilMotion.N -> GalilHcdConfig-APS-N), or overridden for hardware / dev
+    // bring-up via -Dgalil.config.path. Deriving from the prefix instead of a
+    // JVM-global system property is what lets several HCDs share one container.
+    // Offline fallback resource: -D override, else the per-instance bundled file.
+    val name = sys.props.get("galil.config.path")
+      .map(_.stripSuffix(".conf"))
+      .getOrElse(s"GalilHcdConfig-APS-${componentInfo.prefix.toString.split('.').last}")
+    // Config Service path mirrors the component prefix (by-component convention):
+    //   APS.ICS.HCD.GalilMotion.2  ->  APS/ICS/HCD/GalilMotion/2.conf
+    val csPath = componentInfo.prefix.toString.replace('.', '/') + ".conf"
+
+    log.info(s"Loading HCD configuration (cs=$csPath, fallback=$name)")
+
     try {
-      // For local testing: load from resources
-      // In production: replace with ConfigClientService.getActive()
-      val config = ConfigFactory.load(configPath.stripSuffix(".conf"))
-      val hcdConfig = GalilHcdConfig.fromConfig(config)
-      
-      log.info(s"Configuration loaded successfully from $configPath")
+      // Config Service active version, else the bundled resource (see ConfigServiceLoader).
+      val loaded    = ConfigServiceLoader.load(csPath, name, locationService, ctx.system)
+      val hcdConfig = GalilHcdConfig.fromConfig(loaded.config)
+
+      log.info(s"Configuration loaded from ${loaded.source}")
       log.info(s"  Controller: ${hcdConfig.controller.hostString}:${hcdConfig.controller.port}")
       log.info(s"  Controller ID: ${hcdConfig.controller.id}")
       log.info(s"  Embedded Program: ${hcdConfig.controller.embeddedProgram}")
@@ -400,7 +409,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       hcdConfig
     } catch {
       case ex: Exception =>
-        log.error(s"Failed to load configuration from $configPath: ${ex.getMessage}", ex = ex)
+        log.error(s"Failed to load configuration (cs=$csPath, fallback=$name): ${ex.getMessage}", ex = ex)
         log.warn("Using default test configuration")
         GalilHcdConfig.defaultTestConfig
     }

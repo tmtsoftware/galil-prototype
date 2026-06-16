@@ -20,6 +20,7 @@ import csw.prefix.models.Prefix
 import csw.time.core.models.UTCTime
 
 import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion` as Hcd
+import csw.proto.galil.config.ConfigServiceLoader
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -83,6 +84,10 @@ abstract class StageAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cs
   /** Local config resource name (prototype). Production: CSW Configuration Service. */
   protected def configResource: String
 
+  /** Component config, loaded once in [[initialize]] (Config Service or fallback);
+   *  subclasses read their own keys from this rather than re-loading. */
+  @volatile protected var componentConfig: Config = ConfigFactory.empty()
+
   /** HOCON object keys for each axis this assembly controls (SDD axis names). */
   protected def axisConfigKeys: List[String]
 
@@ -135,8 +140,15 @@ abstract class StageAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], cs
 
   override def initialize(): Unit =
     log.info(s"$assemblyPrefix: initialize")
-    val config: Config = ConfigFactory.load(configResource)
-    axes = axisConfigKeys.map(k => AxisConfig.fromConfig(k, config))
+    // Config Service active version (path namespaced under aps/), else the bundled
+    // resource. Loaded once here and shared with subclasses via componentConfig.
+    // Config Service path mirrors the component prefix (by-component convention):
+    //   APS.ICS.STIM.InsertionStage  ->  APS/ICS/STIM/InsertionStage.conf
+    val csPath = componentInfo.prefix.toString.replace('.', '/') + ".conf"
+    val loaded = ConfigServiceLoader.load(csPath, configResource, locationService, ctx.system)
+    componentConfig = loaded.config
+    log.info(s"$assemblyPrefix: config from ${loaded.source}")
+    axes = axisConfigKeys.map(k => AxisConfig.fromConfig(k, componentConfig))
     log.info(s"$assemblyPrefix: loaded ${axes.size} axis config(s): " +
       axes.map(a => s"${a.name}->${a.galilHcd}:${a.galilChannel}").mkString(", "))
     isOnline = true
