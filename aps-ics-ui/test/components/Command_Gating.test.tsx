@@ -1,0 +1,78 @@
+/*
+ * Command-gating smoke test — pure logic (no React, no antd), so it cannot hit
+ * the antd-render hang that plagues this runner. Exercises commandEnabled for
+ * both assemblies, mirroring StageAssemblyHandlers.validateCommand:
+ *   not ready / busy -> all off
+ *   FAULTED          -> all off
+ *   PROCESSING       -> all off
+ *   ERROR_RECOVERY   -> only abortErrorRecovery
+ *   PRE_HOMED        -> only configure / home
+ *   OPERATIONAL      -> motion enabled
+ */
+import { expect } from 'chai'
+import { commandEnabled as isEnabled } from '../../src/models/insertionStage'
+import { commandEnabled as sbsEnabled } from '../../src/models/steeringBeamSplitter'
+
+describe('InsertionStage command gating', () => {
+  const preHomed = { assemblyState: 'PRE_HOMED', commandState: 'IDLE' }
+  const operational = { assemblyState: 'OPERATIONAL', commandState: 'IDLE' }
+
+  it('rejects everything when not ready', () => {
+    expect(isEnabled('home', preHomed, false, false)).to.equal(false)
+  })
+
+  it('rejects everything while busy', () => {
+    expect(isEnabled('home', preHomed, true, true)).to.equal(false)
+  })
+
+  it('PRE_HOMED allows only configure/home', () => {
+    expect(isEnabled('home', preHomed, true, false)).to.equal(true)
+    expect(isEnabled('configure', preHomed, true, false)).to.equal(true)
+    expect(isEnabled('positionStage', preHomed, true, false)).to.equal(false)
+    expect(isEnabled('moveToDefaultPosition', preHomed, true, false)).to.equal(false)
+  })
+
+  it('OPERATIONAL enables motion', () => {
+    expect(isEnabled('positionStage', operational, true, false)).to.equal(true)
+    expect(isEnabled('selectSource', operational, true, false)).to.equal(true)
+    expect(isEnabled('stop', operational, true, false)).to.equal(true)
+  })
+
+  it('FAULTED rejects all', () => {
+    expect(isEnabled('home', { assemblyState: 'FAULTED' }, true, false)).to.equal(false)
+    expect(isEnabled('abortErrorRecovery', { assemblyState: 'FAULTED' }, true, false)).to.equal(false)
+  })
+
+  it('ERROR_RECOVERY allows only abortErrorRecovery', () => {
+    const s = { assemblyState: 'OPERATIONAL', commandState: 'ERROR_RECOVERY' }
+    expect(isEnabled('abortErrorRecovery', s, true, false)).to.equal(true)
+    expect(isEnabled('positionStage', s, true, false)).to.equal(false)
+    expect(isEnabled('home', s, true, false)).to.equal(false)
+  })
+
+  it('PROCESSING rejects all', () => {
+    const s = { assemblyState: 'OPERATIONAL', commandState: 'PROCESSING' }
+    expect(isEnabled('positionStage', s, true, false)).to.equal(false)
+    expect(isEnabled('stop', s, true, false)).to.equal(false)
+  })
+})
+
+describe('SteeringBeamSplitter command gating', () => {
+  const operational = { assemblyState: 'OPERATIONAL', commandState: 'IDLE' }
+  const preHomed = { assemblyState: 'PRE_HOMED', commandState: 'IDLE' }
+
+  it('PRE_HOMED allows only configure/home', () => {
+    expect(sbsEnabled('home', preHomed, true, false)).to.equal(true)
+    expect(sbsEnabled('positionBeamSplitter', preHomed, true, false)).to.equal(false)
+  })
+
+  it('OPERATIONAL enables positionBeamSplitter', () => {
+    expect(sbsEnabled('positionBeamSplitter', operational, true, false)).to.equal(true)
+  })
+
+  it('ERROR_RECOVERY allows only abortErrorRecovery', () => {
+    const s = { assemblyState: 'OPERATIONAL', commandState: 'ERROR_RECOVERY' }
+    expect(sbsEnabled('abortErrorRecovery', s, true, false)).to.equal(true)
+    expect(sbsEnabled('positionBeamSplitter', s, true, false)).to.equal(false)
+  })
+})

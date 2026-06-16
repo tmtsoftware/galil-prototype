@@ -9,26 +9,28 @@
  * Reset/Update stay disabled — Administrator edit (update + setActiveVersion) is
  * the next step and will turn the raw view into an editable HOCON field.
  */
-import { Alert, Button, Descriptions, Space, Tooltip, Typography } from 'antd'
+import { Alert, Button, Descriptions, Space, Typography } from 'antd'
 import React from 'react'
 import type { ConfigSection } from '../models/stage'
 
 export type ConfigSource = 'service' | 'snapshot' | 'loading'
 
+// Hover hint via the native `title` attribute on the wrapper span rather than
+// antd <Tooltip>: these are disabled placeholders for the not-yet-built admin
+// edit, and antd's Tooltip (rc-trigger overlay) hangs the React-19 web-test-runner
+// render. Native title keeps the hint without that dependency.
+const ADMIN_EDIT_HINT = 'Administrator edit (update + setActiveVersion) is the next step.'
+
 const ConfigButtons = (): React.JSX.Element => (
   <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-    <Tooltip title='Administrator edit (update + setActiveVersion) is the next step.'>
-      <span>
-        <Button disabled>Reset</Button>
-      </span>
-    </Tooltip>
-    <Tooltip title='Administrator edit (update + setActiveVersion) is the next step.'>
-      <span>
-        <Button type='primary' disabled>
-          Update
-        </Button>
-      </span>
-    </Tooltip>
+    <span title={ADMIN_EDIT_HINT}>
+      <Button disabled>Reset</Button>
+    </span>
+    <span title={ADMIN_EDIT_HINT}>
+      <Button type='primary' disabled>
+        Update
+      </Button>
+    </span>
   </Space>
 )
 
