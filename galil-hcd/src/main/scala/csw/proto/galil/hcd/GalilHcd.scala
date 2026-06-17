@@ -2612,6 +2612,33 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 object GalilHcdApp {
   def main(args: Array[String]): Unit = {
     val defaultConfig = ConfigFactory.load("GalilHcd.conf")
-    ContainerCmd.start("ICS.HCD.GalilMotion", Subsystem.APS, args, Some(defaultConfig))
+    // Per-instance logging-system name so each container writes its own log file.
+    // The CSW FileAppender names files by the logging-system name, so a fixed name
+    // collapses every controller into one shared file. The name is derived from the
+    // component prefix declared in the launched container config (subsystem segment
+    // removed), e.g. "ICS.HCD.GalilMotion.3".
+    ContainerCmd.start(loggingSystemName(args, defaultConfig), Subsystem.APS, args, Some(defaultConfig))
+  }
+
+  /** Logging-system name for this HCD container: the launched component's prefix
+    * with the leading subsystem segment removed (e.g. "ICS.HCD.GalilMotion.3"),
+    * giving one log file per controller. Falls back to the generic name if the
+    * container prefix cannot be read (e.g. a relative config path that does not
+    * resolve against the current working directory).
+    */
+  private def loggingSystemName(args: Array[String], defaultConfig: Config): String = {
+    val fallback = "ICS.HCD.GalilMotion"
+    Try {
+      // ContainerCmd takes the container config as a positional path (--local is a
+      // separate boolean flag), so the path is the first non-flag argument. With no
+      // path argument the bundled default config is used.
+      val config = args.find(a => !a.startsWith("-")) match {
+        case Some(path) => ConfigFactory.parseFile(new java.io.File(path))
+        case None       => defaultConfig
+      }
+      val prefix = config.getConfigList("components").get(0).getString("prefix")
+      val name   = prefix.substring(prefix.indexOf('.') + 1) // drop leading subsystem segment
+      if (name.nonEmpty) name else fallback
+    }.getOrElse(fallback)
   }
 }

@@ -13,7 +13,7 @@
  * component is: add its model + panels, then add one entry here.
  */
 import React from 'react'
-import type { Setup, SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
+import type { Event, Setup, SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
 import type { AxisSnapshot, ConfigSection, StatusSnapshot } from '../models/stage'
 
 import { InsertionStageCommands } from './InsertionStageCommands'
@@ -41,6 +41,33 @@ import {
   SBS_PREFIX_STR
 } from '../models/steeringBeamSplitter'
 
+import { CollimatorUnitCommands } from './CollimatorUnitCommands'
+import { CollimatorUnitStatus } from './CollimatorUnitStatus'
+import {
+  STATUS_EVENT as CU_STATUS_EVENT,
+  FRONT_AXIS_EVENT as CU_FRONT_AXIS_EVENT,
+  REAR_AXIS_EVENT as CU_REAR_AXIS_EVENT,
+  CU_COMPONENT_ID,
+  CU_CONFIG_PATH,
+  CU_CONFIG_VIEW,
+  CU_PREFIX,
+  CU_PREFIX_STR
+} from '../models/collimatorUnit'
+
+import { CalibrationSourceStageCommands } from './CalibrationSourceStageCommands'
+import { CalibrationSourceStageStatus } from './CalibrationSourceStageStatus'
+import {
+  STATUS_EVENT as CSS_STATUS_EVENT,
+  AXIS_EVENT as CSS_AXIS_EVENT,
+  LIGHT_EVENT as CSS_LIGHT_EVENT,
+  readLight as cssReadLight,
+  CSS_COMPONENT_ID,
+  CSS_CONFIG_PATH,
+  CSS_CONFIG_VIEW,
+  CSS_PREFIX,
+  CSS_PREFIX_STR
+} from '../models/calibrationSourceStage'
+
 // esw-ts exports Prefix/ComponentId as classes; type them off the model values
 // so this compiles both against the real package and the stubbed harness.
 type PrefixT = typeof IS_PREFIX
@@ -55,6 +82,7 @@ export type CommandsProps = {
 export type StatusProps = {
   status: StatusSnapshot
   axes: Record<string, AxisSnapshot>
+  extras: Record<string, Event>
   lifecycle?: SupervisorLifecycleState
 }
 
@@ -67,6 +95,10 @@ export type ComponentDescriptor = {
   staticConfig: ConfigSection[]
   statusEvent: string
   axisEvents: string[]
+  // Non-axis telemetry events (read per-component in renderStatus). Optional;
+  // most assemblies publish only status + axis events. CalibrationSourceStage
+  // adds internalLightStatus here.
+  extraEvents?: string[]
   renderCommands: (p: CommandsProps) => React.JSX.Element
   renderStatus: (p: StatusProps) => React.JSX.Element
 }
@@ -110,7 +142,60 @@ const steeringBeamSplitter: ComponentDescriptor = {
   )
 }
 
-export const DESCRIPTORS: ComponentDescriptor[] = [insertionStage, steeringBeamSplitter]
+const collimatorUnit: ComponentDescriptor = {
+  key: CU_PREFIX_STR,
+  label: 'Collimator Unit',
+  prefix: CU_PREFIX,
+  componentId: CU_COMPONENT_ID,
+  configPath: CU_CONFIG_PATH,
+  staticConfig: CU_CONFIG_VIEW,
+  statusEvent: CU_STATUS_EVENT,
+  axisEvents: [CU_FRONT_AXIS_EVENT, CU_REAR_AXIS_EVENT],
+  renderCommands: (p) => (
+    <CollimatorUnitCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <CollimatorUnitStatus
+      status={p.status}
+      frontAxis={p.axes[CU_FRONT_AXIS_EVENT] ?? {}}
+      rearAxis={p.axes[CU_REAR_AXIS_EVENT] ?? {}}
+      lifecycle={p.lifecycle}
+    />
+  )
+}
+
+const calibrationSourceStage: ComponentDescriptor = {
+  key: CSS_PREFIX_STR,
+  label: 'Calibration Source Stage',
+  prefix: CSS_PREFIX,
+  componentId: CSS_COMPONENT_ID,
+  configPath: CSS_CONFIG_PATH,
+  staticConfig: CSS_CONFIG_VIEW,
+  statusEvent: CSS_STATUS_EVENT,
+  axisEvents: [CSS_AXIS_EVENT],
+  extraEvents: [CSS_LIGHT_EVENT],
+  renderCommands: (p) => (
+    <CalibrationSourceStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => {
+    const lightEvent = p.extras[CSS_LIGHT_EVENT]
+    return (
+      <CalibrationSourceStageStatus
+        status={p.status}
+        axis={p.axes[CSS_AXIS_EVENT] ?? {}}
+        light={lightEvent ? cssReadLight(lightEvent) : {}}
+        lifecycle={p.lifecycle}
+      />
+    )
+  }
+}
+
+export const DESCRIPTORS: ComponentDescriptor[] = [
+  insertionStage,
+  steeringBeamSplitter,
+  collimatorUnit,
+  calibrationSourceStage
+]
 
 export const REGISTRY: Record<string, ComponentDescriptor> = Object.fromEntries(
   DESCRIPTORS.map((d) => [d.key, d])

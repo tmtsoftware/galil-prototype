@@ -38,6 +38,8 @@ MAP=(
   "$HCD_RES/GalilHcdConfig-APS-4.conf:APS/ICS/HCD/GalilMotion/4.conf"
   "$ASM_RES/InsertionStage.conf:APS/ICS/STIM/InsertionStage.conf"
   "$ASM_RES/SteeringBeamSplitterStage.conf:APS/ICS/FOC/SteeringBeamSplitterStage.conf"
+  "$ASM_RES/CollimatorUnit.conf:APS/ICS/FOC/CollimatorUnit.conf"
+  "$ASM_RES/CalibrationSourceStage.conf:APS/ICS/FOC/CalibrationSourceStage.conf"
 )
 
 put() {

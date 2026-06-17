@@ -82,6 +82,7 @@ export const Main = (): React.JSX.Element => {
   const [adminService, setAdminService] = useState<AdminServiceT>()
   const [status, setStatus] = useState<StatusSnapshot>({})
   const [axes, setAxes] = useState<Record<string, AxisSnapshot>>({})
+  const [extras, setExtras] = useState<Record<string, Event>>({})
   const [lifecycle, setLifecycle] = useState<SupervisorLifecycleState>()
   const [busy, setBusy] = useState(false)
   const [liveConfigText, setLiveConfigText] = useState<string>()
@@ -133,7 +134,9 @@ export const Main = (): React.JSX.Element => {
     let cancelled = false
     setStatus({})
     setAxes({})
-    const names = [desc.statusEvent, ...desc.axisEvents]
+    setExtras({})
+    const extraEvents = desc.extraEvents ?? []
+    const names = [desc.statusEvent, ...desc.axisEvents, ...extraEvents]
     const keys = new Set(names.map((n) => new EventKey(desc.prefix, new EventName(n))))
     EventService(authData).then((es) => {
       if (cancelled) return
@@ -142,6 +145,7 @@ export const Main = (): React.JSX.Element => {
         const name = e.eventName.name
         if (name === desc.statusEvent) setStatus(readStatus(e))
         else if (desc.axisEvents.includes(name)) setAxes((prev) => ({ ...prev, [name]: readAxis(e) }))
+        else if (extraEvents.includes(name)) setExtras((prev) => ({ ...prev, [name]: e }))
       })
     })
     return () => {
@@ -257,7 +261,7 @@ export const Main = (): React.JSX.Element => {
         <LifecycleCommands ready={adminService !== undefined} busy={busy} run={runLifecycle} />
       </div>
       <div style={{ flex: '1 1 300px', minWidth: 280 }}>
-        {desc.renderStatus({ status, axes, lifecycle })}
+        {desc.renderStatus({ status, axes, extras, lifecycle })}
       </div>
     </div>
   )

@@ -14,6 +14,8 @@ import React from 'react'
 import { isRegistered } from './registry'
 import { IS_PREFIX_STR } from '../models/insertionStage'
 import { SBS_PREFIX_STR } from '../models/steeringBeamSplitter'
+import { CU_PREFIX_STR } from '../models/collimatorUnit'
+import { CSS_PREFIX_STR } from '../models/calibrationSourceStage'
 
 // Disabled placeholder node helper.
 const ph = (key: string, title: string): DataNode => ({ key, title, disabled: true })
@@ -43,11 +45,11 @@ const treeData: DataNode[] = [
     title: 'FOC assemblies',
     selectable: false,
     children: [
-      // Live this session — shares Galil HCD 2 with the Insertion Stage.
+      // Live this session — all share Galil HCD 2 (SDD Fig 2-2).
       { key: SBS_PREFIX_STR, title: 'Steering Beam Splitter' },
-      ph('foc-css', 'Calibration Source Stage'),
+      { key: CSS_PREFIX_STR, title: 'Calibration Source Stage' },
       ph('foc-kmirror', 'K-Mirror'),
-      ph('foc-coll', 'Collimator'),
+      { key: CU_PREFIX_STR, title: 'Collimator' },
       ph('foc-tilt', 'Tilt Plate')
     ]
   },
