@@ -1,4 +1,4 @@
-package aps.ics.assembly.calibrationsourcestage
+package aps.ics.assembly.foc
 
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,7 +12,7 @@ import csw.params.events.SystemEvent
 import csw.prefix.models.Subsystem
 
 import aps.ics.assembly.common.{AxisConfig, AxisSnapshot, StageAssemblyHandlers}
-import aps.ics.assembly.icd.CalibrationSourceStageKeys.`ICS.FOC.CalibrationSourceStage` as CSS
+import aps.ics.assembly.icd.FocCalibrationSourceStageKeys.`ICS.FOC.CalibrationSourceStage` as CSS
 
 import scala.concurrent.Future
 import scala.jdk.CollectionConverters._
@@ -46,7 +46,7 @@ import scala.jdk.CollectionConverters._
  * The common base supplies configure / home / moveToDefaultPosition / stop and all
  * lifecycle, error-recovery and motion telemetry plumbing.
  */
-class CalibrationSourceStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+class FocCalibrationSourceStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
     extends StageAssemblyHandlers(ctx, cswCtx):
 
   import cswCtx._
@@ -247,7 +247,7 @@ class CalibrationSourceStageHandlers(ctx: ActorContext[TopLevelActorMessage], cs
     )
 
 /** Start the assembly from a container config file (default below). */
-object CalibrationSourceStageApp:
+object FocCalibrationSourceStageApp:
   def main(args: Array[String]): Unit =
     val defaultConfig = ConfigFactory.load("CalibrationSourceStageContainer.conf")
     ContainerCmd.start("CalibrationSourceStage", Subsystem.APS, args, Some(defaultConfig))

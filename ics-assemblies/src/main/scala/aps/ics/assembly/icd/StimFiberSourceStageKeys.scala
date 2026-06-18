@@ -17,14 +17,14 @@ import csw.time.core.models._
  * Top level API for: APS
  */
 //noinspection ScalaUnusedSymbol
-object SteeringBeamSplitterStageKeys {
+object StimFiberSourceStageKeys {
   val subsystem = "APS"
 
-  /** API for Assembly: APS.ICS.FOC.SteeringBeamSplitterStage */
-  object `ICS.FOC.SteeringBeamSplitterStage` {
-    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.FOC.SteeringBeamSplitterStage")
+  /** API for Assembly: APS.ICS.STIM.FiberSourceStage */
+  object `ICS.STIM.FiberSourceStage` {
+    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.STIM.FiberSourceStage")
 
-    /** SteeringBeamSplitterStage status event */
+    /** FiberSourceStage status event */
     object StatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("status"))
 
@@ -39,7 +39,7 @@ object SteeringBeamSplitterStageKeys {
 
     }
 
-    /** Status information for X stage axis */
+    /** Status information for X axis */
     object XAxisStatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("xAxisStatus"))
 
@@ -60,9 +60,30 @@ object SteeringBeamSplitterStageKeys {
 
     }
 
-    /** Status information for Y stage axis */
+    /** Status information for Y axis */
     object YAxisStatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("yAxisStatus"))
+
+      /** The current axis state */
+      val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
+
+      /** The current axis position */
+      val positionKey: Key[Float] = FloatKey.make("position", Units.millimeter)
+
+      /** The current axis velocity mm/sec */
+      val velocityKey: Key[Float] = FloatKey.make("velocity")
+
+      /** True if the axis has been homed */
+      val indexedKey: Key[Boolean] = BooleanKey.make("indexed")
+
+      /** True if the axis has reached its target with sufficient accuracy. */
+      val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+    }
+
+    /** Status information for Z axis */
+    object ZAxisStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("zAxisStatus"))
 
       /** The current axis state */
       val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
@@ -85,7 +106,7 @@ object SteeringBeamSplitterStageKeys {
     object XAxisConfigEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("xAxisConfig"))
 
-      /** The maxiumum velocity for axis mechanism moves in mm/sec */
+      /** The maximum velocity for axis mechanism moves in mm/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
       /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
@@ -104,7 +125,7 @@ object SteeringBeamSplitterStageKeys {
       val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
 
       /**
-       * TUsed to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
        * the mechanism
        */
       val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
@@ -115,7 +136,7 @@ object SteeringBeamSplitterStageKeys {
     object YAxisConfigEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("yAxisConfig"))
 
-      /** The maxiumum velocity for axis mechanism moves in mm/sec */
+      /** The maximum velocity for axis mechanism moves in mm/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
       /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
@@ -134,14 +155,44 @@ object SteeringBeamSplitterStageKeys {
       val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
 
       /**
-       * TUsed to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
        * the mechanism
        */
       val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
 
     }
 
-    /** Event used to communicate that an unexpected condition occured. */
+    /** Z axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
+    object ZAxisConfigEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("zAxisConfig"))
+
+      /** The maximum velocity for axis mechanism moves in mm/sec */
+      val velocityKey: Key[Float] = FloatKey.make("velocity")
+
+      /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
+      val accelerationKey: Key[Float] = FloatKey.make("acceleration")
+
+      /** The deceleration applied at the end of motor motion for the axis in mm/sec2 */
+      val decelerationKey: Key[Float] = FloatKey.make("deceleration")
+
+      /**
+       * The offset applied from the physical index switch/mark before setting the axis motor position to 0. Generally a useful
+       * starting position (center of motion) for the mechanism
+       */
+      val indexOffsetKey: Key[Float] = FloatKey.make("indexOffset", Units.millimeter)
+
+      /** The (generally slower) speed used when approaching the axis motor Index Switch for fine accuracy. (mm/sec) */
+      val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
+
+      /**
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * the mechanism
+       */
+      val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
+
+    }
+
+    /** Event used to communicate that an unexpected condition occurred. */
     object ApsAlertEventEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("apsAlertEvent"))
 
@@ -172,6 +223,18 @@ object SteeringBeamSplitterStageKeys {
 
     }
 
+    /** Status of light derived from HCD I/O states */
+    object InternalLightStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("internalLightStatus"))
+
+      /** status of light on/off state */
+      val lightOnKey: GChoiceKey = ChoiceKey.make("lightOn", "ON", "OFF")
+
+      /** light intensity read from galil (% of max) */
+      val lightIntensityKey: Key[Float] = FloatKey.make("lightIntensity")
+
+    }
+
     /** Assembly startup metrics */
     object StartupMetricsEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("startupMetrics"))
@@ -188,17 +251,23 @@ object SteeringBeamSplitterStageKeys {
       /** Assembly x-axis configuration completed time */
       val xAxisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("xAxisConfigureCompletedTime")
 
-      /** Assembly x-axis homing started time */
-      val xAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeStartTime")
-
-      /** Assembly x-axis homing completed time */
-      val xAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeCompletedTime")
-
       /** Assembly y-axis configuration start time */
       val yAxisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("yAxisConfigureStartTime")
 
       /** Assembly y-axis configuration completed time */
       val yAxisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("yAxisConfigureCompletedTime")
+
+      /** Assembly z-axis configuration start time */
+      val zAxisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("zAxisConfigureStartTime")
+
+      /** Assembly z-axis configuration completed time */
+      val zAxisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("zAxisConfigureCompletedTime")
+
+      /** Assembly x-axis homing started time */
+      val xAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeStartTime")
+
+      /** Assembly x-axis homing completed time */
+      val xAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeCompletedTime")
 
       /** Assembly y-axis homing started time */
       val yAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("yAxisHomeStartTime")
@@ -206,9 +275,15 @@ object SteeringBeamSplitterStageKeys {
       /** Assembly y-axis homing completed time */
       val yAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("yAxisHomeCompletedTime")
 
+      /** Assembly z-axis homing started time */
+      val zAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("zAxisHomeStartTime")
+
+      /** Assembly z-axis homing completed time */
+      val zAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("zAxisHomeCompletedTime")
+
     }
 
-    /** X-Axis motion metrics in response to commanding to a position */
+    /** X-axis motion metrics in response to commanding to a position */
     object XAxisMotionMetricsEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("xAxisMotionMetrics"))
 
@@ -219,14 +294,14 @@ object SteeringBeamSplitterStageKeys {
       val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
 
       /** Axis position at the time of cmd receipt */
-      val motionStartPositiomKey: Key[Float] = FloatKey.make("motionStartPositiom", Units.millimeter)
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
 
       /** Axis position at the time of cmd completion */
-      val motionEndPositiomKey: Key[Float] = FloatKey.make("motionEndPositiom", Units.millimeter)
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
 
     }
 
-    /** Y-Axis motion metrics in response to commanding to a position */
+    /** Y-axis motion metrics in response to commanding to a position */
     object YAxisMotionMetricsEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("yAxisMotionMetrics"))
 
@@ -237,10 +312,28 @@ object SteeringBeamSplitterStageKeys {
       val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
 
       /** Axis position at the time of cmd receipt */
-      val motionStartPositiomKey: Key[Float] = FloatKey.make("motionStartPositiom", Units.millimeter)
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
 
       /** Axis position at the time of cmd completion */
-      val motionEndPositiomKey: Key[Float] = FloatKey.make("motionEndPositiom", Units.millimeter)
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
+
+    }
+
+    /** Z-axis motion metrics in response to commanding to a position */
+    object ZAxisMotionMetricsEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("zAxisMotionMetrics"))
+
+      /** Motion cmd received time */
+      val motionCmdReceivedKey: Key[TAITime] = TAITimeKey.make("motionCmdReceived")
+
+      /** Motion cmd completed time */
+      val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
+
+      /** Axis position at the time of cmd receipt */
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
+
+      /** Axis position at the time of cmd completion */
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
 
     }
 
@@ -252,8 +345,8 @@ object SteeringBeamSplitterStageKeys {
     object ConfigureCommand {
       val commandName: CommandName = CommandName("configure")
 
-      /** the axis controlling the x or y stage of the Steering Beam Splitter */
-      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X Stage", "Y Stage")
+      /** The axis to configure */
+      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X AXIS", "Y AXIS", "Z AXIS")
 
     }
 
@@ -285,26 +378,41 @@ object SteeringBeamSplitterStageKeys {
     object StopCommand {
       val commandName: CommandName = CommandName("stop")
 
-      /** the axis controlling the x or y stage of the Steering Beam Splitter */
-      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X Stage", "Y Stage")
+      /** The axis to configure */
+      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X AXIS", "Y AXIS", "Z AXIS")
 
     }
 
     /**
-     * Commands APS.ICS to position the Beam Splitter/Steering Mirror mechanism to steer the telescope pupil in (x,y). Positions
-     * the steering beam splitter in x and y specifying absolute positions or relative offsets from current position
+     * Positions stimulus source stage to the desired offset or absolute position. Used in INT and AIV alignment processes for
+     * calibration and debugging
      */
-    object PositionBeamSplitterCommand {
-      val commandName: CommandName = CommandName("positionBeamSplitter")
+    object PositionSourceCommand {
+      val commandName: CommandName = CommandName("positionSource")
 
-      /** Either position relative to current position or command to absolute position. */
-      val positionMethodKey: GChoiceKey = ChoiceKey.make("positionMethod", "ABSOLUTE", "RELATIVE")
+      /** relative offset or absolute positioning from home (0) position */
+      val positioningMethodKey: GChoiceKey = ChoiceKey.make("positioningMethod", "ABSOLUTE", "RELATIVE")
 
-      /** Absolute or relative x position to move to. */
-      val xValueKey: Key[Float] = FloatKey.make("xValue", Units.millimeter)
+      /** the absolute or relative X offset value to move the motor */
+      val positionValueXKey: Key[Float] = FloatKey.make("positionValueX", Units.millimeter)
 
-      /** Absolute or relative y position to move to. */
-      val yValueKey: Key[Float] = FloatKey.make("yValue", Units.millimeter)
+      /** the absolute or relative Y offset value to move the motor */
+      val positionValueYKey: Key[Float] = FloatKey.make("positionValueY", Units.millimeter)
+
+      /** the absolute or relative Z offset value to move the motor */
+      val positionValueZKey: Key[Float] = FloatKey.make("positionValueZ", Units.millimeter)
+
+    }
+
+    /** Turns on and sets the intensity of the stimulus fiber light source. */
+    object SetSourceIntensityCommand {
+      val commandName: CommandName = CommandName("setSourceIntensity")
+
+      /** Source power on or off */
+      val sourcePowerKey: GChoiceKey = ChoiceKey.make("sourcePower", "ON", "OFF")
+
+      /** The source intensity (% of max). */
+      val sourceIntensityKey: Key[Float] = FloatKey.make("sourceIntensity")
 
     }
 

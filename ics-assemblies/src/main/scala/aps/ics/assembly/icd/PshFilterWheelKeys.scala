@@ -17,14 +17,14 @@ import csw.time.core.models._
  * Top level API for: APS
  */
 //noinspection ScalaUnusedSymbol
-object InsertionStageKeys {
+object PshFilterWheelKeys {
   val subsystem = "APS"
 
-  /** API for Assembly: APS.ICS.STIM.InsertionStage */
-  object `ICS.STIM.InsertionStage` {
-    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.STIM.InsertionStage")
+  /** API for Assembly: APS.ICS.PSH.FilterWheel */
+  object `ICS.PSH.FilterWheel` {
+    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.PSH.FilterWheel")
 
-    /** Stimulus InsertionStage status event */
+    /** PSH FilterWheel status event */
     object StatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("status"))
 
@@ -39,7 +39,7 @@ object InsertionStageKeys {
 
     }
 
-    /** Status information for stage axis */
+    /** PSH FilterWheel axis status event */
     object AxisStatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("axisStatus"))
 
@@ -47,9 +47,9 @@ object InsertionStageKeys {
       val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
 
       /** The current axis position */
-      val positionKey: Key[Float] = FloatKey.make("position", Units.millimeter)
+      val positionKey: Key[Float] = FloatKey.make("position", Units.degree)
 
-      /** The current axis velocity mm/sec */
+      /** The current axis velocity deg/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
       /** True if the axis has been homed */
@@ -58,35 +58,41 @@ object InsertionStageKeys {
       /** True if the axis has reached its target with sufficient accuracy. */
       val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
 
+      /** The current wheel position */
+      val wheelPositionNumKey: Key[Int] = IntKey.make("wheelPositionNum")
+
     }
 
-    /** Axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
+    /**
+     * PSH FilterWheel axis config event, published only when configAxis or configRotatingAxis cmd has completed during assembly
+     * startup
+     */
     object AxisConfigEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("axisConfig"))
 
-      /** The maximum velocity for axis mechanism moves in mm/sec */
+      /** The maximum velocity for axis mechanism moves in deg/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
-      /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
+      /** The acceleration used to reach the configured velocity for the axis in deg/sec2 */
       val accelerationKey: Key[Float] = FloatKey.make("acceleration")
 
-      /** The deceleration applied at the end of motor motion for the axis in mm/sec2 */
+      /** The deceleration applied at the end of motor motion for the axis in deg/sec2 */
       val decelerationKey: Key[Float] = FloatKey.make("deceleration")
 
       /**
        * The offset applied from the physical index switch/mark before setting the axis motor position to 0. Generally a useful
        * starting position (center of motion) for the mechanism
        */
-      val indexOffsetKey: Key[Float] = FloatKey.make("indexOffset", Units.millimeter)
+      val indexOffsetKey: Key[Float] = FloatKey.make("indexOffset", Units.degree)
 
-      /** The (generally slower) speed used when approaching the axis motor Index Switch for fine accuracy. (mm/sec) */
+      /** The (generally slower) speed used when approaching the axis motor Index Switch for fine accuracy. (deg/sec) */
       val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
 
       /**
        * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
        * the mechanism
        */
-      val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
+      val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.degree)
 
     }
 
@@ -156,27 +162,16 @@ object InsertionStageKeys {
       val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
 
       /** Axis position at the time of cmd receipt */
-      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.degree)
 
       /** Axis position at the time of cmd completion */
-      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.degree)
 
     }
 
     /**
-     * Configures the Galil controller channel for an assembly’s stage/motor. Calls HCD configLinearAxis specifying upper limit,
-     * lower limit for linear axes, calls configRotationalAxis for rotational axes, and calls HCD configAxis for each axis,
-     * specifying velocity, acceleration, deceleration, index offset, index speed, inPosition threshold.
-     */
-    object ConfigureCommand {
-      val commandName: CommandName = CommandName("configure")
-
-    }
-
-    /**
-     * Positions each stage/motor controlled by the assembly to its home position, which is at the center of its range of motion,
-     * and sets this as the zero position for the motor. All subsequent moves for a motor are relative to this position, sending a
-     * subsequent position command to a motor with value zero (0) will return it to the home position
+     * Positions the wheel motor to home position, which is wheel position #1. All subsequent moves for a motor are relative to
+     * this position, sending a subsequent position command to a motor with value zero (0) will return it to the home position.
      */
     object HomeCommand {
       val commandName: CommandName = CommandName("home")
@@ -184,10 +179,9 @@ object InsertionStageKeys {
     }
 
     /**
-     * Positions each stage/motor in the assembly to its default positions relative to the home zero position. The default
-     * position is the nominal starting position for the assembly. All motion assemblies are moved to their default position when
-     * commanding the APS system into “standby mode” during APS system initialization. The default position for each axis of the
-     * assembly is part of the assembly configuration
+     * Positions the filter wheel to its default position. The default position is the nominal starting position for the assembly.
+     * All motion assemblies are moved to their default position when commanding the APS system into “standby mode” during APS
+     * system initialization.</p> <p>The default position is part of the assembly configuration.
      */
     object MoveToDefaultPositionCommand {
       val commandName: CommandName = CommandName("moveToDefaultPosition")
@@ -195,35 +189,41 @@ object InsertionStageKeys {
     }
 
     /**
-     * Sends a stop command to the axis controlled by the assembly. This command is used for debugging using the APS engineering
-     * user interface.
+     * Positions the wheel in degrees or motor in steps. Used for command calibration, diagnostic and debugging purposes. Sending
+     * this command while the wheel detent is extended will fail command validation.
      */
-    object StopCommand {
-      val commandName: CommandName = CommandName("stop")
+    object PositionMotorCommand {
+      val commandName: CommandName = CommandName("positionMotor")
+
+      /** The method used to position the motor. */
+      val positioningMethodKey: GChoiceKey = ChoiceKey.make("positioningMethod", "ABSOLUTE", "RELATIVE")
+
+      /** Specifies which is being positioned, wheel or motor. */
+      val positionTargetKey: GChoiceKey = ChoiceKey.make("positionTarget", "WHEEL", "MOTOR")
+
+      /** The desired wheel position. */
+      val wheelPositionKey: Key[Float] = FloatKey.make("wheelPosition", Units.degree)
+
+      /** The desired motor position. */
+      val motorPositionKey: Key[Int] = IntKey.make("motorPosition", Units.count)
 
     }
 
-    /** Commands the stimulus insertion stage to select light source from sky or stimulus */
-    object SelectSourceCommand {
-      val commandName: CommandName = CommandName("selectSource")
+    /** Selects a filter to position into the light beam. */
+    object SelectFilterCommand {
+      val commandName: CommandName = CommandName("selectFilter")
 
-      /** The selected light source. */
-      val lightSourceKey: GChoiceKey = ChoiceKey.make("lightSource", "SKY", "STIMULUS")
+      /** The name of the filter to position into the beam */
+      val filterKey: GChoiceKey = ChoiceKey.make("filter", "F890N", "F891N", "F850M", "F750W", "F810N", "F630N", "F865N")
 
     }
 
-    /**
-     * Positions the stage using either the offset or absolute positioning. Used for diagnostic troubleshooting and Zernike
-     * Wavefront sensing.
-     */
-    object PositionStageCommand {
-      val commandName: CommandName = CommandName("positionStage")
+    /** Commands the filter wheel to a place a specified filter position number into the beam. */
+    object PositionWheelCommand {
+      val commandName: CommandName = CommandName("positionWheel")
 
-      /** The method used to position the stage. */
-      val positionMethodKey: GChoiceKey = ChoiceKey.make("positionMethod", "ABSOLUTE", "RELATIVE")
-
-      /** The absolute or offset value to move the stage. */
-      val valueKey: Key[Float] = FloatKey.make("value", Units.millimeter)
+      /** The wheel position number to place into the beam */
+      val positionNumberKey: GChoiceKey = ChoiceKey.make("positionNumber", "1", "2", "3", "4", "5", "6", "7")
 
     }
 

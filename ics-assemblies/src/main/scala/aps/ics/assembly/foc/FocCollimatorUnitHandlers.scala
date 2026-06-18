@@ -1,4 +1,4 @@
-package aps.ics.assembly.collimatorunit
+package aps.ics.assembly.foc
 
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,7 +12,7 @@ import csw.params.events.SystemEvent
 import csw.prefix.models.Subsystem
 
 import aps.ics.assembly.common.{AxisConfig, AxisSnapshot, StageAssemblyHandlers}
-import aps.ics.assembly.icd.CollimatorUnitKeys.`ICS.FOC.CollimatorUnit` as CU
+import aps.ics.assembly.icd.FocCollimatorUnitKeys.`ICS.FOC.CollimatorUnit` as CU
 
 import scala.concurrent.Future
 
@@ -41,7 +41,7 @@ import scala.concurrent.Future
  * assembly as a unit (all axes). The axis choice is currently accepted and ignored;
  * true per-axis targeting can be added later if it is wanted for debugging.
  */
-class CollimatorUnitHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+class FocCollimatorUnitHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
     extends StageAssemblyHandlers(ctx, cswCtx):
 
   import cswCtx._
@@ -177,7 +177,7 @@ class CollimatorUnitHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: Cs
     }
 
 /** Start the assembly from a container config file (default below). */
-object CollimatorUnitApp:
+object FocCollimatorUnitApp:
   def main(args: Array[String]): Unit =
     val defaultConfig = ConfigFactory.load("CollimatorUnitContainer.conf")
     ContainerCmd.start("CollimatorUnit", Subsystem.APS, args, Some(defaultConfig))

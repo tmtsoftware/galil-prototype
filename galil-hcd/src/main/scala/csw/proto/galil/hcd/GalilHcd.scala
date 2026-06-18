@@ -2611,7 +2611,7 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
 
 object GalilHcdApp {
   def main(args: Array[String]): Unit = {
-    val defaultConfig = ConfigFactory.load("GalilHcd.conf")
+    val defaultConfig = ConfigFactory.load("GalilHcd1.conf")
     // Per-instance logging-system name so each container writes its own log file.
     // The CSW FileAppender names files by the logging-system name, so a fixed name
     // collapses every controller into one shared file. The name is derived from the

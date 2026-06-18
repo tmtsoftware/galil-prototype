@@ -1,4 +1,4 @@
-package aps.ics.assembly.insertionstage
+package aps.ics.assembly.stim
 
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,7 +12,7 @@ import csw.params.events.SystemEvent
 import csw.prefix.models.Subsystem
 
 import aps.ics.assembly.common.{AxisSnapshot, StageAssemblyHandlers}
-import aps.ics.assembly.icd.InsertionStageKeys.`ICS.STIM.InsertionStage` as IS
+import aps.ics.assembly.icd.StimInsertionStageKeys.`ICS.STIM.InsertionStage` as IS
 
 import scala.concurrent.Future
 
@@ -22,7 +22,7 @@ import scala.concurrent.Future
  * positionAxis/offsetAxis; the common base supplies configure/home/
  * moveToDefaultPosition/stop and all lifecycle/telemetry plumbing.
  */
-class InsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+class StimInsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
     extends StageAssemblyHandlers(ctx, cswCtx):
 
   import cswCtx._
@@ -51,9 +51,9 @@ class InsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: Cs
         if s.exists(IS.SelectSourceCommand.lightSourceKey) then Accepted(runId)
         else Invalid(runId, CommandIssue.MissingKeyIssue("selectSource requires lightSource"))
       case "positionStage" =>
-        if s.exists(IS.PositionStageCommand.positionMethodKey) && s.exists(IS.PositionStageCommand.valueKey)
+        if s.exists(IS.PositionStageCommand.positioningMethodKey) && s.exists(IS.PositionStageCommand.valueKey)
         then Accepted(runId)
-        else Invalid(runId, CommandIssue.MissingKeyIssue("positionStage requires positionMethod and value"))
+        else Invalid(runId, CommandIssue.MissingKeyIssue("positionStage requires positioningMethod and value"))
       case other =>
         Invalid(runId, CommandIssue.UnsupportedCommandIssue(s"unsupported command: $other"))
 
@@ -70,7 +70,7 @@ class InsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: Cs
         log.info(s"$assemblyPrefix: selectSource $src -> $targetMm mm")
         () => positionAxisMm(a, targetMm)
       case ("positionStage", Some(a)) =>
-        val method = s(IS.PositionStageCommand.positionMethodKey).head.name
+        val method = s(IS.PositionStageCommand.positioningMethodKey).head.name
         val value  = s(IS.PositionStageCommand.valueKey).head.toDouble
         // Resolve to an absolute target now so a recovery resend reaches the
         // same demanded position (the axis is idle at intake, so the current
@@ -110,7 +110,7 @@ class InsertionStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: Cs
     }
 
 /** Start the assembly from a container config file (default below). */
-object InsertionStageApp:
+object StimInsertionStageApp:
   def main(args: Array[String]): Unit =
     val defaultConfig = ConfigFactory.load("InsertionStageContainer.conf")
     ContainerCmd.start("InsertionStage", Subsystem.APS, args, Some(defaultConfig))

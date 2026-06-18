@@ -45,7 +45,7 @@ export const selectSourceCmd = (src: LightSource): Setup =>
 
 export const positionStageCmd = (method: PositionMethod, mm: number): Setup =>
   new Setup(IS_PREFIX, 'positionStage', [
-    choiceKey('positionMethod', POSITION_METHODS).set(method),
+    choiceKey('positioningMethod', POSITION_METHODS).set(method),
     floatKey('value', Units.millimeter).set([mm])
   ])
 

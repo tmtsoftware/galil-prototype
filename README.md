@@ -84,7 +84,7 @@ After `sbt stage`, start scripts are generated in `./target/universal/stage/bin/
 
 The HCD is launched with two configuration files:
 
-- The CSW container conf (`GalilHcd.conf` or `GalilHcdSim.conf`) is passed via
+- The CSW container conf (`GalilHcd1.conf` or `GalilHcdSim.conf`) is passed via
   `--local`. It carries the CSW prefix and component identity.
 - The HCD application conf (`GalilHcdConfig-*.conf`) is selected via the
   `-Dgalil.config.path=` system property and provides controller connection and
@@ -128,7 +128,7 @@ csw-services start
 sbt stage
 ./target/universal/stage/bin/galil-hcd \
   -main csw.proto.galil.hcd.GalilHcdApp \
-  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  --local galil-hcd/src/main/resources/GalilHcd1.conf \
   -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 
 # Open browser to http://localhost:9091

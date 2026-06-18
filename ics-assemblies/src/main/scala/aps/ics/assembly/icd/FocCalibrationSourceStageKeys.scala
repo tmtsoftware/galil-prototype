@@ -17,14 +17,14 @@ import csw.time.core.models._
  * Top level API for: APS
  */
 //noinspection ScalaUnusedSymbol
-object CollimatorUnitKeys {
+object FocCalibrationSourceStageKeys {
   val subsystem = "APS"
 
-  /** API for Assembly: APS.ICS.FOC.CollimatorUnit */
-  object `ICS.FOC.CollimatorUnit` {
-    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.FOC.CollimatorUnit")
+  /** API for Assembly: APS.ICS.FOC.CalibrationSourceStage */
+  object `ICS.FOC.CalibrationSourceStage` {
+    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.FOC.CalibrationSourceStage")
 
-    /** CollimatorUnit status event */
+    /** CalibrationSourceStage status event */
     object StatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("status"))
 
@@ -39,9 +39,9 @@ object CollimatorUnitKeys {
 
     }
 
-    /** Status information for Front Motor axis */
-    object FrontAxisStatusEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("frontAxisStatus"))
+    /** Status information for stage axis */
+    object AxisStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("axisStatus"))
 
       /** The current axis state */
       val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
@@ -60,32 +60,11 @@ object CollimatorUnitKeys {
 
     }
 
-    /** Status information for Rear Motor axis */
-    object RearAxisStatusEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("rearAxisStatus"))
+    /** Axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
+    object AxisConfigEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("axisConfig"))
 
-      /** The current axis state */
-      val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
-
-      /** The current axis position */
-      val positionKey: Key[Float] = FloatKey.make("position", Units.millimeter)
-
-      /** The current axis velocity mm/sec */
-      val velocityKey: Key[Float] = FloatKey.make("velocity")
-
-      /** True if the axis has been homed */
-      val indexedKey: Key[Boolean] = BooleanKey.make("indexed")
-
-      /** True if the axis has reached its target with sufficient accuracy. */
-      val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
-
-    }
-
-    /** Front motor config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
-    object FrontAxisConfigEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("frontAxisConfig"))
-
-      /** The maxiumum velocity for axis mechanism moves in mm/sec */
+      /** The maximum velocity for axis mechanism moves in mm/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
       /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
@@ -104,44 +83,14 @@ object CollimatorUnitKeys {
       val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
 
       /**
-       * TUsed to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
        * the mechanism
        */
       val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
 
     }
 
-    /** Rear motor config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
-    object RearAxisConfigEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("rearAxisConfig"))
-
-      /** The maxiumum velocity for axis mechanism moves in mm/sec */
-      val velocityKey: Key[Float] = FloatKey.make("velocity")
-
-      /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
-      val accelerationKey: Key[Float] = FloatKey.make("acceleration")
-
-      /** The deceleration applied at the end of motor motion for the axis in mm/sec2 */
-      val decelerationKey: Key[Float] = FloatKey.make("deceleration")
-
-      /**
-       * The offset applied from the physical index switch/mark before setting the axis motor position to 0. Generally a useful
-       * starting position (center of motion) for the mechanism
-       */
-      val indexOffsetKey: Key[Float] = FloatKey.make("indexOffset", Units.millimeter)
-
-      /** The (generally slower) speed used when approaching the axis motor Index Switch for fine accuracy. (mm/sec) */
-      val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
-
-      /**
-       * TUsed to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
-       * the mechanism
-       */
-      val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
-
-    }
-
-    /** Event used to communicate that an unexpected condition occured. */
+    /** Event used to communicate that an unexpected condition occurred. */
     object ApsAlertEventEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("apsAlertEvent"))
 
@@ -172,6 +121,18 @@ object CollimatorUnitKeys {
 
     }
 
+    /** Status of light derived from HCD I/O states */
+    object InternalLightStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("internalLightStatus"))
+
+      /** status of light on/off state */
+      val lightOnKey: GChoiceKey = ChoiceKey.make("lightOn", "ON", "OFF")
+
+      /** light intensity read from galil (% of max) */
+      val lightIntensityKey: Key[Float] = FloatKey.make("lightIntensity")
+
+    }
+
     /** Assembly startup metrics */
     object StartupMetricsEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("startupMetrics"))
@@ -182,35 +143,23 @@ object CollimatorUnitKeys {
       /** Assembly initialization completed time */
       val initCompletedTimeKey: Key[TAITime] = TAITimeKey.make("initCompletedTime")
 
-      /** Assembly front motor configuration start time */
-      val frontMotorConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("frontMotorConfigureStartTime")
+      /** Assembly axis configuration start time */
+      val axisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("axisConfigureStartTime")
 
-      /** Assembly front motor configuration completed time */
-      val frontMotorConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("frontMotorConfigureCompletedTime")
+      /** Assembly axis configuration completed time */
+      val axisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("axisConfigureCompletedTime")
 
-      /** Assembly rear motor configuration start time */
-      val rearMotorConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("rearMotorConfigureStartTime")
+      /** Assembly axis homing started time */
+      val axisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("axisHomeStartTime")
 
-      /** Assembly rear motor configuration completed time */
-      val rearMotorConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("rearMotorConfigureCompletedTime")
-
-      /** Assembly front motor homing started time */
-      val frontMotorHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("frontMotorHomeStartTime")
-
-      /** Assembly front motor homing completed time */
-      val frontMotorHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("frontMotorHomeCompletedTime")
-
-      /** Assembly back motor homing started time */
-      val rearMotorHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("rearMotorHomeStartTime")
-
-      /** Assembly back motor homing completed time */
-      val rearMotorHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("rearMotorHomeCompletedTime")
+      /** Assembly axis homing completed time */
+      val axisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("axisHomeCompletedTime")
 
     }
 
-    /** Front motor motion metrics in response to commanding to a position */
-    object FrontMotorMotionMetricsEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("frontMotorMotionMetrics"))
+    /** Axis motion metrics in response to commanding to a position */
+    object AxisMotionMetricsEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("axisMotionMetrics"))
 
       /** Motion cmd received time */
       val motionCmdReceivedKey: Key[TAITime] = TAITimeKey.make("motionCmdReceived")
@@ -219,28 +168,10 @@ object CollimatorUnitKeys {
       val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
 
       /** Axis position at the time of cmd receipt */
-      val motionStartPositiomKey: Key[Float] = FloatKey.make("motionStartPositiom", Units.millimeter)
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
 
       /** Axis position at the time of cmd completion */
-      val motionEndPositiomKey: Key[Float] = FloatKey.make("motionEndPositiom", Units.millimeter)
-
-    }
-
-    /** Rear motor motion metrics in response to commanding to a position */
-    object RearMotorMotionMetricsEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("rearMotorMotionMetrics"))
-
-      /** Motion cmd received time */
-      val motionCmdReceivedKey: Key[TAITime] = TAITimeKey.make("motionCmdReceived")
-
-      /** Motion cmd completed time */
-      val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
-
-      /** Axis position at the time of cmd receipt */
-      val motionStartPositiomKey: Key[Float] = FloatKey.make("motionStartPositiom", Units.millimeter)
-
-      /** Axis position at the time of cmd completion */
-      val motionEndPositiomKey: Key[Float] = FloatKey.make("motionEndPositiom", Units.millimeter)
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
 
     }
 
@@ -251,9 +182,6 @@ object CollimatorUnitKeys {
      */
     object ConfigureCommand {
       val commandName: CommandName = CommandName("configure")
-
-      /** the axis controlling the front or back motor of the Collimator Unit */
-      val axisKey: GChoiceKey = ChoiceKey.make("axis", "FRONT_MOTOR", "BACK_MOTOR")
 
     }
 
@@ -285,41 +213,65 @@ object CollimatorUnitKeys {
     object StopCommand {
       val commandName: CommandName = CommandName("stop")
 
-      /** the axis controlling the front or back motor of the Collimator Unit */
-      val axisKey: GChoiceKey = ChoiceKey.make("axis", "FRONT_MOTOR", "BACK_MOTOR")
+    }
+
+    /**
+     * Positions the calibration source stage to place a given optic into the focal plane. If the position is CALIBRATION_SOURCE,
+     * the optional parameter “intensity” is used to set the intensity of the source. If the position is not CALIBRATION_SOURCE,
+     * the source is turned off.
+     */
+    object SetOpticAndSourceIntensityCommand {
+      val commandName: CommandName = CommandName("setOpticAndSourceIntensity")
+
+      /** The name of the optic to position into the focal plane */
+      val opticKey: GChoiceKey = ChoiceKey.make("optic", "CALIBRATION_SOURCE", "ZERNIKE1", "ZERNIKE2", "FIELD_STOP", "OPEN")
+
+      /** The source intensity (% of max). Only used if optic to position is CALIBRATION_SOURCE */
+      val sourceIntensityKey: Key[Float] = FloatKey.make("sourceIntensity")
 
     }
 
-    /** Positions the motors to change the pupil scale by the specific percent scale change. */
-    object ChangeScaleCommand {
-      val commandName: CommandName = CommandName("changeScale")
+    /** Positions the calibration source stage to place a given optic into the focal plane. */
+    object SetOpticCommand {
+      val commandName: CommandName = CommandName("setOptic")
 
-      /** The precent scale change. */
-      val percentChangeKey: Key[Float] = FloatKey.make("percentChange")
+      /** The name of the optic to position into the focal plane */
+      val opticKey: GChoiceKey = ChoiceKey.make("optic", "CALIBRATION_SOURCE", "ZERNIKE1", "ZERNIKE2", "FIELD_STOP", "OPEN")
 
     }
 
-    /** Positions the front motor to the desired offset or absolute position. */
-    object PositionFrontAxisCommand {
-      val commandName: CommandName = CommandName("positionFrontAxis")
+    /** Positions the calibration source stage to a given slot number. Used for diagnostic and debugging purposes. */
+    object SetSlotCommand {
+      val commandName: CommandName = CommandName("setSlot")
+
+      /** The number of the slot to position into the focal plane */
+      val slotNumberKey: GChoiceKey = ChoiceKey.make("slotNumber", "1", "2", "3", "4", "5")
+
+    }
+
+    /**
+     * Positions the calibration source stage in mm. Used for determining slot positions for each optic, diagnostic and debugging
+     * purposes.
+     */
+    object SetPositionCommand {
+      val commandName: CommandName = CommandName("setPosition")
 
       /** relative offset or absolute positioning from home (0) position */
       val positioningMethodKey: GChoiceKey = ChoiceKey.make("positioningMethod", "ABSOLUTE", "RELATIVE")
 
-      /** the abosolute or relative offset value to move the motor */
+      /** the absolute or relative offset value to move the motor */
       val positionValueKey: Key[Float] = FloatKey.make("positionValue", Units.millimeter)
 
     }
 
-    /** Positions the back motor to the desired offset or absolute position. */
-    object PositionRearAxisCommand {
-      val commandName: CommandName = CommandName("positionRearAxis")
+    /**
+     * Sets the intensity of the calibration source. Used during instrument characterization, diagnostic and debugging purposes.
+     */
+    object SetSourceIntensityCommand {
+      val commandName: CommandName = CommandName("setSourceIntensity")
 
-      /** relative offset or absolute positioning from home (0) position */
-      val positioningMethodKey: GChoiceKey = ChoiceKey.make("positioningMethod", "ABSOLUTE", "RELATIVE")
-
-      /** the abosolute or relative offset value to move the motor */
-      val positionValueKey: Key[Float] = FloatKey.make("positionValue", Units.millimeter)
+      /** The source intensity (% of max). */
+      val sourceIntensityKey: Key[Float] = FloatKey.make("sourceIntensity")
 
     }
 

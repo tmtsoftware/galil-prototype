@@ -16,6 +16,12 @@ import { IS_PREFIX_STR } from '../models/insertionStage'
 import { SBS_PREFIX_STR } from '../models/steeringBeamSplitter'
 import { CU_PREFIX_STR } from '../models/collimatorUnit'
 import { CSS_PREFIX_STR } from '../models/calibrationSourceStage'
+import { PSHFS_PREFIX_STR } from '../models/pshFocusStage'
+import { PITFS_PREFIX_STR } from '../models/pitFocusStage'
+import { APTFS_PREFIX_STR } from '../models/aptFocusStage'
+import { TP_PREFIX_STR } from '../models/tiltPlate'
+import { FSS_PREFIX_STR } from '../models/fiberSourceStage'
+import { PMS_PREFIX_STR } from '../models/pupilMaskStage'
 
 // Disabled placeholder node helper.
 const ph = (key: string, title: string): DataNode => ({ key, title, disabled: true })
@@ -24,20 +30,20 @@ const treeData: DataNode[] = [
   {
     key: 'grp-psh',
     title: 'PSH assemblies',
-    disabled: true,
-    children: [ph('psh-pmw', 'Pupil Mask Wheel'), ph('psh-fw', 'Filter Wheel'), ph('psh-fs', 'Focus Stage'), ph('psh-det', 'Detector')]
+    selectable: false,
+    children: [ph('psh-pmw', 'Pupil Mask Wheel'), ph('psh-fw', 'Filter Wheel'), { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
   },
   {
     key: 'grp-pit',
     title: 'PIT assemblies',
-    disabled: true,
-    children: [ph('pit-pmw', 'Pupil Mask Wheel'), ph('pit-fw', 'Filter Wheel'), ph('pit-fs', 'Focus Stage'), ph('pit-det', 'Detector')]
+    selectable: false,
+    children: [ph('pit-pmw', 'Pupil Mask Wheel'), ph('pit-fw', 'Filter Wheel'), { key: PITFS_PREFIX_STR, title: 'Focus Stage' }, ph('pit-det', 'Detector')]
   },
   {
     key: 'grp-apt',
     title: 'APT assemblies',
-    disabled: true,
-    children: [ph('apt-fw', 'Filter Wheel'), ph('apt-fs', 'Focus Stage'), ph('apt-det', 'Detector')]
+    selectable: false,
+    children: [ph('apt-fw', 'Filter Wheel'), { key: APTFS_PREFIX_STR, title: 'Focus Stage' }, ph('apt-det', 'Detector')]
   },
   { key: 'grp-lowfw', title: 'LOWFW assemblies', disabled: true, children: [ph('lowfw-x', '—')] },
   {
@@ -50,7 +56,7 @@ const treeData: DataNode[] = [
       { key: CSS_PREFIX_STR, title: 'Calibration Source Stage' },
       ph('foc-kmirror', 'K-Mirror'),
       { key: CU_PREFIX_STR, title: 'Collimator' },
-      ph('foc-tilt', 'Tilt Plate')
+      { key: TP_PREFIX_STR, title: 'Tilt Plate' }
     ]
   },
   {
@@ -60,7 +66,8 @@ const treeData: DataNode[] = [
     children: [
       // Live this session.
       { key: IS_PREFIX_STR, title: 'Insertion Stage' },
-      ph('stim-fss', 'Fiber Source Stage')
+      { key: FSS_PREFIX_STR, title: 'Fiber Source Stage' },
+      { key: PMS_PREFIX_STR, title: 'Pupil Mask Stage' }
     ]
   },
   { key: 'grp-abe', title: 'ABE assemblies', disabled: true, children: [ph('abe-x', '—')] },

@@ -12,7 +12,7 @@ import csw.prefix.models.Subsystem
  * start and stop together. Pass `--local <file>` to start a different container
  * config (e.g. a single-assembly container).
  *
- * The per-assembly apps (InsertionStageApp, SteeringBeamSplitterStageApp) remain
+ * The per-assembly apps (StimInsertionStageApp, FocSteeringBeamSplitterStageApp) remain
  * for bringing up one assembly on its own.
  */
 object IcsContainerApp:

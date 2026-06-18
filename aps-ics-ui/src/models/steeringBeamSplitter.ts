@@ -47,7 +47,7 @@ export const positionBeamSplitterCmd = (
   yMm: number
 ): Setup =>
   new Setup(SBS_PREFIX, 'positionBeamSplitter', [
-    choiceKey('positionMethod', POSITION_METHODS).set(method),
+    choiceKey('positioningMethod', POSITION_METHODS).set(method),
     floatKey('xValue', Units.millimeter).set([xMm]),
     floatKey('yValue', Units.millimeter).set([yMm])
   ])

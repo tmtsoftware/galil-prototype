@@ -17,14 +17,14 @@ import csw.time.core.models._
  * Top level API for: APS
  */
 //noinspection ScalaUnusedSymbol
-object CalibrationSourceStageKeys {
+object FocTiltPlateKeys {
   val subsystem = "APS"
 
-  /** API for Assembly: APS.ICS.FOC.CalibrationSourceStage */
-  object `ICS.FOC.CalibrationSourceStage` {
-    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.FOC.CalibrationSourceStage")
+  /** API for Assembly: APS.ICS.FOC.TiltPlate */
+  object `ICS.FOC.TiltPlate` {
+    val prefix: Prefix = Prefix(Subsystem.APS, "ICS.FOC.TiltPlate")
 
-    /** CalibrationSourceStage status event */
+    /** TiltPlate status event */
     object StatusEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("status"))
 
@@ -39,9 +39,9 @@ object CalibrationSourceStageKeys {
 
     }
 
-    /** Status information for stage axis */
-    object AxisStatusEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("axisStatus"))
+    /** Status information for X stage axis */
+    object XAxisStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("xAxisStatus"))
 
       /** The current axis state */
       val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
@@ -60,11 +60,32 @@ object CalibrationSourceStageKeys {
 
     }
 
-    /** Axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
-    object AxisConfigEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("axisConfig"))
+    /** Status information for Y stage axis */
+    object YAxisStatusEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("yAxisStatus"))
 
-      /** The maxiumum velocity for axis mechanism moves in mm/sec */
+      /** The current axis state */
+      val axisStateKey: GChoiceKey = ChoiceKey.make("axisState", "LOST", "HOMING", "IDLE", "MOVING", "ERROR")
+
+      /** The current axis position */
+      val positionKey: Key[Float] = FloatKey.make("position", Units.millimeter)
+
+      /** The current axis velocity mm/sec */
+      val velocityKey: Key[Float] = FloatKey.make("velocity")
+
+      /** True if the axis has been homed */
+      val indexedKey: Key[Boolean] = BooleanKey.make("indexed")
+
+      /** True if the axis has reached its target with sufficient accuracy. */
+      val inPositionKey: Key[Boolean] = BooleanKey.make("inPosition")
+
+    }
+
+    /** X axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
+    object XAxisConfigEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("xAxisConfig"))
+
+      /** The maximum velocity for axis mechanism moves in mm/sec */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
       /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
@@ -83,14 +104,44 @@ object CalibrationSourceStageKeys {
       val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
 
       /**
-       * TUsed to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
        * the mechanism
        */
       val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
 
     }
 
-    /** Event used to communicate that an unexpected condition occured. */
+    /** Y axis config event, published only when configAxis or configLinearAxis cmd has completed during assembly startup */
+    object YAxisConfigEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("yAxisConfig"))
+
+      /** The maximum velocity for axis mechanism moves in mm/sec */
+      val velocityKey: Key[Float] = FloatKey.make("velocity")
+
+      /** The acceleration used to reach the configured velocity for the axis in mm/sec2 */
+      val accelerationKey: Key[Float] = FloatKey.make("acceleration")
+
+      /** The deceleration applied at the end of motor motion for the axis in mm/sec2 */
+      val decelerationKey: Key[Float] = FloatKey.make("deceleration")
+
+      /**
+       * The offset applied from the physical index switch/mark before setting the axis motor position to 0. Generally a useful
+       * starting position (center of motion) for the mechanism
+       */
+      val indexOffsetKey: Key[Float] = FloatKey.make("indexOffset", Units.millimeter)
+
+      /** The (generally slower) speed used when approaching the axis motor Index Switch for fine accuracy. (mm/sec) */
+      val indexSpeedKey: Key[Float] = FloatKey.make("indexSpeed")
+
+      /**
+       * Used to determine successful completion of demanded moves for the axis. Determined by the needed positioning accuracy of
+       * the mechanism
+       */
+      val inPositionThresholdKey: Key[Float] = FloatKey.make("inPositionThreshold", Units.millimeter)
+
+    }
+
+    /** Event used to communicate that an unexpected condition occurred. */
     object ApsAlertEventEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("apsAlertEvent"))
 
@@ -121,18 +172,6 @@ object CalibrationSourceStageKeys {
 
     }
 
-    /** Status of light derived from HCD I/O states */
-    object InternalLightStatusEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("internalLightStatus"))
-
-      /** status of light on/off state */
-      val lightOnKey: GChoiceKey = ChoiceKey.make("lightOn", "ON", "OFF")
-
-      /** light intensity read from galil (% of max) */
-      val lightIntensityKey: Key[Float] = FloatKey.make("lightIntensity")
-
-    }
-
     /** Assembly startup metrics */
     object StartupMetricsEvent {
       val eventKey: EventKey = EventKey(prefix, EventName("startupMetrics"))
@@ -143,23 +182,35 @@ object CalibrationSourceStageKeys {
       /** Assembly initialization completed time */
       val initCompletedTimeKey: Key[TAITime] = TAITimeKey.make("initCompletedTime")
 
-      /** Assembly axis configuration start time */
-      val axisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("axisConfigureStartTime")
+      /** Assembly x-axis configuration start time */
+      val xAxisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("xAxisConfigureStartTime")
 
-      /** Assembly axis configuration completed time */
-      val axisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("axisConfigureCompletedTime")
+      /** Assembly x-axis configuration completed time */
+      val xAxisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("xAxisConfigureCompletedTime")
 
-      /** Assembly axis homing started time */
-      val axisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("axisHomeStartTime")
+      /** Assembly x-axis homing started time */
+      val xAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeStartTime")
 
-      /** Assembly axis homing completed time */
-      val axisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("axisHomeCompletedTime")
+      /** Assembly x-axis homing completed time */
+      val xAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("xAxisHomeCompletedTime")
+
+      /** Assembly y-axis configuration start time */
+      val yAxisConfigureStartTimeKey: Key[TAITime] = TAITimeKey.make("yAxisConfigureStartTime")
+
+      /** Assembly y-axis configuration completed time */
+      val yAxisConfigureCompletedTimeKey: Key[TAITime] = TAITimeKey.make("yAxisConfigureCompletedTime")
+
+      /** Assembly y-axis homing started time */
+      val yAxisHomeStartTimeKey: Key[TAITime] = TAITimeKey.make("yAxisHomeStartTime")
+
+      /** Assembly y-axis homing completed time */
+      val yAxisHomeCompletedTimeKey: Key[TAITime] = TAITimeKey.make("yAxisHomeCompletedTime")
 
     }
 
-    /** Axis motion metrics in response to commanding to a position */
-    object AxisMotionMetricsEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("axisMotionMetrics"))
+    /** X-axis motion metrics in response to commanding to a position */
+    object XAxisMotionMetricsEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("xAxisMotionMetrics"))
 
       /** Motion cmd received time */
       val motionCmdReceivedKey: Key[TAITime] = TAITimeKey.make("motionCmdReceived")
@@ -168,10 +219,28 @@ object CalibrationSourceStageKeys {
       val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
 
       /** Axis position at the time of cmd receipt */
-      val motionStartPositiomKey: Key[Float] = FloatKey.make("motionStartPositiom", Units.millimeter)
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
 
       /** Axis position at the time of cmd completion */
-      val motionEndPositiomKey: Key[Float] = FloatKey.make("motionEndPositiom", Units.millimeter)
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
+
+    }
+
+    /** Y-axis motion metrics in response to commanding to a position */
+    object YAxisMotionMetricsEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("yAxisMotionMetrics"))
+
+      /** Motion cmd received time */
+      val motionCmdReceivedKey: Key[TAITime] = TAITimeKey.make("motionCmdReceived")
+
+      /** Motion cmd completed time */
+      val motionCmdCompletedKey: Key[TAITime] = TAITimeKey.make("motionCmdCompleted")
+
+      /** Axis position at the time of cmd receipt */
+      val motionStartPositionKey: Key[Float] = FloatKey.make("motionStartPosition", Units.millimeter)
+
+      /** Axis position at the time of cmd completion */
+      val motionEndPositionKey: Key[Float] = FloatKey.make("motionEndPosition", Units.millimeter)
 
     }
 
@@ -182,6 +251,9 @@ object CalibrationSourceStageKeys {
      */
     object ConfigureCommand {
       val commandName: CommandName = CommandName("configure")
+
+      /** the axis controlling the x or y stage of the Tilt Plate */
+      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X Stage", "Y Stage")
 
     }
 
@@ -213,69 +285,30 @@ object CalibrationSourceStageKeys {
     object StopCommand {
       val commandName: CommandName = CommandName("stop")
 
-    }
-
-    /**
-     * Positions the calibration source stage to place a given optic into the focal plane. If the position is CALIBRATION_SOURCE,
-     * the optional parameter “intensity” is used to set the intensity of the source. If the position is not CALIBRATION_SOURCE,
-     * the source is turned off.
-     */
-    object SetOpticAndSourceIntensityCommand {
-      val commandName: CommandName = CommandName("setOpticAndSourceIntensity")
-
-      /** The name of the optic to position into the focal plane */
-      val opticKey: GChoiceKey = ChoiceKey.make("optic", "CALIBRATION_SOURCE", "ZERNIKE1", "ZERNIKE2", "FIELD_STOP", "OPEN")
-
-      /** The source intensity (% of max). Only used if optic to position is CALIBRATION_SOURCE */
-      val sourceIntensityKey: Key[Float] = FloatKey.make("sourceIntensity")
+      /** the axis controlling the x or y stage of the Tilt Plate */
+      val axisKey: GChoiceKey = ChoiceKey.make("axis", "X Stage", "Y Stage")
 
     }
 
-    /** Positions the calibration source stage to place a given optic into the focal plane. */
-    object SetOpticCommand {
-      val commandName: CommandName = CommandName("setOptic")
+    /** Commands APS.ICS to position the Tilt Plate to translate the pupil in x and y. */
+    object PositionTiltPlateCommand {
+      val commandName: CommandName = CommandName("positionTiltPlate")
 
-      /** The name of the optic to position into the focal plane */
-      val opticKey: GChoiceKey = ChoiceKey.make("optic", "CALIBRATION_SOURCE", "ZERNIKE1", "ZERNIKE2", "FIELD_STOP", "OPEN")
-
-    }
-
-    /** Positions the calibration source stage to a given slot number. Used for diagnostic and debugging purposes. */
-    object SetSlotCommand {
-      val commandName: CommandName = CommandName("setSlot")
-
-      /** The number of the slot to position into the focal plane */
-      val slotNumberKey: GChoiceKey = ChoiceKey.make("slotNumber", "1", "2", "3", "4", "5")
-
-    }
-
-    /**
-     * Positions the calibration source stage in mm. Used for determining slot positions for each optic, diagnostic and debugging
-     * purposes.
-     */
-    object SetPositionCommand {
-      val commandName: CommandName = CommandName("setPosition")
-
-      /** relative offset or absolute positioning from home (0) position */
+      /** Either position relative to current position or command to absolute position. */
       val positioningMethodKey: GChoiceKey = ChoiceKey.make("positioningMethod", "ABSOLUTE", "RELATIVE")
 
-      /** the abosolute or relative offset value to move the motor */
-      val positionValueKey: Key[Float] = FloatKey.make("positionValue", Units.millimeter)
+      /** Absolute or relative x position to move to. */
+      val xValueKey: Key[Float] = FloatKey.make("xValue", Units.millimeter)
+
+      /** Absolute or relative y position to move to. */
+      val yValueKey: Key[Float] = FloatKey.make("yValue", Units.millimeter)
 
     }
 
     /**
-     * Sets the intensity of the calibration source. Used during instrument characterization, diagnostic and debugging purposes.
+     * When a command error results in an automatic error recovery process, this command aborts that automatic process. Only valid
+     * when assembly Command State is in the Error Recovery State.
      */
-    object SetSourceIntensityCommand {
-      val commandName: CommandName = CommandName("setSourceIntensity")
-
-      /** The source intensity (% of max). */
-      val sourceIntensityKey: Key[Float] = FloatKey.make("sourceIntensity")
-
-    }
-
-    /** When a command error results in an automatic error recovery process, this command aborts that automatic process. */
     object AbortErrorRecoveryCommand {
       val commandName: CommandName = CommandName("abortErrorRecovery")
 

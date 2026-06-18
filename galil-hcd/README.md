@@ -55,7 +55,7 @@ csw-services start
 sbt stage
 ./target/universal/stage/bin/galil-hcd \
   -main csw.proto.galil.hcd.GalilHcdApp \
-  --local galil-hcd/src/main/resources/GalilHcd.conf \
+  --local galil-hcd/src/main/resources/GalilHcd1.conf \
   -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 ```
 
@@ -132,7 +132,7 @@ DL `?`-rejection path and read-timeout save/restore), `chunkCompound`, and the
 
 The HCD uses two layers of configuration:
 
-1. **CSW container config** (`GalilHcd.conf` / `GalilHcdSim.conf`): component
+1. **CSW container config** (`GalilHcd1.conf` / `GalilHcdSim.conf`): component
    registration, passed to `ContainerCmd` with `--local`. This is the sole
    authoritative source of the CSW prefix and component identity.
 2. **HCD application config** (`GalilHcdConfig*.conf`): controller connection, axis
@@ -143,7 +143,7 @@ The HCD uses two layers of configuration:
 
 | File | Purpose |
 |------|---------|
-| `GalilHcd.conf` | CSW container config (hardware registration: `aps.ICS.HCD.GalilMotion.1`) |
+| `GalilHcd1.conf` | CSW container config (hardware registration: `aps.ICS.HCD.GalilMotion.1`) |
 | `GalilHcdSim.conf` | CSW container config (simulator; distinct prefix `aps.ICS.HCD.GalilMotion.Sim`) |
 | `GalilHcdConfig.conf` | Default HCD config (simulator mode) |
 | `GalilHcdConfig-Simulator.conf` | Simulator at 127.0.0.1:8888 (lab axis layout) |

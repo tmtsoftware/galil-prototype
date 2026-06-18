@@ -1,4 +1,4 @@
-package aps.ics.assembly.steeringbeamsplitter
+package aps.ics.assembly.foc
 
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import com.typesafe.config.ConfigFactory
@@ -12,7 +12,7 @@ import csw.params.events.SystemEvent
 import csw.prefix.models.Subsystem
 
 import aps.ics.assembly.common.{AxisConfig, AxisSnapshot, StageAssemblyHandlers}
-import aps.ics.assembly.icd.SteeringBeamSplitterStageKeys.`ICS.FOC.SteeringBeamSplitterStage` as SBS
+import aps.ics.assembly.icd.FocSteeringBeamSplitterStageKeys.`ICS.FOC.SteeringBeamSplitterStage` as SBS
 
 import scala.concurrent.Future
 
@@ -31,7 +31,7 @@ import scala.concurrent.Future
  * unit (all axes). The axis choice is currently accepted and ignored; true
  * per-axis targeting can be added later if Scott wants it for debugging.
  */
-class SteeringBeamSplitterStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
+class FocSteeringBeamSplitterStageHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswContext)
     extends StageAssemblyHandlers(ctx, cswCtx):
 
   import cswCtx._
@@ -46,12 +46,12 @@ class SteeringBeamSplitterStageHandlers(ctx: ActorContext[TopLevelActorMessage],
   override protected def validateSpecificCommand(runId: Id, s: Setup): ValidateCommandResponse =
     s.commandName.name match
       case "positionBeamSplitter" =>
-        if s.exists(SBS.PositionBeamSplitterCommand.positionMethodKey)
+        if s.exists(SBS.PositionBeamSplitterCommand.positioningMethodKey)
           && s.exists(SBS.PositionBeamSplitterCommand.xValueKey)
           && s.exists(SBS.PositionBeamSplitterCommand.yValueKey)
         then Accepted(runId)
         else Invalid(runId, CommandIssue.MissingKeyIssue(
-          "positionBeamSplitter requires positionMethod, xValue and yValue"))
+          "positionBeamSplitter requires positioningMethod, xValue and yValue"))
       case other =>
         Invalid(runId, CommandIssue.UnsupportedCommandIssue(s"unsupported command: $other"))
 
@@ -60,7 +60,7 @@ class SteeringBeamSplitterStageHandlers(ctx: ActorContext[TopLevelActorMessage],
   override protected def handleSpecificCommand(runId: Id, s: Setup): () => Future[SubmitResponse] =
     (s.commandName.name, axisByName("xStage"), axisByName("yStage")) match
       case ("positionBeamSplitter", Some(ax), Some(ay)) =>
-        val method = s(SBS.PositionBeamSplitterCommand.positionMethodKey).head.name
+        val method = s(SBS.PositionBeamSplitterCommand.positioningMethodKey).head.name
         val xv     = s(SBS.PositionBeamSplitterCommand.xValueKey).head.toDouble
         val yv     = s(SBS.PositionBeamSplitterCommand.yValueKey).head.toDouble
         // Resolve to absolute targets NOW (both axes are idle at intake, so the
@@ -121,7 +121,7 @@ class SteeringBeamSplitterStageHandlers(ctx: ActorContext[TopLevelActorMessage],
     }
 
 /** Start the assembly from a container config file (default below). */
-object SteeringBeamSplitterStageApp:
+object FocSteeringBeamSplitterStageApp:
   def main(args: Array[String]): Unit =
     val defaultConfig = ConfigFactory.load("SteeringBeamSplitterStageContainer.conf")
     ContainerCmd.start("SteeringBeamSplitterStage", Subsystem.APS, args, Some(defaultConfig))

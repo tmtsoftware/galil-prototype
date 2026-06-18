@@ -111,7 +111,7 @@ export const InsertionStageCommands = ({
       <Row
         label='Position stage'
         enabled={on('positionStage')}
-        onSubmit={() => run(positionStageCmd(method, mm), `positionStage [positionMethod=${method}, value=${mm}]`)}>
+        onSubmit={() => run(positionStageCmd(method, mm), `positionStage [positioningMethod=${method}, value=${mm}]`)}>
         <Select<PositionMethod>
           size='small'
           value={method}

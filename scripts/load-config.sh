@@ -40,6 +40,12 @@ MAP=(
   "$ASM_RES/SteeringBeamSplitterStage.conf:APS/ICS/FOC/SteeringBeamSplitterStage.conf"
   "$ASM_RES/CollimatorUnit.conf:APS/ICS/FOC/CollimatorUnit.conf"
   "$ASM_RES/CalibrationSourceStage.conf:APS/ICS/FOC/CalibrationSourceStage.conf"
+  "$ASM_RES/PshFocusStage.conf:APS/ICS/PSH/FocusStage.conf"
+  "$ASM_RES/PitFocusStage.conf:APS/ICS/PIT/FocusStage.conf"
+  "$ASM_RES/AptFocusStage.conf:APS/ICS/APT/FocusStage.conf"
+  "$ASM_RES/TiltPlate.conf:APS/ICS/FOC/TiltPlate.conf"
+  "$ASM_RES/FiberSourceStage.conf:APS/ICS/STIM/FiberSourceStage.conf"
+  "$ASM_RES/PupilMaskStage.conf:APS/ICS/STIM/PupilMaskStage.conf"
 )
 
 put() {

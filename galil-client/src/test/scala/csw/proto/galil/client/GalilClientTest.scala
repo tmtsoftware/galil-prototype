@@ -18,7 +18,7 @@ import scala.concurrent.duration._
  * - CSW services running (or HCD running with --local)
  * - HCD must be running:
  *     ./target/universal/stage/bin/galil-hcd -main csw.proto.galil.hcd.GalilHcdApp \
- *       --local galil-hcd/src/main/resources/GalilHcd.conf \
+ *       --local galil-hcd/src/main/resources/GalilHcd1.conf \
  *       -Dgalil.host=192.168.86.41 -Dgalil.port=23
  * - Galil controller must be accessible (or simulator running)
  */

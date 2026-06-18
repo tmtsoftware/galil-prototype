@@ -68,6 +68,85 @@ import {
   CSS_PREFIX_STR
 } from '../models/calibrationSourceStage'
 
+import { PshFocusStageCommands } from './PshFocusStageCommands'
+import { PshFocusStageStatus } from './PshFocusStageStatus'
+import {
+  STATUS_EVENT as PSHFS_STATUS_EVENT,
+  AXIS_EVENT as PSHFS_AXIS_EVENT,
+  PSHFS_COMPONENT_ID,
+  PSHFS_CONFIG_PATH,
+  PSHFS_CONFIG_VIEW,
+  PSHFS_PREFIX,
+  PSHFS_PREFIX_STR
+} from '../models/pshFocusStage'
+
+import { PitFocusStageCommands } from './PitFocusStageCommands'
+import { PitFocusStageStatus } from './PitFocusStageStatus'
+import {
+  STATUS_EVENT as PITFS_STATUS_EVENT,
+  AXIS_EVENT as PITFS_AXIS_EVENT,
+  PITFS_COMPONENT_ID,
+  PITFS_CONFIG_PATH,
+  PITFS_CONFIG_VIEW,
+  PITFS_PREFIX,
+  PITFS_PREFIX_STR
+} from '../models/pitFocusStage'
+
+import { AptFocusStageCommands } from './AptFocusStageCommands'
+import { AptFocusStageStatus } from './AptFocusStageStatus'
+import {
+  STATUS_EVENT as APTFS_STATUS_EVENT,
+  AXIS_EVENT as APTFS_AXIS_EVENT,
+  APTFS_COMPONENT_ID,
+  APTFS_CONFIG_PATH,
+  APTFS_CONFIG_VIEW,
+  APTFS_PREFIX,
+  APTFS_PREFIX_STR
+} from '../models/aptFocusStage'
+
+import { TiltPlateCommands } from './TiltPlateCommands'
+import { TiltPlateStatus } from './TiltPlateStatus'
+import {
+  STATUS_EVENT as TP_STATUS_EVENT,
+  X_AXIS_EVENT as TP_X_AXIS_EVENT,
+  Y_AXIS_EVENT as TP_Y_AXIS_EVENT,
+  TP_COMPONENT_ID,
+  TP_CONFIG_PATH,
+  TP_CONFIG_VIEW,
+  TP_PREFIX,
+  TP_PREFIX_STR
+} from '../models/tiltPlate'
+
+import { FiberSourceStageCommands } from './FiberSourceStageCommands'
+import { FiberSourceStageStatus } from './FiberSourceStageStatus'
+import {
+  STATUS_EVENT as FSS_STATUS_EVENT,
+  X_AXIS_EVENT as FSS_X_AXIS_EVENT,
+  Y_AXIS_EVENT as FSS_Y_AXIS_EVENT,
+  Z_AXIS_EVENT as FSS_Z_AXIS_EVENT,
+  LIGHT_EVENT as FSS_LIGHT_EVENT,
+  readLight as fssReadLight,
+  FSS_COMPONENT_ID,
+  FSS_CONFIG_PATH,
+  FSS_CONFIG_VIEW,
+  FSS_PREFIX,
+  FSS_PREFIX_STR
+} from '../models/fiberSourceStage'
+
+import { PupilMaskStageCommands } from './PupilMaskStageCommands'
+import { PupilMaskStageStatus } from './PupilMaskStageStatus'
+import {
+  STATUS_EVENT as PMS_STATUS_EVENT,
+  X_AXIS_EVENT as PMS_X_AXIS_EVENT,
+  Y_AXIS_EVENT as PMS_Y_AXIS_EVENT,
+  PHI_AXIS_EVENT as PMS_PHI_AXIS_EVENT,
+  PMS_COMPONENT_ID,
+  PMS_CONFIG_PATH,
+  PMS_CONFIG_VIEW,
+  PMS_PREFIX,
+  PMS_PREFIX_STR
+} from '../models/pupilMaskStage'
+
 // esw-ts exports Prefix/ComponentId as classes; type them off the model values
 // so this compiles both against the real package and the stubbed harness.
 type PrefixT = typeof IS_PREFIX
@@ -190,11 +269,141 @@ const calibrationSourceStage: ComponentDescriptor = {
   }
 }
 
+const pshFocusStage: ComponentDescriptor = {
+  key: PSHFS_PREFIX_STR,
+  label: 'PSH Focus Stage',
+  prefix: PSHFS_PREFIX,
+  componentId: PSHFS_COMPONENT_ID,
+  configPath: PSHFS_CONFIG_PATH,
+  staticConfig: PSHFS_CONFIG_VIEW,
+  statusEvent: PSHFS_STATUS_EVENT,
+  axisEvents: [PSHFS_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PshFocusStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PshFocusStageStatus status={p.status} axis={p.axes[PSHFS_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
+const pitFocusStage: ComponentDescriptor = {
+  key: PITFS_PREFIX_STR,
+  label: 'PIT Focus Stage',
+  prefix: PITFS_PREFIX,
+  componentId: PITFS_COMPONENT_ID,
+  configPath: PITFS_CONFIG_PATH,
+  staticConfig: PITFS_CONFIG_VIEW,
+  statusEvent: PITFS_STATUS_EVENT,
+  axisEvents: [PITFS_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PitFocusStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PitFocusStageStatus status={p.status} axis={p.axes[PITFS_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
+const aptFocusStage: ComponentDescriptor = {
+  key: APTFS_PREFIX_STR,
+  label: 'APT Focus Stage',
+  prefix: APTFS_PREFIX,
+  componentId: APTFS_COMPONENT_ID,
+  configPath: APTFS_CONFIG_PATH,
+  staticConfig: APTFS_CONFIG_VIEW,
+  statusEvent: APTFS_STATUS_EVENT,
+  axisEvents: [APTFS_AXIS_EVENT],
+  renderCommands: (p) => (
+    <AptFocusStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <AptFocusStageStatus status={p.status} axis={p.axes[APTFS_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
+const tiltPlate: ComponentDescriptor = {
+  key: TP_PREFIX_STR,
+  label: 'Tilt Plate',
+  prefix: TP_PREFIX,
+  componentId: TP_COMPONENT_ID,
+  configPath: TP_CONFIG_PATH,
+  staticConfig: TP_CONFIG_VIEW,
+  statusEvent: TP_STATUS_EVENT,
+  axisEvents: [TP_X_AXIS_EVENT, TP_Y_AXIS_EVENT],
+  renderCommands: (p) => (
+    <TiltPlateCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <TiltPlateStatus
+      status={p.status}
+      xAxis={p.axes[TP_X_AXIS_EVENT] ?? {}}
+      yAxis={p.axes[TP_Y_AXIS_EVENT] ?? {}}
+      lifecycle={p.lifecycle}
+    />
+  )
+}
+
+const fiberSourceStage: ComponentDescriptor = {
+  key: FSS_PREFIX_STR,
+  label: 'Fiber Source Stage',
+  prefix: FSS_PREFIX,
+  componentId: FSS_COMPONENT_ID,
+  configPath: FSS_CONFIG_PATH,
+  staticConfig: FSS_CONFIG_VIEW,
+  statusEvent: FSS_STATUS_EVENT,
+  axisEvents: [FSS_X_AXIS_EVENT, FSS_Y_AXIS_EVENT, FSS_Z_AXIS_EVENT],
+  extraEvents: [FSS_LIGHT_EVENT],
+  renderCommands: (p) => (
+    <FiberSourceStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => {
+    const lightEvent = p.extras[FSS_LIGHT_EVENT]
+    return (
+      <FiberSourceStageStatus
+        status={p.status}
+        xAxis={p.axes[FSS_X_AXIS_EVENT] ?? {}}
+        yAxis={p.axes[FSS_Y_AXIS_EVENT] ?? {}}
+        zAxis={p.axes[FSS_Z_AXIS_EVENT] ?? {}}
+        light={lightEvent ? fssReadLight(lightEvent) : {}}
+        lifecycle={p.lifecycle}
+      />
+    )
+  }
+}
+
+const pupilMaskStage: ComponentDescriptor = {
+  key: PMS_PREFIX_STR,
+  label: 'Pupil Mask Stage',
+  prefix: PMS_PREFIX,
+  componentId: PMS_COMPONENT_ID,
+  configPath: PMS_CONFIG_PATH,
+  staticConfig: PMS_CONFIG_VIEW,
+  statusEvent: PMS_STATUS_EVENT,
+  axisEvents: [PMS_X_AXIS_EVENT, PMS_Y_AXIS_EVENT, PMS_PHI_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PupilMaskStageCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PupilMaskStageStatus
+      status={p.status}
+      xAxis={p.axes[PMS_X_AXIS_EVENT] ?? {}}
+      yAxis={p.axes[PMS_Y_AXIS_EVENT] ?? {}}
+      phiAxis={p.axes[PMS_PHI_AXIS_EVENT] ?? {}}
+      lifecycle={p.lifecycle}
+    />
+  )
+}
+
 export const DESCRIPTORS: ComponentDescriptor[] = [
   insertionStage,
   steeringBeamSplitter,
   collimatorUnit,
-  calibrationSourceStage
+  calibrationSourceStage,
+  pshFocusStage,
+  pitFocusStage,
+  aptFocusStage,
+  tiltPlate,
+  fiberSourceStage,
+  pupilMaskStage
 ]
 
 export const REGISTRY: Record<string, ComponentDescriptor> = Object.fromEntries(

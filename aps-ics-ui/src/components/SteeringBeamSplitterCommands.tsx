@@ -99,7 +99,7 @@ export const SteeringBeamSplitterCommands = ({
         onSubmit={() =>
           run(
             positionBeamSplitterCmd(method, x, y),
-            `positionBeamSplitter [positionMethod=${method}, xValue=${x}, yValue=${y}]`
+            `positionBeamSplitter [positioningMethod=${method}, xValue=${x}, yValue=${y}]`
           )
         }>
         <Select<PositionMethod>

@@ -238,7 +238,7 @@ Location Service, so the HCD and assembly must be restarted too.
 
 ```bash
 ./target/universal/stage/bin/ics-assemblies \
-  -main aps.ics.assembly.insertionstage.InsertionStageApp \
+  -main aps.ics.assembly.stim.StimInsertionStageApp \
   --local ics-assemblies/src/main/resources/InsertionStageContainer.conf
 ```
 
@@ -250,11 +250,11 @@ state from the HCD (`PreHomed`, or `Operational` if the HCD is already homed).
 ```bash
 # live telemetry
 ./target/universal/stage/bin/ics-assemblies \
-  -main aps.ics.assembly.insertionstage.InsertionStageClientApp watch
+  -main aps.ics.assembly.stim.StimInsertionStageClientApp watch
 
 # a command
 ./target/universal/stage/bin/ics-assemblies \
-  -main aps.ics.assembly.insertionstage.InsertionStageClientApp positionStage ABSOLUTE 60
+  -main aps.ics.assembly.stim.StimInsertionStageClientApp positionStage ABSOLUTE 60
 ```
 
 > Two main classes share the staged `ics-assemblies` script, so `-main <FQCN>` is
