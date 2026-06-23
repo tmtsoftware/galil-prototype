@@ -96,34 +96,31 @@ object PshFilterWheelKeys {
 
     }
 
-    /** Event used to communicate that an unexpected condition occurred. */
-    object ApsAlertEventEvent {
-      val eventKey: EventKey = EventKey(prefix, EventName("apsAlertEvent"))
+    /** Event used to communicate a command failure to the user interface and/or Alignment Procedure Sequencer. */
+    object ApsCommandFailureEventEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("apsCommandFailureEvent"))
 
-      /** Unhandled errors require filling the message field, whereas other types should fill in the messageId */
-      val messageSeverityKey: GChoiceKey = ChoiceKey.make("messageSeverity", "WARN", "ERROR", "UNHANDLED_ERROR")
+      /** The user readable name of the source assembly or service that published the event */
+      val sourceAssemblyKey: Key[String] = StringKey.make("sourceAssembly")
 
-      /**
-       * Sensor originating warnings, errors, controller error codes/messages reported from the controller, and warnings/errors
-       * that are a result of calculations
-       */
-      val sourceKey: GChoiceKey = ChoiceKey.make("source", "SENSOR", "HARDWARE_REPORTED", "CALCULATED")
-
-      /**
-       * Key used within the PEAS UI resource properties configuration file that holds all alert messages. Different from
-       * procedure events, these alert messages contain placeholders for messageArgs in this alert event.
-       */
-      val messageIdKey: Key[String] = StringKey.make("messageId")
-
-      /**
-       * The message text obtained by the message Id key contains argument placeholders (e.g., {0}, {1}, etc.) that indicate where
-       * variable argument values will be inserted. This field provides the ordered list of string values to substitute into the
-       * message at the corresponding placeholder positions.
-       */
-      val messageArgsKey: Key[String] = StringKey.make("messageArgs")
-
-      /** Message supplied by the event source for unhandled errors */
+      /** Failure message supplied by the event source. */
       val messageKey: Key[String] = StringKey.make("message")
+
+      /**
+       * For failures and errors that have recovery modes (e.g. motion assemblies and detector assemblies) a state for the
+       * progress of the recovery is given: started, completed, aborted. For failures that do not support auto recovery, the state
+       * is NOT USED.
+       */
+      val recoveryStateKey: GChoiceKey = ChoiceKey.make("recoveryState", "STARTED", "COMPLETED", "ABORTED", "NOT_USED")
+
+      /** The current auto-recovery retry number. */
+      val recoveryRetryIndexKey: Key[Int] = IntKey.make("recoveryRetryIndex", Units.NoUnits)
+
+      /** The total number of auto-recovery retries before recovery is abandoned. */
+      val recoveryRetryCountKey: Key[Int] = IntKey.make("recoveryRetryCount", Units.NoUnits)
+
+      /** Indicates if the current retry succeeded or failed. */
+      val recoveryRetryStateKey: GChoiceKey = ChoiceKey.make("recoveryRetryState", "FAILURE", "SUCCESS")
 
     }
 

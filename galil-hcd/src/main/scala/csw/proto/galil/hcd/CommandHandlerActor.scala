@@ -1446,9 +1446,11 @@ object CommandHandlerActor {
       Map("activeCommand" -> ActiveCommand.Select, "axisErrorMsg" -> ""),
       ctx.system.ignoreRef)
 
-    // 2. Transition to Moving
+    // 2. Transition to Moving and record the commanded wheel slot. While set, inPosition
+    // for this axis is driven by the embedded #Select program's declared success
+    // (wheelPosition == this slot), not the encoder angle — see calculateInPosition.
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
-      Map("axisState" -> AxisStateEnum.Moving),
+      Map("axisState" -> AxisStateEnum.Moving, "commandedWheelPosition" -> position),
       ctx.system.ignoreRef)
 
     // 3. Execute embedded program with thread confirmation + watcher.

@@ -871,6 +871,45 @@ class ControllerStatusActor(
           Map.empty
 
   /**
+   * Read achieved wheel positions from the embedded `whlpos[]` array — one compound
+   * MG round trip over the configured axes. Returns Map[axis -> slot], where slot is
+   * the 1-based wheel position last confirmed by the controller's select logic, or -1
+   * for "unknown" (no successful select since startup/home, or a non-wheel axis — the
+   * embedded leaves those at -1). The caller applies whatever is reported, including
+   * -1, so a transition back to "unknown" (e.g. the embedded invalidating the slot at
+   * the start of a home/move) propagates correctly.
+   *
+   * Scoped to configuredAxes (so non-existent G/H are never touched, avoiding phantom
+   * AxisState entries) and gated on embeddedArraysReady (so we never MG an array that
+   * #Init has not dimensioned — the embedded program must declare `DM whlpos[8]` in
+   * #Init, exactly as it does for ae[]). Unlike ae[], wheel-position readback is
+   * optional telemetry: this NEVER rethrows, so a program that predates whlpos[] (or
+   * any transient hiccup) yields Map.empty and leaves wheelPosition unchanged, never
+   * disturbing the analog/QR connection-health machinery that already runs this tick.
+   */
+  private def readWhlposValues(): Map[Axis, Int] =
+    if !pollingEnabled || !embeddedArraysReady || configuredAxes.isEmpty then Map.empty
+    else
+      val sortedAxes = configuredAxes.toSeq.sortBy(_.index)
+      val mgCmd = "MG " + sortedAxes.map(a => s"whlpos[${a.index}]").mkString(",")
+      try
+        val responses = statusIo.send(mgCmd)
+        val text      = responses.map(_._2.utf8String).mkString
+        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
+        if tokens.length != sortedAxes.length then
+          log.debug(s"whlpos[] read returned ${tokens.length} tokens, expected ${sortedAxes.length}; ignoring (text='${text.trim}')")
+          Map.empty
+        else
+          sortedAxes.zip(tokens).flatMap { (axis, tok) =>
+            Try(tok.toDouble.toInt).toOption.map(v => axis -> v)
+          }.toMap
+      catch
+        case ex: Exception =>
+          // Optional telemetry — never escalate (a program without whlpos[] lands here).
+          log.debug(s"whlpos[] read failed (ignored): ${ex.getMessage}")
+          Map.empty
+
+  /**
    * Read MG _XQ<n> for each currently-registered thread and return a
    * Map[thread, line], where line is the current execution line number, or -1
    * if the thread is stopped.
@@ -1296,6 +1335,15 @@ class ControllerStatusActor(
         Map("analogInputs" -> values),
         context.system.ignoreRef
       )
+      // Achieved wheel positions from the embedded whlpos[] array, on the same 1 Hz
+      // round-trip cadence (whlpos only changes on a select completion). Best-effort:
+      // readWhlposValues never throws, so a controller/program without whlpos[] simply
+      // leaves wheelPosition unchanged and never disturbs analog/QR connection health.
+      readWhlposValues().foreach { (axis, v) =>
+        internalState ! InternalStateActor.UpdateAxisState(
+          axis, Map("wheelPosition" -> v), context.system.ignoreRef
+        )
+      }
     catch
       case ex: java.net.SocketTimeoutException =>
         // Slow reply, socket likely alive; tolerate up to MaxConsecutiveTimeouts.

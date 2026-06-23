@@ -446,7 +446,20 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
               (axState.velocity||0).toFixed(1)),
             e('span',{style:{color:showDemand?'#6B7280':'#374151'}},'Demand'),
             e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
-              (axState.demand||0).toFixed(1))),
+              (axState.demand||0).toFixed(1)),
+            // Achieved wheel slot from the embedded #Select logic (— if unknown), with the
+            // commanded slot as a hint. Green when parked at the confirmed commanded slot
+            // (this is what drives inPosition), amber while a select is in progress, gray
+            // when no select governs the axis.
+            e('span',{style:{color:'#8B5CF6'}},'Slot'),
+            e('span',{style:{fontVariantNumeric:'tabular-nums',
+                color:(axState.wheelPosition>=1&&axState.wheelPosition===axState.commandedWheelPosition)?'#10B981'
+                     :(axState.commandedWheelPosition>=1)?'#FCD34D':'#4B5563'}},
+              (axState.wheelPosition>=1?String(axState.wheelPosition):'\u2014'),
+              axState.commandedWheelPosition>=1
+                ? e('span',{style:{fontSize:10,color:'#4B5563',fontWeight:400,marginLeft:5}},
+                    '(cmd ',axState.commandedWheelPosition,')')
+                : null)),
           !compact ? e(AxisVisual,{axState,colors,showDemand}) : null),
 
         // Right column — Whl+Ang always; Pos+Ofs hidden in compact

@@ -343,6 +343,18 @@ class CurrentStatePublisherActor(
       case Axis.G => CurrentStateAxisGCurrentState.homedKey
       case Axis.H => CurrentStateAxisHCurrentState.homedKey
 
+    // Achieved wheel slot (1-based); -1 = unknown / not a wheel axis. Wheel assemblies
+    // surface their `wheelPositionNum` from this; non-wheel assemblies ignore it.
+    val wheelPosKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.wheelPositionKey
+      case Axis.B => CurrentStateAxisBCurrentState.wheelPositionKey
+      case Axis.C => CurrentStateAxisCCurrentState.wheelPositionKey
+      case Axis.D => CurrentStateAxisDCurrentState.wheelPositionKey
+      case Axis.E => CurrentStateAxisECurrentState.wheelPositionKey
+      case Axis.F => CurrentStateAxisFCurrentState.wheelPositionKey
+      case Axis.G => CurrentStateAxisGCurrentState.wheelPositionKey
+      case Axis.H => CurrentStateAxisHCurrentState.wheelPositionKey
+
     // Map internal enum to ICD choice string
     val stateValue = axisState.axisState match
       case AxisStateEnum.Lost => "lost"
@@ -369,7 +381,9 @@ class CurrentStatePublisherActor(
         // Counts per revolution; integer, published so Assembly can do its own unit conversions
         cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat),
         // Valid-home-reference flag; assemblies map this to their `indexed` field
-        homedKey.set(axisState.homed)
+        homedKey.set(axisState.homed),
+        // Achieved wheel slot (1-based); -1 = unknown / not a wheel axis.
+        wheelPosKey.set(axisState.wheelPosition)
       )
     )
 

@@ -80,6 +80,18 @@ import {
   PSHFS_PREFIX_STR
 } from '../models/pshFocusStage'
 
+import { PshFilterWheelCommands } from './PshFilterWheelCommands'
+import { PshFilterWheelStatus } from './PshFilterWheelStatus'
+import {
+  STATUS_EVENT as PSHFW_STATUS_EVENT,
+  AXIS_EVENT as PSHFW_AXIS_EVENT,
+  PSHFW_COMPONENT_ID,
+  PSHFW_CONFIG_PATH,
+  PSHFW_CONFIG_VIEW,
+  PSHFW_PREFIX,
+  PSHFW_PREFIX_STR
+} from '../models/pshFilterWheel'
+
 import { PitFocusStageCommands } from './PitFocusStageCommands'
 import { PitFocusStageStatus } from './PitFocusStageStatus'
 import {
@@ -286,6 +298,23 @@ const pshFocusStage: ComponentDescriptor = {
   )
 }
 
+const pshFilterWheel: ComponentDescriptor = {
+  key: PSHFW_PREFIX_STR,
+  label: 'PSH Filter Wheel',
+  prefix: PSHFW_PREFIX,
+  componentId: PSHFW_COMPONENT_ID,
+  configPath: PSHFW_CONFIG_PATH,
+  staticConfig: PSHFW_CONFIG_VIEW,
+  statusEvent: PSHFW_STATUS_EVENT,
+  axisEvents: [PSHFW_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PshFilterWheelCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PshFilterWheelStatus status={p.status} axis={p.axes[PSHFW_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
 const pitFocusStage: ComponentDescriptor = {
   key: PITFS_PREFIX_STR,
   label: 'PIT Focus Stage',
@@ -399,6 +428,7 @@ export const DESCRIPTORS: ComponentDescriptor[] = [
   collimatorUnit,
   calibrationSourceStage,
   pshFocusStage,
+  pshFilterWheel,
   pitFocusStage,
   aptFocusStage,
   tiltPlate,

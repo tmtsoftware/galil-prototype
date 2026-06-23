@@ -35,11 +35,18 @@ final case class AxisConfig(
     deceleration: Double,
     indexOffsetMm: Double,
     indexSpeed: Double,
-    inPositionThresholdMm: Double
+    inPositionThresholdMm: Double,
+    countsPerRevolution: Option[Int] = None // rotating axes only; degrees<->counts derives from this
 ):
   /** Round to the nearest integer encoder count (avoids FP drift across moves). */
   def mmToCounts(mm: Double): Double = Math.round(mm * countsPerMm).toDouble
   def countsToMm(counts: Double): Double = if countsPerMm != 0.0 then counts / countsPerMm else 0.0
+
+  /** Counts per degree for a rotating axis, derived from countsPerRevolution.
+   *  The integer counts/rev is the source of truth (preferred over a float
+   *  counts/deg) to avoid accumulated rounding across revolutions. 0.0 if this
+   *  is not a rotating axis (no countsPerRevolution configured). */
+  def countsPerDegree: Double = countsPerRevolution.map(_ / 360.0).getOrElse(0.0)
 
 object AxisConfig:
   /**
@@ -64,7 +71,8 @@ object AxisConfig:
       deceleration = d("deceleration", 0.0),
       indexOffsetMm = d("indexOffset", 0.0),
       indexSpeed = d("indexSpeed", 0.0),
-      inPositionThresholdMm = d("inPositionThreshold", 0.0)
+      inPositionThresholdMm = d("inPositionThreshold", 0.0),
+      countsPerRevolution = if a.hasPath("countsPerRevolution") then Some(a.getInt("countsPerRevolution")) else None
     )
 
 // ---------------------------------------------------------------------------
@@ -111,7 +119,9 @@ final case class AxisSnapshot(
     hcdAxisState: String,   // lost|homing|idle|moving|tracking|error
     inPosition: Boolean,
     homed: Boolean,
-    axisErrorMsg: String
+    axisErrorMsg: String,
+    wheelPositionNum: Int = -1,       // achieved wheel slot (rotating axes); -1 = unknown / not a wheel
+    angularPositionDeg: Double = 0.0  // wheel angle in degrees (rotating axes)
 ):
   /** Map HCD axisState -> assembly axisStatus enum (LOST/HOMING/IDLE/MOVING/ERROR).
    *  Linear stages never enter `tracking`; if seen it is treated as MOVING. */

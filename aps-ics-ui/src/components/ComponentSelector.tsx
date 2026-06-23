@@ -17,6 +17,7 @@ import { SBS_PREFIX_STR } from '../models/steeringBeamSplitter'
 import { CU_PREFIX_STR } from '../models/collimatorUnit'
 import { CSS_PREFIX_STR } from '../models/calibrationSourceStage'
 import { PSHFS_PREFIX_STR } from '../models/pshFocusStage'
+import { PSHFW_PREFIX_STR } from '../models/pshFilterWheel'
 import { PITFS_PREFIX_STR } from '../models/pitFocusStage'
 import { APTFS_PREFIX_STR } from '../models/aptFocusStage'
 import { TP_PREFIX_STR } from '../models/tiltPlate'
@@ -31,7 +32,7 @@ const treeData: DataNode[] = [
     key: 'grp-psh',
     title: 'PSH assemblies',
     selectable: false,
-    children: [ph('psh-pmw', 'Pupil Mask Wheel'), ph('psh-fw', 'Filter Wheel'), { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
+    children: [ph('psh-pmw', 'Pupil Mask Wheel'), { key: PSHFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
   },
   {
     key: 'grp-pit',

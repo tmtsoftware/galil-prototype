@@ -52,6 +52,13 @@ object GalilMotionKeys {
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
+
       /** Current velocity of axis A (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -81,6 +88,13 @@ object GalilMotionKeys {
 
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
 
       /** Current velocity of axis B (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -112,6 +126,13 @@ object GalilMotionKeys {
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
+
       /** Current velocity of axis C (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -141,6 +162,13 @@ object GalilMotionKeys {
 
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
 
       /** Current velocity of axis D (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -172,6 +200,13 @@ object GalilMotionKeys {
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
+
       /** Current velocity of axis E (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -201,6 +236,13 @@ object GalilMotionKeys {
 
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
 
       /** Current velocity of axis F (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
@@ -232,6 +274,13 @@ object GalilMotionKeys {
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
 
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
+
       /** Current velocity of axis G (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")
 
@@ -261,6 +310,13 @@ object GalilMotionKeys {
 
       /** counts in one 360 degree revolution */
       val countsPerRevKey: Key[Float] = FloatKey.make("countsPerRev")
+
+      /**
+       * Achieved wheel slot number (1-based), set by the controller's wheel-select logic on reaching a confirmed valid position
+       * (e.g. detent inserted for pupil-mask wheels); -1 = unknown (no successful select since startup/home, or not a wheel
+       * axis).
+       */
+      val wheelPositionKey: Key[Int] = IntKey.make("wheelPosition")
 
       /** Current velocity of axis H (counts/sec). */
       val velocityKey: Key[Float] = FloatKey.make("velocity")

@@ -56,6 +56,11 @@ object HmiJsonProtocol {
       // Angular position [0,360°); non-zero only for rotating axes with countsPerRevolution set
       "angularPosition"  -> s.angularPosition.getOrElse(0.0),
       "countsPerRevolution"  -> s.countsPerRevolution.getOrElse[Double](0.0),
+      // Wheel readback (rotating mechanisms): achieved slot from the embedded #Select logic
+      // and the slot currently commanded. -1 = unknown / none. When a select governs,
+      // inPosition is (wheelPosition == commandedWheelPosition); equal values => in position.
+      "wheelPosition"          -> s.wheelPosition,
+      "commandedWheelPosition" -> s.commandedWheelPosition,
       // Soft limits (linear axes only)
       "upperLimit" -> s.upperLimit.getOrElse[Double](0.0),
       "lowerLimit" -> s.lowerLimit.getOrElse[Double](0.0),

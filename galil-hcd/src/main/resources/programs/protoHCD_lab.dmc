@@ -86,6 +86,7 @@ DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
 DM cpr[8]
+DM whlpos[8]
 aeBusy=0
 ' default the motor parameters to those in flash EEPROM
 accel[0]=_ACA
@@ -124,6 +125,7 @@ JS #fill("ae",0)
 REM setup home offset values
 REM (motion after index before setting position to 0)
 JS #fill("hoff",0); 'default to 0 home offset
+JS #fill("whlpos",-1); 'default to no achieved wheel position
 REM
 REM setup motor delay values (wait/settling times after moves before 
 REM the move is considered done - needed before MO cmd)
@@ -284,11 +286,12 @@ ae[0]=1
 ' Move rotational device A to one of 8 angular positions (like a filter wheel)
 ' each position is 45 degrees away from the next.
 ' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[0]=-1
 SPB=speed[0]
 ACB=accel[0]
 DCB=decel[0]
 SHA
-PAA=dmd[0]*(cpr[0]/8)
+PAA=(dmd[0]-1)*(cpr[0]/8)
 stime0=TIME
 BGA
 MCA
@@ -298,6 +301,7 @@ ENDIF
 etime0=TIME
 dtime0=etime0-stime0
 tcon=1000000/_TM
+whlpos[0]=dmd[0]
 MG "Motor A select #", dmd[0]," move to ",_TDA," in ", dtime0/tcon," sec"
 ae[0]=0
 EN
@@ -307,11 +311,12 @@ ae[1]=1
 ' Move rotational device B to one of 8 angular positions (like a filter wheel)
 ' each position is 45 degrees away from the next.
 ' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[1]=-1
 SPB=speed[1]
 ACB=accel[1]
 DCB=decel[1]
 SHB
-PAB=dmd[1]*(cpr[1]/8)
+PAB=(dmd[1]-1)*(cpr[1]/8)
 stime1=TIME
 BGB
 MCB
@@ -321,6 +326,7 @@ ENDIF
 etime1=TIME
 dtime1=etime1-stime1
 tcon=1000000/_TM
+whlpos[1]=dmd[1]
 MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
 ae[1]=0
 EN

@@ -46,6 +46,7 @@ MAP=(
   "$ASM_RES/TiltPlate.conf:APS/ICS/FOC/TiltPlate.conf"
   "$ASM_RES/FiberSourceStage.conf:APS/ICS/STIM/FiberSourceStage.conf"
   "$ASM_RES/PupilMaskStage.conf:APS/ICS/STIM/PupilMaskStage.conf"
+  "$ASM_RES/PshFilterWheel.conf:APS/ICS/PSH/FilterWheel.conf"
 )
 
 put() {

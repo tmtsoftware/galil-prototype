@@ -689,18 +689,23 @@ object GalilSimulatorActor {
         scheduleThreadComplete(timer, thread, 50.millis)
 
       case s if s.startsWith("Select") =>
-        // #SelectX: positions a rotating mechanism (e.g. filter wheel) to one of 8 slots.
-        // Mirrors the embedded DMC logic: PAX = dmd[idx] * (cpr[idx] / 8)
-        //   dmd[idx]  — wheel position number (0-7), set by the HCD selectWheel command
+        // #SelectX: positions a rotating mechanism (e.g. filter wheel) to one of its slots.
+        // Mirrors the embedded DMC logic: PAX = (dmd[idx] - 1) * (cpr[idx] / 8)
+        //   dmd[idx]  — 1-based wheel position number, set by the HCD selectWheel command
         //   cpr[idx]  — counts per revolution (integer, set by #SetupX / writeMotionConfig)
-        //   /8        — 8 equally-spaced slots at 45° each
+        //   /8        — 8 equally-spaced slots; the (dmd-1) makes position #1 = home angle 0
         // If cpr is 0 or unset the target falls back to dmd directly (linear/unconfigured axis).
+        // We invalidate whlpos[idx] now (the wheel is moving, not at a confirmed slot) and
+        // stash the target in _selectSlot[idx]; the arrival handler publishes whlpos[idx] on
+        // completion. This mirrors the embedded setting whlpos after MCx (with detent gating
+        // for pupil masks) and makes the HCD's slot-based inPosition go true only on arrival,
+        // not at receipt. The 1 Hz whlpos poll then reflects whlpos[idx] = dmd[idx].
         val axis = s.last
         val idx = axis - 'A'
         val wheelPos = newState.embeddedVars.getOrElse(s"dmd[$idx]", 0.0)
         val cpr      = newState.embeddedVars.getOrElse(s"cpr[$idx]", 0.0)
         val speed    = newState.embeddedVars.getOrElse(s"speed[$idx]", 10000.0)
-        val demand   = if cpr > 0.0 then wheelPos * (cpr / 8.0) else wheelPos
+        val demand   = if cpr > 0.0 then (wheelPos - 1.0) * (cpr / 8.0) else wheelPos
 
         println(s"[SIM] #Select$axis: wheel=$wheelPos, cpr=$cpr, target=$demand")
 
@@ -714,7 +719,10 @@ object GalilSimulatorActor {
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))
         newState = newState.copy(
-          embeddedVars = newState.embeddedVars + (s"_axisThread[$idx]" -> thread.toDouble)
+          embeddedVars = newState.embeddedVars
+            + (s"_axisThread[$idx]" -> thread.toDouble)
+            + (s"whlpos[$idx]" -> -1.0)
+            + (s"_selectSlot[$idx]" -> wheelPos)
         )
         ensureMotionTicking(timer)
 
@@ -1406,6 +1414,17 @@ object GalilSimulatorActor {
             newState.embeddedVars - threadKey + (s"ae[$idx]" -> 0.0)
           )
 
+          // If this completed move was a #Select, publish the achieved slot into
+          // whlpos[idx] now (mirrors the embedded setting whlpos after MCx + detent).
+          // The #Select handler leaves a _selectSlot[idx] marker; non-select moves have
+          // none and leave whlpos untouched. This makes the HCD's slot-based inPosition
+          // (wheelPosition == commandedWheelPosition) go true only on arrival.
+          newState.embeddedVars.get(s"_selectSlot[$idx]").foreach { slot =>
+            newState = newState.copy(embeddedVars =
+              newState.embeddedVars - s"_selectSlot[$idx]" + (s"whlpos[$idx]" -> slot)
+            )
+          }
+
           // Schedule thread completion — simulates MC + EN + optional mdelay
           maybeThread.foreach { thread =>
             val mdelay = newState.embeddedVars.getOrElse(s"mdelay[$idx]", 0.0)
@@ -1629,7 +1648,13 @@ object GalilSimulatorActor {
       "Atarget[0]" -> 0.0,
       "Atarget[1]" -> 0.0,
       "Btarget[0]" -> 0.0,
-      "Btarget[1]" -> 0.0
+      "Btarget[1]" -> 0.0,
+      // Achieved wheel slot per axis; -1 = unknown (no successful select yet). The HCD
+      // polls MG whlpos[idx] for its configured axes, and the generic MG array path
+      // defaults unseeded vars to 0.0 — so seed all 8 to -1.0 to preserve the -1 sentinel
+      // (matches AxisState.wheelPosition). A #Select overwrites whlpos[idx] with its slot.
+      "whlpos[0]" -> -1.0, "whlpos[1]" -> -1.0, "whlpos[2]" -> -1.0, "whlpos[3]" -> -1.0,
+      "whlpos[4]" -> -1.0, "whlpos[5]" -> -1.0, "whlpos[6]" -> -1.0, "whlpos[7]" -> -1.0
     )
     state.copy(embeddedVars = state.embeddedVars ++ defaults)
   }

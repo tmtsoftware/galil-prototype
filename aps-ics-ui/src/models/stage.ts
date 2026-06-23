@@ -27,6 +27,7 @@ export type AxisSnapshot = {
   velocity?: number
   indexed?: boolean
   inPosition?: boolean
+  wheelPositionNum?: number // rotating WHEEL assemblies only; achieved slot (-1 = unknown)
 }
 
 const firstValue = (e: Event, name: string): unknown =>
@@ -43,7 +44,8 @@ export const readAxis = (e: Event): AxisSnapshot => ({
   position: firstValue(e, 'position') as number | undefined,
   velocity: firstValue(e, 'velocity') as number | undefined,
   indexed: firstValue(e, 'indexed') as boolean | undefined,
-  inPosition: firstValue(e, 'inPosition') as boolean | undefined
+  inPosition: firstValue(e, 'inPosition') as boolean | undefined,
+  wheelPositionNum: firstValue(e, 'wheelPositionNum') as number | undefined
 })
 
 // ---- Command gating (mirrors StageAssemblyHandlers.validateCommand) ---------

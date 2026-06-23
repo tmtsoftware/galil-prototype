@@ -258,6 +258,19 @@ case class AxisState(
   motionDelay: Option[Double] = None,
   countsPerRevolution: Option[Double] = None,  // rotating axes only; read from embedded cpd[]
   axisName: Option[String] = None,             // human-readable mechanism name from config
+  // Achieved wheel slot (1-based), reported by the controller's wheel-select logic
+  // (sensor-decoded, gated on the detent for pupil-mask wheels). -1 = unknown: no
+  // successful select since startup/home, or not a wheel axis (the embedded leaves
+  // those -1). Polled from embedded whlpos[] by ControllerStatusActor and published
+  // in CurrentStateAxis.wheelPosition.
+  wheelPosition: Int = -1,
+  // Commanded wheel slot (1-based) for an in-effect selectWheel; -1 = no select governs
+  // (so inPosition reverts to the encoder-angle test). Set by handleSelectWheel and
+  // cleared automatically when any command transitions the axis to Moving/Homing without
+  // re-asserting it. While set, inPosition is driven by the embedded #Select program's
+  // declared success (wheelPosition == this slot), not the achieved angle — only the
+  // embedded can confirm the detent is engaged and the position sensors agree.
+  commandedWheelPosition: Int = -1,
   /**
    * Live PVT tracking-session ledger.  Some(_) iff axisState == Tracking; None otherwise.
    * Created on the first trackAxis arriving in Idle (StartTracking → axisState Tracking).
@@ -289,8 +302,16 @@ case class AxisState(
   /**
    * Calculate inPosition based on position, demand, and threshold.
    */
-  def calculateInPosition: Boolean = 
-    Math.abs(position - demand) <= inPositionThreshold
+  def calculateInPosition: Boolean =
+    if commandedWheelPosition >= 1 then
+      // A selectWheel governs this axis: trust the embedded #Select program's declared
+      // success — it sets whlpos (==> wheelPosition) to the commanded slot only after the
+      // detent is engaged and the position sensors confirm it. The encoder angle alone
+      // cannot establish that, so we compare slots, not counts. wheelPosition == -1
+      // (unknown / mid-move) correctly yields false until the embedded confirms arrival.
+      wheelPosition == commandedWheelPosition
+    else
+      Math.abs(position - demand) <= inPositionThreshold
 
   /**
    * Angular position in degrees [0, 360), computed from raw encoder position.
@@ -386,6 +407,8 @@ case class AxisState(
       case ("demand", v: Double) => updated = updated.copy(demand = v)
       case ("inPositionThreshold", v: Double) => updated = updated.copy(inPositionThreshold = v)
       case ("inPosition", v: Boolean) => updated = updated.copy(inPosition = v)
+      case ("wheelPosition", v: Int) => updated = updated.copy(wheelPosition = v)
+      case ("commandedWheelPosition", v: Int) => updated = updated.copy(commandedWheelPosition = v)
       // Named switch fields
       case ("forwardLimit", v: Boolean) => updated = updated.copy(forwardLimit = v)
       case ("reverseLimit", v: Boolean) => updated = updated.copy(reverseLimit = v)
@@ -437,8 +460,28 @@ case class AxisState(
         println(s"Warning: Unknown axis state field: $key = $value")
     }
     
-    // Recalculate inPosition if position or demand changed
-    if (updates.contains("position") || updates.contains("demand") || updates.contains("inPositionThreshold"))
+    // Drop the wheel-select commitment when a command starts a new motion that isn't a
+    // select. Any command transitioning the axis to Moving/Homing without re-asserting
+    // commandedWheelPosition in the same update (selectWheel is the sole exception, and it
+    // sets it) means the axis is no longer committed to a selected slot, so inPosition must
+    // revert to the encoder-angle test. Safe to key on the transition: axisState is set to
+    // Moving/Homing only by command handlers, never by the status/QR path, so this cannot
+    // misfire mid-select.
+    val startsNonSelectMotion =
+      updates.get("axisState").exists {
+        case AxisStateEnum.Moving | AxisStateEnum.Homing => true
+        case _                                           => false
+      } && !updates.contains("commandedWheelPosition")
+    if startsNonSelectMotion then
+      updated = updated.copy(commandedWheelPosition = -1)
+
+    // Recalculate inPosition whenever an input to calculateInPosition changed: the
+    // angle-test inputs (position/demand/threshold), or the slot-test inputs
+    // (wheelPosition from the embedded poll, commandedWheelPosition on select), or the
+    // commitment having just been cleared above (mode switch back to the angle test).
+    if (updates.contains("position") || updates.contains("demand") || updates.contains("inPositionThreshold")
+        || updates.contains("wheelPosition") || updates.contains("commandedWheelPosition")
+        || startsNonSelectMotion)
       updated.copy(inPosition = updated.calculateInPosition)
     else
       updated
