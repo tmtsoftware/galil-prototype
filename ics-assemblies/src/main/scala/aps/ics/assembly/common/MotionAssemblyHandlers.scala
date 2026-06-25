@@ -119,8 +119,10 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
   // ---- Mutable assembly state (TLA thread) -------------------------------
 
   protected var axes: List[AxisConfig]          = Nil
-  protected var operationalState: OperationalState = OperationalState.Faulted // until configured
-  protected var commandState: CommandState         = CommandState.Idle
+  // @volatile: read by publishTelemetry from non-TLA threads (the configure Future
+  // callback, and the K-Mirror Tracking Control Actor), written on the TLA thread.
+  @volatile protected var operationalState: OperationalState = OperationalState.Faulted // until configured
+  @volatile protected var commandState: CommandState         = CommandState.Idle
   // isOnline is inherited from ComponentHandlers (public var); we set it in
   // onGoOnline/onGoOffline and at the end of initialize().
 
@@ -237,6 +239,16 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
     }.toSet
     if names.nonEmpty then
       cs.subscribeCurrentState(names, curr => onHcdAxisState(curr))
+    // mechanism-family extra subscriptions (e.g. pupil-mask wheels: InputOutputState)
+    subscribeExtra(hcdPrefix, cs)
+
+  /** Hook for mechanism-family-specific HCD CurrentState subscriptions beyond the
+   *  common lifecycle + per-axis state. Called once per HCD as it connects, after
+   *  the lifecycle and per-axis subscriptions are established. A family that needs
+   *  extra HCD telemetry (e.g. pupil-mask wheels subscribe to InputOutputState for
+   *  the detent sensor bits) overrides this to add its own subscriptions. The
+   *  override should itself filter to the HCD(s) it cares about. Default: none. */
+  protected def subscribeExtra(hcdPrefix: String, cs: CommandService): Unit = ()
 
   private def onHcdLifecycle(hcdPrefix: String, curr: CurrentState): Unit =
     if curr.exists(Hcd.CurrentStateCurrentState.stateKey) then
@@ -269,10 +281,16 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
         )
         latestAxis = latestAxis + (a.name -> enrichAxisSnapshot(snap, curr))
         reconcileOperationalState()
+        afterAxisUpdate(a, latestAxis(a.name))
       // CommandStateAxis<x> currently unused in the first cut; subscribed for
       // future moving/activeThread tracking.
     }
     throttledPublish()
+
+  /** Hook: called after each axis snapshot update with the fresh snapshot. Default
+   *  no-op; the K-Mirror overrides it to feed live position to its Tracking Control
+   *  Actor for tracking convergence detection. */
+  protected def afterAxisUpdate(a: AxisConfig, snap: AxisSnapshot): Unit = ()
 
   /** Hook for mechanism-family-specific CurrentStateAxis fields. The base folds
    *  the common axis keys (position/velocity/state/inPosition/homed/error) into

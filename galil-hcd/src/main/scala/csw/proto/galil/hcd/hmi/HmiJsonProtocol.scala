@@ -2,6 +2,7 @@ package csw.proto.galil.hcd.hmi
 
 import csw.prefix.models.Prefix
 import csw.proto.galil.hcd._
+import csw.time.core.models.TAITime
 import play.api.libs.json._
 
 /**
@@ -17,14 +18,16 @@ object HmiJsonProtocol {
 
   private def axisStateToJson(s: AxisState): JsObject = {
     // Tracking-session ledger: serialize as a nested object when present so the
-    // HMI telemetry panel can render fields directly.  ISO-8601 timestamps are
-    // formatted UTC; the HMI computes "age vs now" client-side.  Outside of
-    // Tracking, this serializes as JsNull so the HMI can detect "no session".
+    // HMI telemetry panel can render fields directly.  The ledger stores TAI
+    // instants (matching trackAxis validTime); the HMI computes "age vs now"
+    // client-side against the browser's UTC clock, so convert TAI -> UTC here at
+    // the display boundary (else age/run carry the ~37s TAI-UTC offset).  Outside
+    // of Tracking, this serializes as JsNull so the HMI can detect "no session".
     val trackingSessionJson: JsValue = s.trackingSession match {
       case Some(ts) => Json.obj(
         "lastTargetCounts"   -> ts.lastTargetCounts,
-        "lastValidTime"      -> ts.lastValidTime.toString,
-        "btFiredAt"          -> ts.btFiredAt.toString,
+        "lastValidTime"      -> TAITime(ts.lastValidTime).toUTC.value.toString,
+        "btFiredAt"          -> TAITime(ts.btFiredAt).toUTC.value.toString,
         "segmentsSubmitted"  -> ts.segmentsSubmitted
       )
       case None => JsNull

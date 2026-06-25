@@ -11,6 +11,7 @@ import java.time.Instant
 import scala.concurrent.duration._
 import scala.util.Try
 import csw.proto.galil.hcd.HcdStateEnum
+import csw.time.core.models.TAITime
 
 /**
  * ControllerStatusActor (SDD Section 4.6.5)
@@ -763,7 +764,7 @@ class ControllerStatusActor(
       // The observedAt timestamp is captured close to the read so the IS-side
       // TAI comparison uses the moment the controller actually responded.
       if trackingAxes.nonEmpty then
-        val pvtObservedAt = java.time.Instant.now()
+        val pvtObservedAt = TAITime.now().value
         val pvtReadings = readPvtMonitoring(trackingAxes)
         if pvtReadings.nonEmpty then
           internalState ! InternalStateActor.ReportPvtMonitoring(pvtReadings, pvtObservedAt)

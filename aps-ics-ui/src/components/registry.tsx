@@ -92,6 +92,54 @@ import {
   PSHFW_PREFIX_STR
 } from '../models/pshFilterWheel'
 
+import { PitFilterWheelCommands } from './PitFilterWheelCommands'
+import { PitFilterWheelStatus } from './PitFilterWheelStatus'
+import {
+  STATUS_EVENT as PITFW_STATUS_EVENT,
+  AXIS_EVENT as PITFW_AXIS_EVENT,
+  PITFW_COMPONENT_ID,
+  PITFW_CONFIG_PATH,
+  PITFW_CONFIG_VIEW,
+  PITFW_PREFIX,
+  PITFW_PREFIX_STR
+} from '../models/pitFilterWheel'
+
+import { AptFilterWheelCommands } from './AptFilterWheelCommands'
+import { AptFilterWheelStatus } from './AptFilterWheelStatus'
+import {
+  STATUS_EVENT as APTFW_STATUS_EVENT,
+  AXIS_EVENT as APTFW_AXIS_EVENT,
+  APTFW_COMPONENT_ID,
+  APTFW_CONFIG_PATH,
+  APTFW_CONFIG_VIEW,
+  APTFW_PREFIX,
+  APTFW_PREFIX_STR
+} from '../models/aptFilterWheel'
+
+import { PshPupilMaskWheelCommands } from './PshPupilMaskWheelCommands'
+import { PshPupilMaskWheelStatus } from './PshPupilMaskWheelStatus'
+import {
+  STATUS_EVENT as PSHPMW_STATUS_EVENT,
+  AXIS_EVENT as PSHPMW_AXIS_EVENT,
+  PSHPMW_COMPONENT_ID,
+  PSHPMW_CONFIG_PATH,
+  PSHPMW_CONFIG_VIEW,
+  PSHPMW_PREFIX,
+  PSHPMW_PREFIX_STR
+} from '../models/pshPupilMaskWheel'
+
+import { PitPupilMaskWheelCommands } from './PitPupilMaskWheelCommands'
+import { PitPupilMaskWheelStatus } from './PitPupilMaskWheelStatus'
+import {
+  STATUS_EVENT as PITPMW_STATUS_EVENT,
+  AXIS_EVENT as PITPMW_AXIS_EVENT,
+  PITPMW_COMPONENT_ID,
+  PITPMW_CONFIG_PATH,
+  PITPMW_CONFIG_VIEW,
+  PITPMW_PREFIX,
+  PITPMW_PREFIX_STR
+} from '../models/pitPupilMaskWheel'
+
 import { PitFocusStageCommands } from './PitFocusStageCommands'
 import { PitFocusStageStatus } from './PitFocusStageStatus'
 import {
@@ -128,6 +176,18 @@ import {
   TP_PREFIX,
   TP_PREFIX_STR
 } from '../models/tiltPlate'
+
+import { FocKMirrorCommands } from './FocKMirrorCommands'
+import { FocKMirrorStatus } from './FocKMirrorStatus'
+import {
+  STATUS_EVENT as KM_STATUS_EVENT,
+  AXIS_EVENT as KM_AXIS_EVENT,
+  KM_COMPONENT_ID,
+  KM_CONFIG_PATH,
+  KM_CONFIG_VIEW,
+  KM_PREFIX,
+  KM_PREFIX_STR
+} from '../models/focKMirror'
 
 import { FiberSourceStageCommands } from './FiberSourceStageCommands'
 import { FiberSourceStageStatus } from './FiberSourceStageStatus'
@@ -315,6 +375,23 @@ const pshFilterWheel: ComponentDescriptor = {
   )
 }
 
+const pshPupilMaskWheel: ComponentDescriptor = {
+  key: PSHPMW_PREFIX_STR,
+  label: 'PSH Pupil Mask Wheel',
+  prefix: PSHPMW_PREFIX,
+  componentId: PSHPMW_COMPONENT_ID,
+  configPath: PSHPMW_CONFIG_PATH,
+  staticConfig: PSHPMW_CONFIG_VIEW,
+  statusEvent: PSHPMW_STATUS_EVENT,
+  axisEvents: [PSHPMW_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PshPupilMaskWheelCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PshPupilMaskWheelStatus status={p.status} axis={p.axes[PSHPMW_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
 const pitFocusStage: ComponentDescriptor = {
   key: PITFS_PREFIX_STR,
   label: 'PIT Focus Stage',
@@ -332,6 +409,40 @@ const pitFocusStage: ComponentDescriptor = {
   )
 }
 
+const pitFilterWheel: ComponentDescriptor = {
+  key: PITFW_PREFIX_STR,
+  label: 'PIT Filter Wheel',
+  prefix: PITFW_PREFIX,
+  componentId: PITFW_COMPONENT_ID,
+  configPath: PITFW_CONFIG_PATH,
+  staticConfig: PITFW_CONFIG_VIEW,
+  statusEvent: PITFW_STATUS_EVENT,
+  axisEvents: [PITFW_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PitFilterWheelCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PitFilterWheelStatus status={p.status} axis={p.axes[PITFW_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
+const pitPupilMaskWheel: ComponentDescriptor = {
+  key: PITPMW_PREFIX_STR,
+  label: 'PIT Pupil Mask Wheel',
+  prefix: PITPMW_PREFIX,
+  componentId: PITPMW_COMPONENT_ID,
+  configPath: PITPMW_CONFIG_PATH,
+  staticConfig: PITPMW_CONFIG_VIEW,
+  statusEvent: PITPMW_STATUS_EVENT,
+  axisEvents: [PITPMW_AXIS_EVENT],
+  renderCommands: (p) => (
+    <PitPupilMaskWheelCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <PitPupilMaskWheelStatus status={p.status} axis={p.axes[PITPMW_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
 const aptFocusStage: ComponentDescriptor = {
   key: APTFS_PREFIX_STR,
   label: 'APT Focus Stage',
@@ -346,6 +457,23 @@ const aptFocusStage: ComponentDescriptor = {
   ),
   renderStatus: (p) => (
     <AptFocusStageStatus status={p.status} axis={p.axes[APTFS_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
+  )
+}
+
+const aptFilterWheel: ComponentDescriptor = {
+  key: APTFW_PREFIX_STR,
+  label: 'APT Filter Wheel',
+  prefix: APTFW_PREFIX,
+  componentId: APTFW_COMPONENT_ID,
+  configPath: APTFW_CONFIG_PATH,
+  staticConfig: APTFW_CONFIG_VIEW,
+  statusEvent: APTFW_STATUS_EVENT,
+  axisEvents: [APTFW_AXIS_EVENT],
+  renderCommands: (p) => (
+    <AptFilterWheelCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <AptFilterWheelStatus status={p.status} axis={p.axes[APTFW_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
   )
 }
 
@@ -368,6 +496,23 @@ const tiltPlate: ComponentDescriptor = {
       yAxis={p.axes[TP_Y_AXIS_EVENT] ?? {}}
       lifecycle={p.lifecycle}
     />
+  )
+}
+
+const focKMirror: ComponentDescriptor = {
+  key: KM_PREFIX_STR,
+  label: 'K-Mirror',
+  prefix: KM_PREFIX,
+  componentId: KM_COMPONENT_ID,
+  configPath: KM_CONFIG_PATH,
+  staticConfig: KM_CONFIG_VIEW,
+  statusEvent: KM_STATUS_EVENT,
+  axisEvents: [KM_AXIS_EVENT],
+  renderCommands: (p) => (
+    <FocKMirrorCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => (
+    <FocKMirrorStatus status={p.status} axis={p.axes[KM_AXIS_EVENT] ?? {}} lifecycle={p.lifecycle} />
   )
 }
 
@@ -429,9 +574,14 @@ export const DESCRIPTORS: ComponentDescriptor[] = [
   calibrationSourceStage,
   pshFocusStage,
   pshFilterWheel,
+  pshPupilMaskWheel,
   pitFocusStage,
+  pitFilterWheel,
+  pitPupilMaskWheel,
   aptFocusStage,
+  aptFilterWheel,
   tiltPlate,
+  focKMirror,
   fiberSourceStage,
   pupilMaskStage
 ]

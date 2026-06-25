@@ -9,6 +9,7 @@ import csw.params.commands.CommandResponse.{Completed, Error}
 import csw.params.commands.Setup
 import csw.params.core.models.{Id, ObsId}
 import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`._
+import csw.time.core.models.TAITime
 
 import java.time.Instant
 import scala.concurrent.Await
@@ -1768,7 +1769,7 @@ object CommandHandlerActor {
     //     from rest.
     //   - Tracking (subsequent segment): prev endpoint and prev validTime come from
     //     the trackingSession ledger.
-    val nowInstant = java.time.Instant.now()
+    val nowInstant = TAITime.now().value
     val (prevEndpointCounts, prevValidTime, isFirstSegment): (Long, Instant, Boolean) =
       axisState.trackingSession match {
         case Some(s) => (s.lastTargetCounts, s.lastValidTime, false)

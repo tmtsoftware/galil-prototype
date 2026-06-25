@@ -18,6 +18,11 @@ import { CU_PREFIX_STR } from '../models/collimatorUnit'
 import { CSS_PREFIX_STR } from '../models/calibrationSourceStage'
 import { PSHFS_PREFIX_STR } from '../models/pshFocusStage'
 import { PSHFW_PREFIX_STR } from '../models/pshFilterWheel'
+import { PITFW_PREFIX_STR } from '../models/pitFilterWheel'
+import { APTFW_PREFIX_STR } from '../models/aptFilterWheel'
+import { PSHPMW_PREFIX_STR } from '../models/pshPupilMaskWheel'
+import { PITPMW_PREFIX_STR } from '../models/pitPupilMaskWheel'
+import { KM_PREFIX_STR } from '../models/focKMirror'
 import { PITFS_PREFIX_STR } from '../models/pitFocusStage'
 import { APTFS_PREFIX_STR } from '../models/aptFocusStage'
 import { TP_PREFIX_STR } from '../models/tiltPlate'
@@ -32,19 +37,19 @@ const treeData: DataNode[] = [
     key: 'grp-psh',
     title: 'PSH assemblies',
     selectable: false,
-    children: [ph('psh-pmw', 'Pupil Mask Wheel'), { key: PSHFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
+    children: [{ key: PSHPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PSHFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
   },
   {
     key: 'grp-pit',
     title: 'PIT assemblies',
     selectable: false,
-    children: [ph('pit-pmw', 'Pupil Mask Wheel'), ph('pit-fw', 'Filter Wheel'), { key: PITFS_PREFIX_STR, title: 'Focus Stage' }, ph('pit-det', 'Detector')]
+    children: [{ key: PITPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PITFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PITFS_PREFIX_STR, title: 'Focus Stage' }, ph('pit-det', 'Detector')]
   },
   {
     key: 'grp-apt',
     title: 'APT assemblies',
     selectable: false,
-    children: [ph('apt-fw', 'Filter Wheel'), { key: APTFS_PREFIX_STR, title: 'Focus Stage' }, ph('apt-det', 'Detector')]
+    children: [{ key: APTFW_PREFIX_STR, title: 'Filter Wheel' }, { key: APTFS_PREFIX_STR, title: 'Focus Stage' }, ph('apt-det', 'Detector')]
   },
   { key: 'grp-lowfw', title: 'LOWFW assemblies', disabled: true, children: [ph('lowfw-x', '—')] },
   {
@@ -55,7 +60,7 @@ const treeData: DataNode[] = [
       // Live this session — all share Galil HCD 2 (SDD Fig 2-2).
       { key: SBS_PREFIX_STR, title: 'Steering Beam Splitter' },
       { key: CSS_PREFIX_STR, title: 'Calibration Source Stage' },
-      ph('foc-kmirror', 'K-Mirror'),
+      { key: KM_PREFIX_STR, title: 'K-Mirror' },
       { key: CU_PREFIX_STR, title: 'Collimator' },
       { key: TP_PREFIX_STR, title: 'Tilt Plate' }
     ]

@@ -47,6 +47,11 @@ MAP=(
   "$ASM_RES/FiberSourceStage.conf:APS/ICS/STIM/FiberSourceStage.conf"
   "$ASM_RES/PupilMaskStage.conf:APS/ICS/STIM/PupilMaskStage.conf"
   "$ASM_RES/PshFilterWheel.conf:APS/ICS/PSH/FilterWheel.conf"
+  "$ASM_RES/PitFilterWheel.conf:APS/ICS/PIT/FilterWheel.conf"
+  "$ASM_RES/AptFilterWheel.conf:APS/ICS/APT/FilterWheel.conf"
+  "$ASM_RES/PshPupilMaskWheel.conf:APS/ICS/PSH/PupilMaskWheel.conf"
+  "$ASM_RES/PitPupilMaskWheel.conf:APS/ICS/PIT/PupilMaskWheel.conf"
+  "$ASM_RES/FocKMirror.conf:APS/ICS/FOC/KMirror.conf"
 )
 
 put() {

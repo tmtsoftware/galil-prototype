@@ -20,6 +20,9 @@ export type StatusSnapshot = {
   assemblyState?: string
   hcdState?: string
   commandState?: string
+  mode?: string // K-Mirror only: MANUAL | SLEWING | TRACKING
+  slewModeState?: string // K-Mirror only: NOT_SLEWING | SLEWING | SLEW_COMPLETE
+  trackingModeState?: string // K-Mirror only: NOT_TRACKING | NOT_CONVERGED | CONVERGED | ...
 }
 export type AxisSnapshot = {
   axisState?: string
@@ -28,6 +31,7 @@ export type AxisSnapshot = {
   indexed?: boolean
   inPosition?: boolean
   wheelPositionNum?: number // rotating WHEEL assemblies only; achieved slot (-1 = unknown)
+  detentState?: string // pupil-mask WHEEL assemblies only; EXTENDED | RETRACTED | OUT OF POSITION
 }
 
 const firstValue = (e: Event, name: string): unknown =>
@@ -36,7 +40,10 @@ const firstValue = (e: Event, name: string): unknown =>
 export const readStatus = (e: Event): StatusSnapshot => ({
   assemblyState: firstValue(e, 'assemblyState') as string | undefined,
   hcdState: firstValue(e, 'hcdState') as string | undefined,
-  commandState: firstValue(e, 'commandState') as string | undefined
+  commandState: firstValue(e, 'commandState') as string | undefined,
+  mode: firstValue(e, 'mode') as string | undefined,
+  slewModeState: firstValue(e, 'slewModeState') as string | undefined,
+  trackingModeState: firstValue(e, 'trackingModeState') as string | undefined
 })
 
 export const readAxis = (e: Event): AxisSnapshot => ({
@@ -45,7 +52,8 @@ export const readAxis = (e: Event): AxisSnapshot => ({
   velocity: firstValue(e, 'velocity') as number | undefined,
   indexed: firstValue(e, 'indexed') as boolean | undefined,
   inPosition: firstValue(e, 'inPosition') as boolean | undefined,
-  wheelPositionNum: firstValue(e, 'wheelPositionNum') as number | undefined
+  wheelPositionNum: firstValue(e, 'wheelPositionNum') as number | undefined,
+  detentState: firstValue(e, 'detentState') as string | undefined
 })
 
 // ---- Command gating (mirrors StageAssemblyHandlers.validateCommand) ---------

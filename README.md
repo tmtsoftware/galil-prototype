@@ -1,15 +1,36 @@
-# Galil Motion HCD Prototype
+# APS-ICS Galil Prototype
 
-A prototype Hardware Control Daemon (HCD) for Galil motion controllers, built with
-the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw)) framework.
+A working prototype for the TMT Alignment and Phasing System (APS) Instrument Control
+Software (ICS), built on the TMT Common Software ([CSW](https://github.com/tmtsoftware/csw))
+framework. It implements three layers end to end:
 
-This is a working prototype for the TMT Alignment and Phasing System (APS)
-Instrument Control Software (ICS), implementing the CSW interface to Galil DMC-500x0 controllers.
+- **GalilMotion HCD** (`galil-hcd`) — a thin CSW Hardware Control Daemon that drives
+  Galil DMC-500x0 motion controllers and publishes their state.
+- **ICS Assemblies** (`ics-assemblies`) — the full set of APS motion assemblies (APT,
+  FO&C, PIT, PSH, STIM mechanisms, including the tracking K-Mirror) on a shared base,
+  each exposing a high-level CSW ICD command interface on top of the HCD.
+- **Engineering UI** (`aps-ics-ui`) — a React/esw-ts web UI for commanding and
+  monitoring every assembly.
 
-## Architecture
+```
+   Sequencer / CSW client / Engineering UI (aps-ics-ui)
+            │  CSW ICD commands + events
+            ▼
+   ICS Assemblies (ics-assemblies)   — 16 assemblies on a shared MotionAssemblyHandlers base
+            │  HCD command set + CurrentState
+            ▼
+   GalilMotion HCD (galil-hcd)       — one HCD per Galil controller
+            │  Galil command set (TCP/UDP)
+            ▼
+   Galil DMC-500x0 controllers (or simulator)
+```
 
 The HCD is a **thin orchestrator** — motion algorithms live in embedded DMC programs
-on the Galil controller, not in the HCD. The HCD's responsibilities are:
+on the Galil controller, not in the HCD.
+
+## HCD Architecture
+
+The HCD's responsibilities are:
 
 - Load and verify embedded programs on the controller
 - Write motion configuration to the controller's embedded variable arrays
@@ -49,8 +70,10 @@ re-establishes connections (when needed) and clears the latched fault.
 | Module | Description |
 |--------|-------------|
 | **galil-hcd** | HCD implementation — actor architecture, command handling, state management, embedded program verification, fault recovery, embedded HMI |
+| **ics-assemblies** | The APS ICS motion assemblies (APT, FO&C, PIT, PSH, STIM; 16 in all, including the tracking K-Mirror) on a shared `MotionAssemblyHandlers` base, plus a TCS PupilRotation simulator |
+| **aps-ics-ui** | React / esw-ts engineering UI for commanding and monitoring every assembly |
 | **galil-io** | Low-level Galil communication library (TCP/UDP, binary QR DataRecord parsing) |
-| **galil-assembly** | Assembly that talks to the Galil HCD |
+| **galil-assembly** | Early single-assembly example that talks to the Galil HCD (superseded by `ics-assemblies`) |
 | **galil-client** | Client applications for the Galil assembly or HCD |
 | **galil-simulator** | Galil device simulator (motion emulation, thread management, QR DataRecords, `_XQ`/`ae[]` lifecycle) |
 | **galil-repl** | Interactive command-line client for direct Galil commands |
@@ -136,6 +159,28 @@ sbt stage
 
 See the [galil-hcd README](galil-hcd/) for the full set of configuration files,
 test instructions, command documentation, fault recovery details, and HMI features.
+
+## ICS Assemblies
+
+The 16 APS motion assemblies live in `ics-assemblies`, each exposing a high-level CSW
+ICD on top of the HCD. They share a common `MotionAssemblyHandlers` base (lifecycle,
+HCD location tracking, the operational/command state machine, error recovery, and
+telemetry) with three specializations: linear/single-axis **stages**, indexed
+**filter wheels**, and **pupil-mask wheels**; the continuous-rotation **K-Mirror**
+extends the base directly and adds TCS-driven slewing and tracking.
+
+They run together in one container (`IcsContainerApp` / `IcsAssembliesContainer.conf`)
+or individually for bring-up. A standalone TCS PupilRotation simulator exercises the
+K-Mirror without a real TCS. See the [ics-assemblies README](ics-assemblies/) for the
+assembly inventory, controller bindings, state model, error handling, the K-Mirror
+tracking design, and run instructions.
+
+## Engineering UI
+
+`aps-ics-ui` is a React / [esw-ts](https://github.com/tmtsoftware/esw-ts) web UI for
+commanding and monitoring every assembly: a descriptor-driven registry maps each
+assembly to its command/status panels, with live telemetry, a config view, and a
+command/event log. See the [aps-ics-ui README](aps-ics-ui/).
 
 ## References
 
