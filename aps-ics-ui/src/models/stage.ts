@@ -23,6 +23,9 @@ export type StatusSnapshot = {
   mode?: string // K-Mirror only: MANUAL | SLEWING | TRACKING
   slewModeState?: string // K-Mirror only: NOT_SLEWING | SLEWING | SLEW_COMPLETE
   trackingModeState?: string // K-Mirror only: NOT_TRACKING | NOT_CONVERGED | CONVERGED | ...
+  coolingHealth?: string // detector only: Good | Degraded | Bad
+  cameraPresent?: boolean // detector only
+  cameraAcquisitionState?: string // detector only: IDLE | BUSY | STREAMING | PAUSED | FAULT | RECOVERING
 }
 export type AxisSnapshot = {
   axisState?: string
@@ -43,7 +46,10 @@ export const readStatus = (e: Event): StatusSnapshot => ({
   commandState: firstValue(e, 'commandState') as string | undefined,
   mode: firstValue(e, 'mode') as string | undefined,
   slewModeState: firstValue(e, 'slewModeState') as string | undefined,
-  trackingModeState: firstValue(e, 'trackingModeState') as string | undefined
+  trackingModeState: firstValue(e, 'trackingModeState') as string | undefined,
+  coolingHealth: firstValue(e, 'coolingHealth') as string | undefined,
+  cameraPresent: firstValue(e, 'cameraPresent') as boolean | undefined,
+  cameraAcquisitionState: firstValue(e, 'cameraAcquisitionState') as string | undefined
 })
 
 export const readAxis = (e: Event): AxisSnapshot => ({
@@ -64,7 +70,7 @@ export const readAxis = (e: Event): AxisSnapshot => ({
 //  Operational    -> motion commands
 //
 // Each assembly maps its own command names onto one of three kinds.
-export type CmdKind = 'configHome' | 'motion' | 'abort'
+export type CmdKind = 'configHome' | 'motion' | 'abort' | 'stop'
 
 export const gateByKind = (
   kind: CmdKind,
@@ -72,11 +78,22 @@ export const gateByKind = (
   ready: boolean,
   busy: boolean
 ): boolean => {
-  if (!ready || busy) return false
+  if (!ready) return false
   if (s.assemblyState === 'FAULTED') return false
+
+  // stop and abortErrorRecovery are out-of-band: reachable even while a command is
+  // in flight (busy), mirroring the assembly, which now accepts stop during
+  // Processing and abortErrorRecovery during Error Recovery.
+  if (kind === 'stop')
+    // Interrupts an in-flight move. Only meaningful once homed — the assembly
+    // rejects stop while Pre-Homed (no motion to halt) and while Faulted.
+    return s.assemblyState === 'OPERATIONAL' || s.assemblyState === 'DEGRADED'
+  if (kind === 'abort') return s.commandState === 'ERROR_RECOVERY'
+
+  // Normal commands are isolated while a command is in flight (SDD §6.1.3.3.2).
+  if (busy) return false
   if (s.commandState === 'PROCESSING') return false
-  if (s.commandState === 'ERROR_RECOVERY') return kind === 'abort'
-  if (kind === 'abort') return false
+  if (s.commandState === 'ERROR_RECOVERY') return false
   if (kind === 'configHome') return true
   return s.assemblyState === 'OPERATIONAL' // motion commands require a homed axis
 }

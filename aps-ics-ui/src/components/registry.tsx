@@ -219,6 +219,59 @@ import {
   PMS_PREFIX_STR
 } from '../models/pupilMaskStage'
 
+import { AptDetectorCommands } from './AptDetectorCommands'
+import { AptDetectorStatus } from './AptDetectorStatus'
+import {
+  STATUS_EVENT as APT_STATUS_EVENT,
+  TEMPERATURE_EVENT as APT_TEMPERATURE_EVENT,
+  SETUP_EVENT as APT_SETUP_EVENT,
+  CONFIG_EVENT as APT_CONFIG_EVENT,
+  GUIDING_EVENT as APT_GUIDING_EVENT,
+  readTemperature as aptReadTemperature,
+  readSetup as aptReadSetup,
+  readConfig as aptReadConfig,
+  readGuiding as aptReadGuiding,
+  APT_COMPONENT_ID,
+  APT_CONFIG_PATH,
+  APT_CONFIG_VIEW,
+  APT_PREFIX,
+  APT_PREFIX_STR
+} from '../models/aptDetector'
+
+import { PitDetectorCommands } from './PitDetectorCommands'
+import { PitDetectorStatus } from './PitDetectorStatus'
+import {
+  STATUS_EVENT as PIT_STATUS_EVENT,
+  TEMPERATURE_EVENT as PIT_TEMPERATURE_EVENT,
+  SETUP_EVENT as PIT_SETUP_EVENT,
+  CONFIG_EVENT as PIT_CONFIG_EVENT,
+  readTemperature as pitReadTemperature,
+  readSetup as pitReadSetup,
+  readConfig as pitReadConfig,
+  PIT_COMPONENT_ID,
+  PIT_CONFIG_PATH,
+  PIT_CONFIG_VIEW,
+  PIT_PREFIX,
+  PIT_PREFIX_STR
+} from '../models/pitDetector'
+
+import { PshDetectorCommands } from './PshDetectorCommands'
+import { PshDetectorStatus } from './PshDetectorStatus'
+import {
+  STATUS_EVENT as PSH_STATUS_EVENT,
+  TEMPERATURE_EVENT as PSH_TEMPERATURE_EVENT,
+  SETUP_EVENT as PSH_SETUP_EVENT,
+  CONFIG_EVENT as PSH_CONFIG_EVENT,
+  readTemperature as pshReadTemperature,
+  readSetup as pshReadSetup,
+  readConfig as pshReadConfig,
+  PSH_COMPONENT_ID,
+  PSH_CONFIG_PATH,
+  PSH_CONFIG_VIEW,
+  PSH_PREFIX,
+  PSH_PREFIX_STR
+} from '../models/pshDetector'
+
 // esw-ts exports Prefix/ComponentId as classes; type them off the model values
 // so this compiles both against the real package and the stubbed harness.
 type PrefixT = typeof IS_PREFIX
@@ -567,6 +620,95 @@ const pupilMaskStage: ComponentDescriptor = {
   )
 }
 
+const aptDetector: ComponentDescriptor = {
+  key: APT_PREFIX_STR,
+  label: 'APT Detector',
+  prefix: APT_PREFIX,
+  componentId: APT_COMPONENT_ID,
+  configPath: APT_CONFIG_PATH,
+  staticConfig: APT_CONFIG_VIEW,
+  statusEvent: APT_STATUS_EVENT,
+  axisEvents: [],
+  extraEvents: [APT_TEMPERATURE_EVENT, APT_SETUP_EVENT, APT_CONFIG_EVENT, APT_GUIDING_EVENT],
+  renderCommands: (p) => (
+    <AptDetectorCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => {
+    const t = p.extras[APT_TEMPERATURE_EVENT]
+    const s = p.extras[APT_SETUP_EVENT]
+    const c = p.extras[APT_CONFIG_EVENT]
+    const g = p.extras[APT_GUIDING_EVENT]
+    return (
+      <AptDetectorStatus
+        status={p.status}
+        temperature={t ? aptReadTemperature(t) : {}}
+        setup={s ? aptReadSetup(s) : {}}
+        config={c ? aptReadConfig(c) : {}}
+        guiding={g ? aptReadGuiding(g) : {}}
+        lifecycle={p.lifecycle}
+      />
+    )
+  }
+}
+
+const pitDetector: ComponentDescriptor = {
+  key: PIT_PREFIX_STR,
+  label: 'PIT Detector',
+  prefix: PIT_PREFIX,
+  componentId: PIT_COMPONENT_ID,
+  configPath: PIT_CONFIG_PATH,
+  staticConfig: PIT_CONFIG_VIEW,
+  statusEvent: PIT_STATUS_EVENT,
+  axisEvents: [],
+  extraEvents: [PIT_TEMPERATURE_EVENT, PIT_SETUP_EVENT, PIT_CONFIG_EVENT],
+  renderCommands: (p) => (
+    <PitDetectorCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => {
+    const t = p.extras[PIT_TEMPERATURE_EVENT]
+    const s = p.extras[PIT_SETUP_EVENT]
+    const c = p.extras[PIT_CONFIG_EVENT]
+    return (
+      <PitDetectorStatus
+        status={p.status}
+        temperature={t ? pitReadTemperature(t) : {}}
+        setup={s ? pitReadSetup(s) : {}}
+        config={c ? pitReadConfig(c) : {}}
+        lifecycle={p.lifecycle}
+      />
+    )
+  }
+}
+
+const pshDetector: ComponentDescriptor = {
+  key: PSH_PREFIX_STR,
+  label: 'PSH Detector',
+  prefix: PSH_PREFIX,
+  componentId: PSH_COMPONENT_ID,
+  configPath: PSH_CONFIG_PATH,
+  staticConfig: PSH_CONFIG_VIEW,
+  statusEvent: PSH_STATUS_EVENT,
+  axisEvents: [],
+  extraEvents: [PSH_TEMPERATURE_EVENT, PSH_SETUP_EVENT, PSH_CONFIG_EVENT],
+  renderCommands: (p) => (
+    <PshDetectorCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => {
+    const t = p.extras[PSH_TEMPERATURE_EVENT]
+    const s = p.extras[PSH_SETUP_EVENT]
+    const c = p.extras[PSH_CONFIG_EVENT]
+    return (
+      <PshDetectorStatus
+        status={p.status}
+        temperature={t ? pshReadTemperature(t) : {}}
+        setup={s ? pshReadSetup(s) : {}}
+        config={c ? pshReadConfig(c) : {}}
+        lifecycle={p.lifecycle}
+      />
+    )
+  }
+}
+
 export const DESCRIPTORS: ComponentDescriptor[] = [
   insertionStage,
   steeringBeamSplitter,
@@ -575,11 +717,14 @@ export const DESCRIPTORS: ComponentDescriptor[] = [
   pshFocusStage,
   pshFilterWheel,
   pshPupilMaskWheel,
+  pshDetector,
   pitFocusStage,
   pitFilterWheel,
   pitPupilMaskWheel,
+  pitDetector,
   aptFocusStage,
   aptFilterWheel,
+  aptDetector,
   tiltPlate,
   focKMirror,
   fiberSourceStage,

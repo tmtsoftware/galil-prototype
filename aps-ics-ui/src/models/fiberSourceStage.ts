@@ -103,7 +103,9 @@ const kindOf = (cmd: CmdName): CmdKind =>
     ? 'configHome'
     : cmd === 'abortErrorRecovery'
       ? 'abort'
-      : 'motion'
+      : cmd === 'stop'
+        ? 'stop'
+        : 'motion'
 
 export const commandEnabled = (
   cmd: CmdName,

@@ -140,6 +140,11 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
   @volatile private var configured: Boolean = false
   // set by abortErrorRecovery; checked by an in-flight recovery attempt
   private val abortRequested = new AtomicBoolean(false)
+  // set by stop; checked by an in-flight command so a deliberate interruption
+  // terminates as Cancelled instead of being treated as a recoverable axis error.
+  // Distinct from abortRequested: stop halts motion in progress (Processing),
+  // whereas abortErrorRecovery only bails an active recovery (ErrorRecovery).
+  private val stopRequested = new AtomicBoolean(false)
   // alarm raised while the HCD this assembly depends on is Faulted
   private val hcdFaultedAlarm = AlarmKey(assemblyPrefix, "hcdFaulted")
   // throttle telemetry to the SDD rate (1 Hz online, 30 s offline)
@@ -353,9 +358,15 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
       case _ => // Operational / Degraded accept all
     // Command-state gate (SDD §6.1.3.3)
     commandState match
-      case CommandState.Processing =>
+      case CommandState.Processing if name != "stop" =>
+        // Processing isolates normal commands (SDD §6.1.3.3.2), but `stop` is the
+        // one command allowed to interrupt an in-flight command — otherwise a stop
+        // could never halt motion already in progress. It is handled out-of-band in
+        // onSubmit and forces the in-flight command to resolve Cancelled.
         return Invalid(runId, CommandIssue.WrongInternalStateIssue(s"$assemblyPrefix busy (Processing)"))
       case CommandState.ErrorRecovery if name != "abortErrorRecovery" =>
+        // During recovery the escape is abortErrorRecovery (which also halts the
+        // axis), not stop — keeps the two concerns distinct (SDD §6.1.3.3.3).
         return Invalid(runId, CommandIssue.WrongInternalStateIssue(
           s"$assemblyPrefix in Error Recovery; only abortErrorRecovery accepted"))
       case _ =>
@@ -382,7 +393,34 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
         val _ = runStop() // fire-and-forget halt
         Completed(runId)
 
+      // stop is the one command that may interrupt an in-flight command. It is
+      // handled out-of-band (like abortErrorRecovery) so it does not take the
+      // Processing slot itself: it flags the in-flight command to terminate as
+      // Cancelled (see withRecovery), halts every axis, and resolves when the halt
+      // completes. commandState is driven by the interrupted command's resolution
+      // (or stays Idle if nothing was in flight), not by stop.
+      case s: Setup if s.commandName.name == "stop" =>
+        log.info(s"$assemblyPrefix: stop — interrupting any in-flight command and halting axes")
+        stopRequested.set(true)
+        runStop().onComplete { tryResp =>
+          val resp = tryResp.getOrElse(Error(runId, s"stop failed: ${tryResp.failed.get.getMessage}"))
+          val stamped: SubmitResponse = resp match
+            case _: Completed => Completed(runId)
+            case e: Error     => Error(runId, e.message)
+            case i: Invalid   => Invalid(runId, i.issue)
+            case _: Cancelled => Cancelled(runId)
+            case _: Locked    => Locked(runId)
+            case other        => Error(runId, s"stop failed: $other")
+          commandResponseManager.updateCommand(stamped)
+          publishTelemetry()
+        }
+        Started(runId)
+
       case s: Setup =>
+        // A fresh normal command clears any prior stop signal (only one normal
+        // command is in flight at a time, and stop is handled above, so this is the
+        // safe reset point).
+        stopRequested.set(false)
         commandState = CommandState.Processing
         publishTelemetry()
         val name = s.commandName.name
@@ -437,7 +475,12 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
    *  attempt. Non-axis-error failures (e.g. a soft-limit Invalid) pass through. */
   private def withRecovery(runId: Id, dispatch: () => Future[SubmitResponse]): Future[SubmitResponse] =
     dispatch().flatMap { resp =>
-      if isRecoverableFailure(resp) then
+      if stopRequested.get() then
+        // A stop interrupted this command on purpose: terminate as Cancelled and do
+        // NOT treat the interruption Error as a recoverable axis fault (which would
+        // re-issue the move and fight the stop).
+        Future.successful(Cancelled(runId))
+      else if isRecoverableFailure(resp) then
         abortRequested.set(false)
         commandState = CommandState.ErrorRecovery
         publishTelemetry()
@@ -467,15 +510,15 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
    *  command is reported Failed; an abort in between -> Cancelled. */
   protected def recover(runId: Id, dispatch: () => Future[SubmitResponse]): Future[SubmitResponse] =
     runStop().flatMap { stopResp =>
-      if abortRequested.get() then
+      if abortRequested.get() || stopRequested.get() then
         Future.successful(Cancelled(runId))
       else if !stopResp.isInstanceOf[Completed] then
         Future.successful(Error(runId, s"error recovery: stop failed ($stopResp)"))
       else
         dispatch().map { retry =>
-          if abortRequested.get() then
-            // abort fired during the resend: its stop interrupted the move, so
-            // the retry comes back as an Error — report Cancelled (ready again),
+          if abortRequested.get() || stopRequested.get() then
+            // abort or stop fired during the resend: its stop interrupted the move,
+            // so the retry comes back as an Error — report Cancelled (ready again),
             // not a latched failure.
             Cancelled(runId)
           else

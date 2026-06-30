@@ -28,6 +28,9 @@ import { APTFS_PREFIX_STR } from '../models/aptFocusStage'
 import { TP_PREFIX_STR } from '../models/tiltPlate'
 import { FSS_PREFIX_STR } from '../models/fiberSourceStage'
 import { PMS_PREFIX_STR } from '../models/pupilMaskStage'
+import { APT_PREFIX_STR } from '../models/aptDetector'
+import { PIT_PREFIX_STR } from '../models/pitDetector'
+import { PSH_PREFIX_STR } from '../models/pshDetector'
 
 // Disabled placeholder node helper.
 const ph = (key: string, title: string): DataNode => ({ key, title, disabled: true })
@@ -37,19 +40,19 @@ const treeData: DataNode[] = [
     key: 'grp-psh',
     title: 'PSH assemblies',
     selectable: false,
-    children: [{ key: PSHPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PSHFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, ph('psh-det', 'Detector')]
+    children: [{ key: PSHPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PSHFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PSHFS_PREFIX_STR, title: 'Focus Stage' }, { key: PSH_PREFIX_STR, title: 'Detector' }]
   },
   {
     key: 'grp-pit',
     title: 'PIT assemblies',
     selectable: false,
-    children: [{ key: PITPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PITFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PITFS_PREFIX_STR, title: 'Focus Stage' }, ph('pit-det', 'Detector')]
+    children: [{ key: PITPMW_PREFIX_STR, title: 'Pupil Mask Wheel' }, { key: PITFW_PREFIX_STR, title: 'Filter Wheel' }, { key: PITFS_PREFIX_STR, title: 'Focus Stage' }, { key: PIT_PREFIX_STR, title: 'Detector' }]
   },
   {
     key: 'grp-apt',
     title: 'APT assemblies',
     selectable: false,
-    children: [{ key: APTFW_PREFIX_STR, title: 'Filter Wheel' }, { key: APTFS_PREFIX_STR, title: 'Focus Stage' }, ph('apt-det', 'Detector')]
+    children: [{ key: APTFW_PREFIX_STR, title: 'Filter Wheel' }, { key: APTFS_PREFIX_STR, title: 'Focus Stage' }, { key: APT_PREFIX_STR, title: 'Detector' }]
   },
   { key: 'grp-lowfw', title: 'LOWFW assemblies', disabled: true, children: [ph('lowfw-x', '—')] },
   {

@@ -52,6 +52,10 @@ MAP=(
   "$ASM_RES/PshPupilMaskWheel.conf:APS/ICS/PSH/PupilMaskWheel.conf"
   "$ASM_RES/PitPupilMaskWheel.conf:APS/ICS/PIT/PupilMaskWheel.conf"
   "$ASM_RES/FocKMirror.conf:APS/ICS/FOC/KMirror.conf"
+  # Detector assembly MOCKS (S79). No HCD; synthetic in-memory frames.
+  "$ASM_RES/AptDetector.conf:APS/ICS/APT/Detector.conf"
+  "$ASM_RES/PitDetector.conf:APS/ICS/PIT/Detector.conf"
+  "$ASM_RES/PshDetector.conf:APS/ICS/PSH/Detector.conf"
 )
 
 put() {
