@@ -23,6 +23,7 @@ object Dependencies {
 
   val IcsAssemblies = Seq(
     CSW.`csw-framework`,
+    Libs.`pekko-http`,                     // VbdsImagePublisher: HTTP client for the VBDS transfer/admin routes
     CSW.`csw-testkit` % Test,
     Libs.`scalatest` % Test,
     Libs.`pekko-actor-testkit-typed` % Test

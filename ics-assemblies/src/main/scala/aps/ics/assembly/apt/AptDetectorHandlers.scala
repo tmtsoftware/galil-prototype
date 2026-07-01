@@ -12,20 +12,33 @@ import csw.params.events.SystemEvent
 import csw.prefix.models.Subsystem
 import csw.time.core.models.TAITime
 
-import aps.ics.assembly.common.{DetectorAssemblyHandlers, Frame, Roi}
+import aps.ics.assembly.common.{
+  DetectorAssemblyHandlers,
+  DetectorImagePublisher,
+  DetectorState,
+  Frame,
+  Roi,
+  VbdsImagePublisher
+}
 import aps.ics.assembly.icd.AptDetectorKeys.`ICS.APT.Detector` as K
 
 import scala.concurrent.Future
+import scala.concurrent.duration.*
+import scala.util.{Failure, Success}
 
 /**
  * APT Detector Assembly MOCK (APS.ICS.APT.Detector), SDD §5.1.
  *
  * The Andor acquisition/guiding camera — the one detector whose primary output is
  * an image PUBLISHED over VBDS (acquisition single frames + the continuous
- * guiding loop), so it exercises the [[aps.ics.assembly.common.DetectorImagePublisher]]
- * seam (stubbed this cut). Single exposures use the base exposure choreography;
- * the guiding loop uses the base STREAMING loop. High-speed taking is mocked as a
- * burst that stores a representative frame.
+ * guiding loop), so it drives the real [[aps.ics.assembly.common.VbdsImagePublisher]]
+ * (FITS over the VBDS transfer route). Single exposures use the base exposure
+ * choreography; the guiding loop uses the base STREAMING loop. High-speed taking
+ * is mocked as a burst that stores a representative frame.
+ *
+ * APT is the SOLE VBDS publisher: it creates its stream at initialize() and comes
+ * up FAULTED until the vbds-server confirms the stream (then READY). PIT/PSH store
+ * to disk/DMS and keep the logging stub.
  *
  * Command names follow AptDetectorKeys EXACTLY — note APT uses `configDetector` /
  * `configDetectorCooling` (the PIT/PSH detectors use `configure*`).
@@ -40,6 +53,47 @@ class AptDetectorHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswCo
   override protected def faultRecoveryCommands: Set[String] = Set("recover", "resetCamera")
   override protected def busyExemptCommands: Set[String] =
     Set("stopExposureLoop", "pauseExposureLoop", "restartExposureLoop", "abortHighSpeedExposure", "recover", "resetCamera")
+
+  // ---- VBDS image publisher (APT is the sole VBDS publisher) --------------
+
+  /** The real VBDS publisher, from config (host/port/stream/contentType). Built
+   *  lazily so [[cfg]] is populated (base.initialize loads it before first use). */
+  private lazy val vbds: VbdsImagePublisher =
+    new VbdsImagePublisher(cfg.vbdsHost, cfg.vbdsPort, cfg.vbdsStream, cfg.vbdsContentType, ctx.system, log)
+
+  /** Override the base seam: APT publishes real FITS frames over VBDS. */
+  override protected def imagePublisher: DetectorImagePublisher = vbds
+
+  private val VbdsRetryInterval = 5.seconds
+
+  /**
+   * APT cannot serve images without VBDS, so it comes up FAULTED and only goes
+   * READY once the VBDS stream is confirmed created (idempotent — 200 or 409).
+   * On failure it stays FAULTED, publishes a failure event, and retries on a
+   * timer until the stream is ready (survives startup ordering vs the vbds-server).
+   */
+  override def initialize(): Unit =
+    super.initialize() // loads cfg (builds `vbds`, logs kind=vbds), seeds Ready, starts telemetry
+    detectorState = DetectorState.Faulted
+    publishStatus()
+    log.info(s"$assemblyPrefix: VBDS required — ensuring stream '${cfg.vbdsStream}' at " +
+      s"${cfg.vbdsHost}:${cfg.vbdsPort} before going READY")
+    ensureVbdsReady()
+
+  private def ensureVbdsReady(): Unit =
+    vbds.ensureStream().onComplete {
+      case Success(_) =>
+        detectorState = DetectorState.Ready
+        publishStatus()
+        log.info(s"$assemblyPrefix: VBDS stream '${cfg.vbdsStream}' ready — detector READY")
+      case Failure(ex) =>
+        detectorState = DetectorState.Faulted
+        publishCommandFailure(s"VBDS not ready: ${ex.getMessage}")
+        publishStatus()
+        log.warn(s"$assemblyPrefix: VBDS not ready (${ex.getMessage}); " +
+          s"retrying in ${VbdsRetryInterval.toSeconds}s")
+        val _ = ctx.system.scheduler.scheduleOnce(VbdsRetryInterval, () => ensureVbdsReady())
+    }
 
   // ---- validation --------------------------------------------------------
 

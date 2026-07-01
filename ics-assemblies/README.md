@@ -11,6 +11,12 @@ a shared `MotionAssemblyHandlers` base. A standalone **TCS PupilRotation simulat
 included so the K-Mirror (the only assembly with an external-subsystem dependency) can be
 exercised without a real TCS.
 
+It also carries **three detector mock assemblies** (APT / PIT / PSH `Detector`) on a
+separate `DetectorAssemblyHandlers` base — stand-ins for the real detector pipeline until
+the Detector HCD exists — so the combined container is **19 components**. Only the **APT**
+detector publishes its images over **VBDS** (see *VBDS image publishing*); PIT/PSH store
+to disk/DMS.
+
 - **Stack:** Scala 3.6.4, Apache Pekko, CSW 6.0.0, sbt multi-module, Java 21.
 - **Depends on:** `galil-hcd` (`compile->compile`) for the generated HCD command/event
   keys (`csw.proto.galil.GalilMotionKeys`).
@@ -48,12 +54,16 @@ and the stop-then-resend error-recovery routine) lives in `MotionAssemblyHandler
 
 ```
 ComponentHandlers (CSW)
-└── MotionAssemblyHandlers              common base for every ICS assembly
-    ├── StageAssemblyHandlers           linear / single-axis positioning stages
-    ├── WheelAssemblyHandlers           indexed wheels (slot selection)
-    │   └── PupilMaskWheelAssemblyHandlers   pupil-mask wheels
-    └── (FocKMirrorHandlers)            extends MotionAssemblyHandlers directly —
-                                        continuous rotation + TCS slewing/tracking
+├── MotionAssemblyHandlers              common base for every ICS motion assembly
+│   ├── StageAssemblyHandlers           linear / single-axis positioning stages
+│   ├── WheelAssemblyHandlers           indexed wheels (slot selection)
+│   │   └── PupilMaskWheelAssemblyHandlers   pupil-mask wheels
+│   └── (FocKMirrorHandlers)            extends MotionAssemblyHandlers directly —
+│                                       continuous rotation + TCS slewing/tracking
+└── DetectorAssemblyHandlers            common base for the detector mocks (no Galil HCD,
+    ├── AptDetectorHandlers             no axes, no PVT) — manufactures synthetic frames
+    ├── PitDetectorHandlers             in memory; APT publishes over VBDS, PIT/PSH store
+    └── PshDetectorHandlers
 ```
 
 **Unit ownership.** The HCD speaks in controller **counts** (and resolves degrees↔counts
@@ -66,8 +76,8 @@ or controller-internal frames.
 
 ## Assembly inventory
 
-16 assemblies across 5 mechanism groups, distributed over 4 Galil controllers per SDD
-Figure 2-2. CSW prefixes are `aps.ICS.<GROUP>.<Mechanism>`.
+**16 motion assemblies** across 5 mechanism groups, distributed over 4 Galil controllers
+per SDD Figure 2-2. CSW prefixes are `aps.ICS.<GROUP>.<Mechanism>`.
 
 | Group | Mechanism | CSW prefix | Type | HCD |
 |-------|-----------|------------|------|-----|
@@ -91,6 +101,40 @@ Figure 2-2. CSW prefixes are `aps.ICS.<GROUP>.<Mechanism>`.
 Each assembly's source lives under `src/main/scala/aps/ics/assembly/<group>/`, its ICD
 keys under `assembly/icd/`, and its HOCON config under `src/main/resources/`.
 
+### Detector assemblies (mocks)
+
+Three detector mock assemblies stand in for the real detector pipeline (the Detector HCD
+is not yet built). They do **not** use a Galil HCD — each manufactures a synthetic frame
+in memory (`SyntheticFrameSource`, a drifting-Gaussian spot) — so their container
+connections are empty.
+
+| Group | Mechanism | CSW prefix | Camera / role | Image path |
+|-------|-----------|------------|---------------|------------|
+| **APT** | Detector | `aps.ICS.APT.Detector` | Andor acquisition / guiding (SDD §5.1) | **VBDS publish** (single + guiding loop) |
+| **PIT** | Detector | `aps.ICS.PIT.Detector` | Teledyne single-exposure (SDD §5.2) | store to APS Shared Disk (→ ICS Computation Assembly) |
+| **PSH** | Detector | `aps.ICS.PSH.Detector` | pupil / phasing (SDD §5.3) | store to APS Shared Disk (→ APS-PEAS) / archive to DMS |
+
+**Command sets differ per detector** (names follow each `*DetectorKeys` exactly):
+
+- **APT** (`configDetector` / `configDetectorCooling`): `setDefaultConfiguration`,
+  `takeAndPublishExposure`, `takeAndStoreExposure`, `startExposureLoop` /
+  `stopExposureLoop` / `pauseExposureLoop` / `restartExposureLoop`,
+  `takeHighSpeedExposures` / `abortHighSpeedExposure`, `recover`, `resetCamera`.
+- **PIT** (`configureDetector` / `configureDetectorCooling`, `analogGainMode`
+  LOW/HIGH/HDR): `setDefaultConfiguration`, `takeExposure`, `takeAndStoreExposure`,
+  `storeExposure`, `abortExposure`, `recover`, `resetCamera`.
+- **PSH** (`configureDetector` carries `procedureId` / `observationId` for the stored
+  filename): `setDefaultConfiguration`, `takeExposure`, `storeExposure` (archive →
+  `exposureArchiveCompleted`), `abortExposure`, `recover`, `resetCamera`. **No
+  `takeAndStoreExposure`.**
+
+> These are **mocks**: the exposure choreography and timing are real, but frames are
+> synthetic and "store"/"archive" emit a synthetic FITS filename + the completion event
+> rather than writing real files. The design also records a clarification **superseding
+> SDD §5.1.6.8.1**: the real Detector HCD delivers images to the assembly via
+> memory-mapped files, and the **assembly** owns image correction and (for APT) VBDS
+> publishing — not a VBDS subscription from the HCD.
+
 ---
 
 ## Module layout
@@ -104,14 +148,23 @@ ics-assemblies/
     │   │   ├── common/                shared bases + model
     │   │   │   ├── AssemblyModel.scala            AxisConfig, AxisSnapshot, HcdLifecycle,
     │   │   │   │                                  OperationalState + CommandState enums
-    │   │   │   ├── MotionAssemblyHandlers.scala   common base (lifecycle, HCD tracking,
+    │   │   │   ├── MotionAssemblyHandlers.scala   motion base (lifecycle, HCD tracking,
     │   │   │   │                                  state machine, recovery, telemetry scaffold)
     │   │   │   ├── StageAssemblyHandlers.scala    linear-stage base
     │   │   │   ├── WheelAssemblyHandlers.scala    indexed-wheel base
-    │   │   │   └── PupilMaskWheelAssemblyHandlers.scala
+    │   │   │   ├── PupilMaskWheelAssemblyHandlers.scala
+    │   │   │   ├── DetectorAssemblyHandlers.scala detector-mock base (no HCD; exposure
+    │   │   │   │                                  choreography, camera/cooling state, loop)
+    │   │   │   ├── DetectorModel.scala            DetectorState / CameraAcqState /
+    │   │   │   │                                  CoolingHealth enums; Frame; Roi; DetectorConfig
+    │   │   │   ├── DetectorImagePublisher.scala   publish seam: trait + StubImagePublisher
+    │   │   │   ├── SyntheticFrameSource.scala      in-memory drifting-Gaussian frame generator
+    │   │   │   ├── FitsEncoder.scala              Frame -> minimal FITS primary HDU (BITPIX -32)
+    │   │   │   └── VbdsImagePublisher.scala       real VBDS publisher (APT) — see below
     │   │   ├── icd/                    generated CSW ICD keys, one <Mechanism>Keys.scala each
     │   │   ├── apt/  foc/  pit/  psh/  stim/      concrete assemblies, grouped by subsystem
-    │   │   │     (foc/ also holds KMirrorTrackingControlActor.scala)
+    │   │   │     (foc/ also holds KMirrorTrackingControlActor.scala; apt/ pit/ psh/ each
+    │   │   │      hold a <Group>DetectorHandlers.scala alongside the motion handlers)
     │   │   └── IcsContainerApp.scala   combined-container launcher
     │   └── sim/
     │       ├── TcsPupilRotation.scala       shared TCS PupilRotation event contract
@@ -119,7 +172,7 @@ ics-assemblies/
     └── resources/
         ├── <Mechanism>.conf            per-axis + assembly config
         ├── <Mechanism>Container.conf   single-assembly CSW container
-        ├── IcsAssembliesContainer.conf combined container — every assembly in one JVM
+        ├── IcsAssembliesContainer.conf combined container — all 19 components in one JVM
         ├── InsertionStageAlarms.conf   ASCF defining the hcdFaulted alarm
         └── application.conf            logging only
 ```
@@ -154,6 +207,26 @@ forced re-home. When the HCD returns to Ready after a fault, the assembly leaves
 | `Processing`    | a command is executing (new submits rejected) |
 | `ErrorRecovery` | a command failed and a recovery attempt is running (only `abortErrorRecovery` accepted) |
 | `Failed`        | the last command failed and recovery (if any) did not succeed |
+
+### Detector state (mock detectors)
+
+The detectors do **not** home, so they use a simpler model (published in their `status`
+event; choices mirror each `*DetectorKeys` exactly):
+
+- **`assemblyState`** (`DetectorState`) — `READY` / `DEGRADED` / `FAULTED`. APT
+  additionally comes up `FAULTED` and self-promotes to `READY` only once its VBDS stream
+  is confirmed (see *VBDS image publishing*).
+- **`cameraAcquisitionState`** (`CameraAcqState`) — `IDLE` / `BUSY` (single exposure in
+  progress) / `STREAMING` (guiding loop) / `PAUSED` / `FAULT` / `RECOVERING`.
+- **`coolingHealth`** (`CoolingHealth`) — `Good` / `Degraded` / `Bad` (mixed-case per the
+  ICD), derived from how far the drifting temperature is from the set point.
+
+Command gating: while `FAULTED`, only the fault-recovery commands (`recover` /
+`resetCamera`) are accepted; while `BUSY`/`STREAMING`, only the busy-exempt commands
+(aborts, loop control, `recover`, `resetCamera`) are accepted. The single-exposure
+choreography walks `IDLE → BUSY →` (wait the integration time) `→` produce a frame `→`
+publish and/or store `→ IDLE`; the guiding loop holds `STREAMING` and emits a frame every
+`1/rate` s (`pause → PAUSED`, `restart → STREAMING`).
 
 ---
 
@@ -224,6 +297,19 @@ while online and ~30 s while offline:
 - **K-Mirror tracking events** — `trackingMetrics` (per cycle) and `trackingError` (on
   entering the error state). See below.
 
+**Detector telemetry** (mock detectors) — same Event Service, per each `*DetectorKeys`:
+
+- **`status`** (~1 Hz) — `assemblyState`, `cameraAcquisitionState`, `coolingHealth`, plus
+  per-detector fields.
+- **`temperatureStatus`** (~0.1 Hz / every 10 s) — the temperature drifts toward the set
+  point (a step per tick), which also drives `coolingHealth`.
+- **`setupStatus`** / **`configStatus`** — on change (ROI, binning, gain, acquisition/buffer
+  mode; cooling set point / fan).
+- **`detectorExposureMetrics`** — after each frame is produced.
+- **`exposureStoreCompleted`** (PIT/PSH store) / **`exposureArchiveCompleted`** (PSH
+  archive) — with the (synthetic) FITS filename.
+- **`apsCommandFailureEvent`** — on a command failure.
+
 ---
 
 ## K-Mirror tracking (SDD §8)
@@ -273,6 +359,121 @@ Args: `--mode slew|track`, `--ha0 <deg>` (default 30), `--dec <deg>`, `--latitud
 
 ---
 
+## VBDS image publishing (APT detector)
+
+Alongside the 16 motion assemblies, this module also carries three **detector mock
+assemblies** — `aps.ICS.APT.Detector`, `aps.ICS.PIT.Detector`, `aps.ICS.PSH.Detector` —
+so the combined container is **19 components**. The detectors form a separate branch off
+CSW `ComponentHandlers` (a `DetectorAssemblyHandlers` base — no Galil HCD, no axes, no
+PVT); each **manufactures a synthetic frame in memory** on exposure
+(`SyntheticFrameSource`, a drifting-Gaussian spot). Of the three, only the **APT
+acquisition/guiding camera publishes its images over VBDS** (SDD §5.1.2.2.1); PIT/PSH
+store to disk/DMS and keep the logging stub publisher.
+
+**VBDS** is the TMT **VIZ Bulk Data System** (`esw-vbds`) — a separate streaming
+service with its own Pekko cluster. The assembly reaches it **over HTTP at a configured
+host/port** (a standing decision: *config, not Location Service*, because the VBDS
+cluster is distinct from ours). The publish seam is a small trait:
+
+```
+DetectorImagePublisher   trait { ensureStream(); publish(stream, frame): Future[Done]; kind }
+├── StubImagePublisher   default — logs + counts, no I/O (PIT / PSH)
+└── VbdsImagePublisher   real — FITS-encodes and POSTs to the VBDS transfer route (APT)
+```
+
+**FITS is the consumer contract, not a VBDS requirement.** VBDS transport is
+**byte-opaque** (the server carries the file bytes and appends a one-byte newline as the
+per-file frame terminator). The reference subscriber (`python-client/vbds-centroid.py`)
+does `fits.HDUList(...) → hdulist[0].data → centroid_com(...)`, and the bundled `webApp`
+renders with JS9 — both expect FITS. So `FitsEncoder` emits a minimal, valid **single
+primary HDU**: `SIMPLE=T, BITPIX=-32` (IEEE float32, matching `Frame.data: Array[Float]`),
+`NAXIS=2, NAXIS1=width, NAXIS2=height`; **big-endian** pixels (FITS is always big-endian),
+row-major with x fastest — exactly `Frame.data`'s `data(y*w + x)` layout, so **no
+transpose** — with header and data each zero/space-padded to a **2880-byte** block.
+
+### Wire contract (verified against `esw-vbds` source)
+
+| Operation | Request | Success |
+|-----------|---------|---------|
+| Create stream (idempotent) | `POST /vbds/admin/streams/{stream}?contentType={ct}` | `200` created / `409` exists — **both mean ready** |
+| Publish a frame | `POST /vbds/transfer/streams/{stream}` — `multipart/form-data`, file part named **`data`** **with a filename** | `202 Accepted` |
+| Subscribe | websocket `GET /vbds/access/streams/{stream}` | — |
+
+> **The `data` part must carry a filename.** The server route uses `fileUpload("data")`,
+> which matches a body part only when `filename.isDefined`. A part named `data` with **no
+> filename** is silently skipped → `400`. `VbdsImagePublisher` sets
+> `Map("filename" -> s"$streamName.fits")` (mirroring the reference client's
+> `FormData.BodyPart.fromPath`). A publish-time `400` therefore means *either* the stream
+> doesn't exist *or* the `data` part was missing/filename-less.
+
+> **Content type is `image/fits`, not `application/fits`.** Both are IANA-registered
+> (RFC 4047); `image/fits` is specifically a FITS whose primary HDU is a renderable image
+> — which is what APT sends. The `esw-vbds` webApp gates its JS9 viewer on
+> `contentType == "image/fits"`; a stream advertised as `application/fits` is routed to a
+> JPEG `<canvas>` that cannot decode FITS (blank display). The stream's content type is
+> **fixed at admin-create** — recreating an existing stream `409`s and keeps the old type,
+> so change the config *and* restart `vbds-server` (its stream registry is in-memory).
+
+### Startup lifecycle (APT)
+
+APT comes up **FAULTED** and does not go **READY** until its stream is confirmed:
+`initialize()` → force `Faulted` → `ensureStream()`; on success flip `Ready`, on failure
+log and **retry every 5 s** (`scheduleOnce`). This survives startup ordering vs the
+`vbds-server` — bring either up first. The tell on a clean boot:
+
+```
+APS.ICS.APT.Detector: VBDS required — ensuring stream 'APS-APT-ACQ' at <host>:<port> before going READY
+```
+
+### Configuration (`AptDetector.conf`)
+
+```hocon
+vbds {
+  host        = "192.168.86.20"   # the vbds-server's advertised IP (see note below), not 127.0.0.1
+  port        = 7778              # must match the running vbds-server HTTP port
+  stream      = "APS-APT-ACQ"
+  contentType = "image/fits"      # RFC 4047 image type; required for the webApp JS9 path
+}
+```
+
+### Running / verifying end to end
+
+The `vbds-server` comes from `esw-vbds` (branch `angelic/csw6` — the CSW-6/Pekko port);
+build it there with `sbt stage`.
+
+```bash
+# 1. vbds-server refuses to guess a NIC — export the interface (same one used by
+#    csw-services and the ICS stack), then start it. It binds to the interface's
+#    *advertised IP* (via CSW Networks.publicInterface), NOT 0.0.0.0 — so clients must
+#    target that IP; 127.0.0.1 gets connection-refused. Set vbds.host to match.
+export INTERFACE_NAME=en0 AAS_INTERFACE_NAME=en0
+./target/universal/stage/bin/vbds-server --http-port 7778     # in the esw-vbds checkout
+
+# 2. Bring up the ICS stack as usual (csw-services, HCD(s), the ICS container). APT will
+#    log "ensuring stream 'APS-APT-ACQ' at <host>:7778" and go READY once the stream is up.
+
+# 3. Open the esw-vbds webApp (npm start, :8080), select the vbds server + APS-APT-ACQ
+#    stream (badge should read [image/fits]), then from the UI (or a CSW client) run:
+#      takeAndPublishExposure   — one frame
+#      startExposureLoop        — continuous frames at the configured rate
+```
+
+The server logs `Publish complete, subscribers: N` per frame; JS9 shows a 256×256
+drifting Gaussian spot. If it opens washed out (float data spanning ~0–60000), set
+**Scale → zscale** in JS9.
+
+> **DHCP note.** `vbds.host` is a concrete IP today, so it can go stale if the host's
+> address changes. A `host = "auto"` sentinel that resolves via `Networks.publicInterface`
+> at init is a possible future convenience (see the S81 state delta).
+
+**To add VBDS to PIT/PSH** (e.g. for an ICS simulator): the encoder and publisher are
+reusable `common` pieces — construct a `VbdsImagePublisher(host, port, stream,
+contentType, system, log)`, `override imagePublisher` to return it, and call
+`ensureStream()` from `initialize()` (the APT lifecycle above is the template). No change
+to `VbdsImagePublisher` / `FitsEncoder` is needed.
+
+---
+
 ## Configuration
 
 Per assembly, HOCON files under `src/main/resources` (loaded into the CSW Configuration
@@ -284,8 +485,9 @@ Service for bring-up):
   made-up and internally consistent — not calibrated.**
 - **`<Mechanism>Container.conf`** — a single-assembly CSW container (top-level key is
   `name`, *not* `prefix`): the component and its HCD connection.
-- **`IcsAssembliesContainer.conf`** — the combined container declaring all 16 assemblies and
-  their HCD connections, so they start and stop together.
+- **`IcsAssembliesContainer.conf`** — the combined container declaring all 19 components
+  (the 16 motion assemblies + the 3 detector mocks) and their HCD connections, so they
+  start and stop together.
 - **`InsertionStageAlarms.conf`** — ASCF defining the `hcdFaulted` alarm.
 
 > **Config Service wins.** The active Config Service version overrides bundled resource
@@ -330,7 +532,8 @@ controller 1 (PSH/PIT):
   -Dgalil.config.path=GalilHcdConfig-APS-1.conf
 ```
 
-**Start the assemblies.** Either the combined container (all 16 in one JVM)…
+**Start the assemblies.** Either the combined container (all 19 components — 16 motion
+assemblies + 3 detector mocks — in one JVM)…
 
 ```bash
 ./target/universal/stage/bin/ics-assemblies -main aps.ics.assembly.IcsContainerApp
@@ -382,6 +585,30 @@ csw-admin-cli init ics-assemblies/src/main/resources/InsertionStageAlarms.conf -
 The base supplies configure / home / moveToDefaultPosition / stop, HCD location tracking,
 the CurrentState subscription, the operational/command state machine, the HCD-fault alarm,
 per-command HCD-wait timeouts, and the error-recovery routine.
+
+### Adding a detector assembly
+
+The detector branch is the same shape without the HCD:
+
+1. Generate `<Group>DetectorKeys.scala` (icd-db) under `icd/` (prepend the package).
+2. Add `<Group>DetectorHandlers` extending **`DetectorAssemblyHandlers`**. Override
+   `configResource`, `faultRecoveryCommands`, `busyExemptCommands`,
+   `validateSpecificCommand` / `handleSpecificCommand` (map command names onto the base
+   helpers — `runExposure`, `startLoop` / `stopLoop` / `pauseLoop` / `restartLoop`,
+   `applyConfig` / `applyCooling` / `applyDefaults`, `recoverFromFault` / `resetCameraMock`
+   / `abortExposureMock`), and the telemetry builders (`buildStatusEvent`,
+   `buildTemperatureEvent`, `publishSetupStatus`, `publishConfigStatus`, and optionally
+   `publishExposureMetrics` / `publishExposureStoreCompleted` / `publishCommandFailure`).
+   To publish over VBDS, `override imagePublisher` to a `VbdsImagePublisher` and call
+   `ensureStream()` from `initialize()` — `AptDetectorHandlers` is the template.
+3. Add `<Group>Detector.conf` and `<Group>DetectorContainer.conf` (container connections
+   are **empty** — no HCD).
+4. Wire it in at the same four points (`IcsAssembliesContainer.conf`, `load-config.sh`,
+   UI `registry.tsx` + `ComponentSelector.tsx`).
+
+The base supplies the exposure choreography, the camera/cooling state machine, periodic
+`status` / `temperatureStatus` telemetry, the FAULTED/BUSY command gating, and the image
+publish seam.
 
 ---
 

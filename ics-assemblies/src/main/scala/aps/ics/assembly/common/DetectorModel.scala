@@ -47,9 +47,9 @@ enum CoolingHealth(val choice: String):
 /**
  * A synthetic detector frame held in memory. `data` is row-major, length
  * width*height, 32-bit float (the assembly's post-correction representation per
- * SDD §5.1.2.2.1). For the mock nothing reads the pixels except the stub
- * publisher (which logs the size); the field is here so the shape is faithful
- * and a future real VbdsImagePublisher has something to serialise.
+ * SDD §5.1.2.2.1). For the APT VBDS path the pixels ARE consumed —
+ * [[FitsEncoder]] serialises them big-endian into a FITS primary HDU (BITPIX
+ * -32) for publish; for the PIT/PSH stub path only the size is logged.
  */
 final case class Frame(width: Int, height: Int, data: Array[Float]):
   /** Bytes for one frame at 4 bytes/px (float32) — used for imageSize telemetry. */
@@ -82,8 +82,10 @@ final case class DetectorConfig(
     bufferModel: String,         // setupStatus bufferModel choice: SINGLE|CONTAINER|RING
     bufferPath: String,          // setupStatus path (shared-memory location label)
     apsSharedDiskMountPoint: String,
-    vbdsStream: String,          // VBDS stream name the (stubbed) publisher posts to
-    vbdsContentType: String      // VBDS content type label
+    vbdsHost: String,            // vbds-server HTTP host (APT publishes here)
+    vbdsPort: Int,               // vbds-server HTTP port
+    vbdsStream: String,          // VBDS stream name the publisher creates/posts to
+    vbdsContentType: String      // VBDS content type label (stream metadata)
 ):
   def imageSizeBytes: Int = defaultRoi.width * defaultRoi.height * 4
 
@@ -113,6 +115,8 @@ object DetectorConfig:
       bufferModel             = s("defaultBufferModel", "SINGLE"),
       bufferPath              = s("defaultBufferFilename", "/dev/shm/aps-detector-mock"),
       apsSharedDiskMountPoint = s("apsSharedDiskMountPoint", "/aps/shared"),
+      vbdsHost                = s("vbds.host", "127.0.0.1"),
+      vbdsPort                = i("vbds.port", 7778),
       vbdsStream              = s("vbds.stream", "APS-DETECTOR-RAW"),
-      vbdsContentType         = s("vbds.contentType", "image/fits")
+      vbdsContentType         = s("vbds.contentType", "application/fits")
     )
