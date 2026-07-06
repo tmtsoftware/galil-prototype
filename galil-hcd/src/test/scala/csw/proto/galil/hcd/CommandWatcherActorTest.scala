@@ -365,8 +365,8 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     Thread.sleep(50)
     capture.awaitNoResult(200.millis) should be(true) // thread still active
 
-    // SM reports thread released and motion stopped
-    isActor ! InternalStateActor.UpdateThreadStatus(0)
+    // SM reports thread released and motion stopped (thread 1 observed inactive)
+    isActor ! InternalStateActor.UpdateThreadStatus(0, Set(1))
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A, Map("moving" -> false), testKit.system.ignoreRef)
 
     val (returnedId, success, _) = capture.awaitAndGet()

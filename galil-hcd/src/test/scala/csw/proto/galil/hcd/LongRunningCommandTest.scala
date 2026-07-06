@@ -823,7 +823,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
       testKit.system.ignoreRef)
     Thread.sleep(50)
 
-    val vt = csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(2))
+    val vt = taiAfterNow(2)
     val setup = makeSetup("trackAxis", "A",
       Map("position" -> 500.0, "rate" -> 10.0, "validTime" -> vt))
     handler ! CommandHandlerActor.HandleCommand(setup, runId, None)
@@ -844,7 +844,8 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
   // MockCIActor.  The mock records the exact wire command, so we assert the
   // computed PV<axis>=ΔP,V,T (and BT on the first segment) directly.
   //
-  // Determinism note: the FIRST segment seeds prevValidTime from Instant.now(),
+  // Determinism note: the FIRST segment seeds prevValidTime from TAITime.now()
+  // (TAI frame — test validTimes must be built in the same frame via taiAfterNow),
   // so its T_samples carries a few-ms skew — those tests assert ΔP/V exactly and
   // T by pattern.  CONTINUATION segments seed prevValidTime from the
   // trackingSession ledger, so ΔP/V/T are all exact.
@@ -895,11 +896,14 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
   private val t0 = java.time.Instant.parse("2026-01-01T00:00:00Z")
   private def taiAfter(secs: Long) = csw.time.core.models.TAITime(t0.plusSeconds(secs))
-  // First-segment tests seed prevValidTime from Instant.now(), so their validTime
-  // must also be now-relative (a t0-anchored time would be in the past and trip
-  // the monotonic guard before the guard under test).
+  // First-segment tests seed prevValidTime from TAITime.now() (in the HANDLER,
+  // not the test), so their validTime must be now-relative in the TAI frame.
+  // Building it from java.time.Instant.now() (UTC) makes the validTime ~37s in
+  // the past relative to prevValidTime on any host whose TAI offset is applied
+  // (kernel tai_offset via chrony/PTP), tripping the monotonic guard before the
+  // logic under test is reached — an environment-dependent failure (S82).
   private def taiAfterNow(secs: Long) =
-    csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(secs))
+    csw.time.core.models.TAITime(csw.time.core.models.TAITime.now().value.plusSeconds(secs))
 
   // ---- arithmetic ----------------------------------------------------------
 
@@ -980,7 +984,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     handler ! CommandHandlerActor.HandleCommand(
       makeSetup("trackAxis", "A",
         Map("position" -> 300.0, "rate" -> 50.0,
-            "validTime" -> csw.time.core.models.TAITime(java.time.Instant.now().plusSeconds(2)))),
+            "validTime" -> taiAfterNow(2))),
       Id(), None)
     Thread.sleep(200)
 
@@ -1001,11 +1005,12 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     seedIdle(isActor, Axis.A, Map(
       "mechanismType" -> MechanismType.Linear, "position" -> 0.0, "maxSpeed" -> 1000000.0))
 
-    // validTime in the past relative to the first-segment prev (= now).
+    // validTime in the past relative to the first-segment prev (= TAITime.now()).
     handler ! CommandHandlerActor.HandleCommand(
       makeSetup("trackAxis", "A",
         Map("position" -> 100.0, "rate" -> 10.0,
-            "validTime" -> csw.time.core.models.TAITime(java.time.Instant.now().minusSeconds(5)))),
+            "validTime" -> csw.time.core.models.TAITime(
+              csw.time.core.models.TAITime.now().value.minusSeconds(5)))),
       Id(), None)
     Thread.sleep(200)
 

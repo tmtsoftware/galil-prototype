@@ -155,12 +155,25 @@ private[hcd] object ControllerCommandActor {
             identifyController()
 
         // ========================================
-        // Thread Allocation (from hardware state)
+        // Thread Allocation (from hardware state + observation gate)
         // ========================================
         // Thread 0 is reserved for #Init / general purpose.
         // Threads 1-7 are available for embedded programs.
-        // Allocation queries MG _NO directly; the hardware IS the pool.
-        // No separate bookkeeping needed; MG _NO is always authoritative.
+        // Allocation queries MG _NO directly for hardware state, gated by
+        // unobservedThreads below. Hardware-free is necessary but NOT
+        // sufficient: a short program (e.g. #StopX on an idle axis) can start
+        // and finish entirely between two QR scans, so the hardware shows the
+        // thread free while its completion has not yet been observed and
+        // attributed by the scan pipeline (CS → IS.UpdateThreadStatus).
+        // Reusing such a thread would overwrite IS's thread→axis registry
+        // entry, misattribute the completion to the new occupant, and orphan
+        // the previous command's watcher (stuck Homing symptom, S82).
+
+        // Threads XQ'd by this HCD whose completion has not yet been observed
+        // by the scan pipeline. Added on successful XQ; removed on
+        // ReleaseThread from IS (sent when IS attributes the completion via
+        // UpdateThreadStatus, or when CH explicitly unregisters after an HX).
+        var unobservedThreads: Set[Int] = Set.empty
 
         /**
          * Query the controller's active thread bitmask and update IS.
@@ -185,21 +198,33 @@ private[hcd] object ControllerCommandActor {
         }
 
         /**
-         * Allocate a free thread by querying hardware directly.
-         * Thread 0 is reserved. Searches threads 1-7 for one not active in _NO.
+         * Allocate a thread: hardware-free (MG _NO bit clear) AND observed
+         * (not awaiting completion attribution). Thread 0 is reserved.
          *
-         * @return Some(threadNumber) if a thread is free, None if all busy
+         * The two failure modes are logged distinctly:
+         *   - all threads hardware-busy: genuine exhaustion
+         *   - hardware-free threads exist but all await observation: transient
+         *     back-pressure; clears within one QR scan (CS polls at action rate
+         *     while any thread is registered). A persistent recurrence would
+         *     indicate a lost ReleaseThread (an invariant bug to investigate,
+         *     not to be silently reclaimed here).
+         *
+         * @return Some(threadNumber) if an allocatable thread exists, None otherwise
          */
         def allocateThread(): Option[Int] = {
           val threadStatus = queryThreadStatus()
-          // Find first thread 1-7 that is not active
-          (1 to 7).find { t =>
-            val bit = 1 << t
-            (threadStatus & bit) == 0
-          } match {
+          val hwFree = (1 to 7).filter(t => (threadStatus & (1 << t)) == 0)
+          hwFree.find(t => !unobservedThreads.contains(t)) match {
             case Some(thread) =>
-              log.debug(s"Allocated thread $thread (_NO=0x${threadStatus.toHexString})")
+              log.debug(s"Allocated thread $thread (_NO=0x${threadStatus.toHexString}, " +
+                s"unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")})")
               Some(thread)
+            case None if hwFree.nonEmpty =>
+              log.warn(s"No allocatable threads: hardware-free ${hwFree.mkString("[", ",", "]")} " +
+                s"all awaiting completion observation " +
+                s"(unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")}, " +
+                s"_NO=0x${threadStatus.toHexString}). Clears within one QR scan.")
+              None
             case None =>
               log.warn(s"No free threads available (_NO=0x${threadStatus.toHexString})")
               None
@@ -210,6 +235,20 @@ private[hcd] object ControllerCommandActor {
           // Return controller identity; confirms actor setup is complete
           case GalilCommandMessage.GetIdentity(replyTo) =>
             replyTo ! controllerIdentity
+            Behaviors.same
+
+          // Release a thread reservation: IS has observed and attributed the
+          // thread's completion (or CH explicitly unregistered it after HX).
+          // The thread is now allocatable again (subject to hardware state).
+          case GalilCommandMessage.ReleaseThread(thread) =>
+            if unobservedThreads.contains(thread) then
+              log.debug(s"ReleaseThread: thread $thread observed, now allocatable " +
+                s"(remaining unobserved=${(unobservedThreads - thread).toSeq.sorted.mkString("[", ",", "]")})")
+              unobservedThreads = unobservedThreads - thread
+            else
+              // Benign: duplicate release (e.g. UnregisterThread raced a scan
+              // completion) — idempotent by design.
+              log.debug(s"ReleaseThread: thread $thread was not reserved (duplicate release, ignored)")
             Behaviors.same
 
           // Download current embedded program from controller (UL command).
@@ -511,6 +550,16 @@ private[hcd] object ControllerCommandActor {
 
                             log.info(s"ExecuteProgram: #$label on thread $thread — " +
                               s"_XQ$thread=$xqLine, ${if threadActive then "ACTIVE" else "already completed"}")
+
+                            // Reserve the thread until its completion is
+                            // observed and attributed by the scan pipeline
+                            // (released via ReleaseThread from IS). Applies
+                            // equally in the "already completed" case: the
+                            // program ran, so attribution is still pending.
+                            // Reserved only here (successful XQ); rejected XQ
+                            // and preCommand failures never start the program,
+                            // so the thread stays allocatable.
+                            unobservedThreads = unobservedThreads + thread
 
                             replyTo ! GalilCommandMessage.ExecuteProgramResult(
                               thread = thread, threadWasActive = threadActive, error = None)

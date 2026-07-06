@@ -11,6 +11,8 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
 import csw.location.api.models.{LocationRemoved, LocationUpdated, PekkoLocation, TrackingEvent}
+import csw.logging.client.commons.LogAdminUtil
+import csw.logging.models.Level
 import csw.params.commands.CommandResponse._
 import csw.params.commands.{CommandIssue, CommandName, ControlCommand, Setup}
 import csw.params.core.generics.Parameter
@@ -155,6 +157,20 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
   // =========================================================================
 
   override def initialize(): Unit =
+    // Default this component's log level to INFO at runtime. The static
+    // component-log-levels HOCON block cannot reliably target deeply-nested
+    // prefixes like "APS.ICS.STIM.InsertionStage" (Config.entrySet() key
+    // rendering does not round-trip back to the runtime Prefix — see the full
+    // analysis in GalilHcd.scala, "KNOWN CSW LIMITATION"). This runtime path
+    // writes the live Prefix into the same map LoggerImpl reads per log call.
+    // Primarily silences the CSW framework's per-message DEBUG chatter
+    // (SupervisorBehavior/ComponentBehavior "received message"), which the
+    // engineering UI's 5s GetSupervisorLifecycleState polling turns into a
+    // steady stream for whichever assembly is on screen. Elevate a single
+    // assembly back to DEBUG at runtime via LogAdminUtil / the CSW admin API;
+    // the application.conf logLevel=debug floor keeps that elevation possible.
+    LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
+
     log.info(s"$assemblyPrefix: initialize")
     // Config Service active version (path namespaced under aps/), else the bundled
     // resource. Loaded once here and shared with subclasses via componentConfig.

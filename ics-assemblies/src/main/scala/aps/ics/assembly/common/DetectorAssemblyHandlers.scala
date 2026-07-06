@@ -9,6 +9,8 @@ import csw.command.client.messages.TopLevelActorMessage
 import csw.framework.models.CswContext
 import csw.framework.scaladsl.ComponentHandlers
 import csw.location.api.models.TrackingEvent
+import csw.logging.client.commons.LogAdminUtil
+import csw.logging.models.Level
 import csw.params.commands.CommandResponse._
 import csw.params.commands.{CommandIssue, ControlCommand, Setup}
 import csw.params.core.models.Id
@@ -144,6 +146,11 @@ abstract class DetectorAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage],
   // =========================================================================
 
   override def initialize(): Unit =
+    // Default this component's log level to INFO at runtime; see the rationale
+    // comment in MotionAssemblyHandlers.initialize() (and the underlying CSW
+    // limitation analysis in GalilHcd.scala, "KNOWN CSW LIMITATION").
+    LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
+
     log.info(s"$assemblyPrefix: initialize (detector mock)")
     val csPath = componentInfo.prefix.toString.replace('.', '/') + ".conf"
     val loaded = ConfigServiceLoader.load(csPath, configResource, locationService, ctx.system)

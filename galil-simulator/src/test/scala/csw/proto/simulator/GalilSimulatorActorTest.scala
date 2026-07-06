@@ -387,7 +387,7 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
 
     // Stop on a different thread (as the HCD does)
     send(sim, "XQ #StopA,3")
-    Thread.sleep(200)
+    Thread.sleep(600)  // > ProgramCompleteDelay (250ms) with margin
 
     // Verify stopped
     val dr2 = sendQR(sim)
@@ -460,8 +460,8 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     val status = dr1.axisStatuses(0).status
     assert((status & (1 << 15)) != 0, s"Axis should be moving during tracking")
 
-    // Thread releases quickly (~100ms) while motor keeps jogging
-    Thread.sleep(200)
+    // Thread releases after ProgramCompleteDelay (250ms) while motor keeps jogging
+    Thread.sleep(400)
     val noVal = sendText(sim, "MG _NO").toDouble.toInt
     assert((noVal & 0x02) == 0, s"Track thread should be released after program ENDs, _NO=0x${hex(noVal)}")
 
@@ -687,10 +687,12 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     val sim = spawnSimulator()
     send(sim, "speed[0]=10000")
 
-    // First move
+    // First move. Sleep must comfortably exceed motion time + ProgramCompleteDelay
+    // (250ms): re-XQ'ing thread 1 before its ThreadComplete fires would replace
+    // the pending timer and drop the first completion (see scheduleThreadComplete).
     send(sim, "dmd[0]=300")
     send(sim, "XQ #MoveA,1")
-    Thread.sleep(300)
+    Thread.sleep(600)
 
     val dr1 = sendQR(sim)
     assert(dr1.axisStatuses(0).auxiliaryPosition == 300, s"First move: expected 300, got: ${dr1.axisStatuses(0).auxiliaryPosition}")
@@ -698,7 +700,7 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     // Second move
     send(sim, "dmd[0]=600")
     send(sim, "XQ #MoveA,1")
-    Thread.sleep(300)
+    Thread.sleep(600)
 
     val dr2 = sendQR(sim)
     assert(dr2.axisStatuses(0).auxiliaryPosition == 600, s"Second move: expected 600, got: ${dr2.axisStatuses(0).auxiliaryPosition}")

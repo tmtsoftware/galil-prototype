@@ -104,6 +104,22 @@ object GalilCommandMessage {
   )
 
   /**
+   * Release a thread reservation held by the CI actor.
+   *
+   * Sent by InternalStateActor when a registered thread's completion has been
+   * observed and attributed (via UpdateThreadStatus), or when the thread was
+   * explicitly unregistered after an HX (UnregisterThread from CommandHandlerActor).
+   * Until released, the thread is excluded from allocation even when the
+   * hardware reports it free (MG _NO bit clear): a program can start and finish
+   * entirely between two QR scans, and reusing its thread before the scan
+   * pipeline attributes the completion would clobber IS's thread→axis registry
+   * and orphan the previous command's watcher (S82).
+   *
+   * @param thread Thread number whose completion has been observed/attributed
+   */
+  case class ReleaseThread(thread: Int) extends GalilCommandMessage
+
+  /**
    * Halt an active execution thread (SDD 4.8.1; Halting the Active Command).
    *
    * The CI actor confirms the thread is still active via MG _NO and sends HX to halt
@@ -524,6 +540,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     val identityFuture = controllerCommandActor.ask[ControllerIdentity](ref => GalilCommandMessage.GetIdentity(ref))
     val identity = Await.result(identityFuture, 5.seconds)
     log.info(s"Controller ready: firmware=${identity.firmware}, model=DMC-${identity.model}, axes=${identity.axisCount}")
+
+    // Wire the CI actor reference into IS so it can release thread reservations
+    // when completions are observed/attributed (see GalilCommandMessage.ReleaseThread).
+    // Same late-binding pattern as SetStatusActor: IS is spawned at HCD
+    // construction, before the CI actor exists.
+    internalStateActor ! InternalStateActor.SetCommandActor(controllerCommandActor)
 
     // Store controller axis count in HcdState so HMI can determine I/O capabilities
     // (8-axis controllers support slave I/O expansion module, enabling bits 9-16)

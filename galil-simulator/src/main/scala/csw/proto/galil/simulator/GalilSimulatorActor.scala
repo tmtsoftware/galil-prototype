@@ -211,6 +211,21 @@ object GalilSimulatorActor {
   private val MotionTickInterval = MotionTickIntervalMs.milliseconds
   private val MotionTickKey = "motion-tick"
 
+  // Minimum simulated program-completion delay for axis-affecting embedded
+  // programs (#HomeX/#StopX/#SetupX/#TrackX, and the arrival→EN tail of
+  // #MoveX/#SelectX).
+  //
+  // Chosen to exceed the HCD's action-rate QR scan interval (100ms at 10Hz)
+  // by a comfortable margin, so every simulated program is observed at least
+  // once in the "thread active" state before it completes. The previous
+  // 50-100ms delays let programs start AND finish entirely between two scans,
+  // which is unrealistically fast for homes/moves and accidentally made the
+  // simulator a stress test of the sub-scan-completion corner (S82). That
+  // corner is still handled correctly by the HCD (the CI actor's thread
+  // reservation gate), but the simulator's default timing should reflect
+  // realistic program durations, not exercise the corner on every command.
+  private val ProgramCompleteDelay = 250.millis
+
   /** Threshold below which we snap to target (counts) */
   private val SnapThreshold = 0.5
 
@@ -584,7 +599,7 @@ object GalilSimulatorActor {
           motorOn = false
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))
-        scheduleThreadComplete(timer, thread, 50.millis)
+        scheduleThreadComplete(timer, thread, ProgramCompleteDelay)
 
       case s if s.startsWith("Home") =>
         val axis = s.last
@@ -595,7 +610,7 @@ object GalilSimulatorActor {
           stopCode = 1
         )
         newState = newState.copy(axes = newState.axes + (axis -> ax))
-        scheduleThreadComplete(timer, thread, 80.millis)
+        scheduleThreadComplete(timer, thread, ProgramCompleteDelay)
 
       case s if s.startsWith("Move") =>
         val axis = s.last
@@ -641,7 +656,7 @@ object GalilSimulatorActor {
         newState = newState.copy(axes = newState.axes + (axis -> ax))
         ensureMotionTicking(timer)
         // Track program ENDs quickly — motor keeps jogging
-        scheduleThreadComplete(timer, thread, 100.millis)
+        scheduleThreadComplete(timer, thread, ProgramCompleteDelay)
 
       case s if s.startsWith("Stop") =>
         val axis = s.last
@@ -686,7 +701,7 @@ object GalilSimulatorActor {
               + (s"ae[$idx]" -> 0.0)
           )
         }
-        scheduleThreadComplete(timer, thread, 50.millis)
+        scheduleThreadComplete(timer, thread, ProgramCompleteDelay)
 
       case s if s.startsWith("Select") =>
         // #SelectX: positions a rotating mechanism (e.g. filter wheel) to one of its slots.
@@ -1428,7 +1443,7 @@ object GalilSimulatorActor {
           // Schedule thread completion — simulates MC + EN + optional mdelay
           maybeThread.foreach { thread =>
             val mdelay = newState.embeddedVars.getOrElse(s"mdelay[$idx]", 0.0)
-            scheduleThreadComplete(timer, thread, (20 + mdelay.toLong).millis)
+            scheduleThreadComplete(timer, thread, ProgramCompleteDelay + mdelay.toLong.millis)
           }
         } else {
           // Move toward target, limited by maxSpeed
@@ -1767,6 +1782,19 @@ object GalilSimulatorActor {
     timer.startTimerAtFixedRate(MotionTickKey, MotionTick, MotionTickInterval)
   }
 
+  /**
+   * Schedule the completion of an embedded program on the given thread.
+   *
+   * CAUTION — timer key is per-thread: startSingleTimer with the same key
+   * REPLACES a pending timer. If a second XQ lands on the same thread before
+   * the previous program's ThreadComplete fires, that completion is silently
+   * dropped (its ae[]/_threadAxis cleanup in completeThread never runs).
+   * This cannot happen from HCD-driven traffic: the HCD's thread-reservation
+   * gate (ControllerCommandActor.unobservedThreads) never re-XQs a thread
+   * before its completion has been observed, which requires the ThreadComplete
+   * to have fired. Direct/manual XQ traffic (REPL, tests bypassing the HCD)
+   * could still trigger it.
+   */
   private def scheduleThreadComplete(
     timer: TimerScheduler[GalilSimulatorCommand],
     thread: Int,

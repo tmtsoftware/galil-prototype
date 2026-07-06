@@ -524,6 +524,10 @@ object CommandHandlerActor {
    *   5. Set commandHalted=true; active CommandWatcher sees this and reports CommandFailure
    *   6. 10ms delay for watcher to observe the flag
    *   7. Clear commandHalted; new command will set its own activeCommand
+   *   8. UnregisterThread to IS (after successful HX): removes the registry
+   *      entry and releases the CI actor's thread reservation. Required
+   *      because CS pruned axisThreads in step 3, so no scan will ever
+   *      observe this thread's completion.
    *
    * Tracking special case: no embedded thread is running (PVT executes from the
    * controller's per-axis FIFO, not an embedded program), so activeThread=0 and
@@ -629,6 +633,17 @@ object CommandHandlerActor {
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
       Map("commandHalted" -> false),
       ctx.system.ignoreRef)
+
+    // Step 8: Explicit registry exit for the halted thread. CS pruned its
+    // axisThreads on NotifyAxisHalted (step 3), so no subsequent scan will
+    // ever observe this thread — IS's registry entry and the CI actor's
+    // reservation need this explicit release. Sent AFTER the commandHalted
+    // pulse (steps 5-7) so the old watcher terminates on commandHalted
+    // (INTERRUPTED) before the activeThread→0 notification could reach it;
+    // mailbox order from CH to IS, and IS to the watcher, preserves this.
+    // Idempotent in IS if a scan completion raced the halt.
+    if haltSucceeded then
+      internalStateActor ! InternalStateActor.UnregisterThread(activeThread, axis)
 
     log.info(s"checkAndInterrupt: interruption complete for axis $axis — " +
       s"new command $commandName may proceed")

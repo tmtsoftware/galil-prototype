@@ -326,8 +326,16 @@ class ControllerStatusActor(
   // Local axis→thread map fed by IS via RegisterAxisThread / ClearAxisThread.
   // Used to interpret per-scan ae[] reads: ae[axis]==1 only counts as a program
   // failure when axis has no live thread (per QR threadStatus). Mirrors the
-  // authoritative threadRegistry in IS.
+  // authoritative threadRegistry in IS. Also feeds the polling-rate policy
+  // (action rate while any thread is registered; see reevaluatePollingRate)
+  // and the observed set sent with UpdateThreadStatus.
   private var axisThreads: Map[Axis, Int] = Map.empty
+
+  // Cached axis-activity picture from the most recent AxisStateChanged, so
+  // reevaluatePollingRate can be re-run on thread registration changes
+  // without an hcdState in hand.
+  private var anyAxisActive: Boolean = false
+  private var activeAxesDesc: String = ""
 
   // True when a previous scan saw errorCode != 0 but couldn't attribute the
   // error to any axis (no axes had both ae==1 AND a just-cleared thread).
@@ -426,11 +434,17 @@ class ControllerStatusActor(
       case RegisterAxisThread(axis, thread) =>
         log.debug(s"RegisterAxisThread: axis=$axis thread=$thread")
         axisThreads = axisThreads + (axis -> thread)
+        // Poll at action rate while any thread is registered, so completion
+        // observation (and thus reservation release) is bounded by one
+        // action-rate scan even for programs that never enter an active axis
+        // state (e.g. #StopX on an idle axis).
+        reevaluatePollingRate()
         Behaviors.same
 
       case ClearAxisThread(axis) =>
         log.debug(s"ClearAxisThread: axis=$axis")
         axisThreads = axisThreads - axis
+        reevaluatePollingRate()
         Behaviors.same
 
       case NotifyAxisHalted(axis, replyTo) =>
@@ -449,6 +463,7 @@ class ControllerStatusActor(
         if axisThreads.contains(axis) then
           log.debug(s"NotifyAxisHalted($axis): pruning axisThreads (was ${axisThreads(axis)})")
           axisThreads = axisThreads - axis
+          reevaluatePollingRate()
         replyTo ! NotifyAxisHaltedAck()
         Behaviors.same
 
@@ -723,11 +738,13 @@ class ControllerStatusActor(
 
       // Synthesize a threadStatus byte from _XQ results: bit N set if _XQ<n>
       // returned a non-(-1) value (thread is executing). Threads we didn't
-      // query (i.e. not in axisThreads) appear as 0 in this synthesized byte.
-      // This is what we send to IS; it's the only place the byte is consumed,
-      // and IS only cares about registered threads (via threadRegistry) anyway.
+      // query (i.e. not in axisThreads) appear as 0 in this synthesized byte;
+      // the observed set sent alongside the byte (Step 8) tells IS those
+      // vacuous zeros are NOT completions, so IS only evaluates entries this
+      // scan actually queried.
       // If readXqValues returned empty (e.g. parse failure) we fall back to
-      // the raw QR byte to fail-closed.
+      // the raw QR byte to fail-closed (stale-active bits in the raw byte can
+      // only delay a completion by a scan, never fabricate one).
       val threadStatusByte: Int =
         if axisThreads.isEmpty then 0
         else if xqValues.size != axisThreads.size then
@@ -794,11 +811,16 @@ class ControllerStatusActor(
         }
 
       // Step 8: thread status; IS clears activeThread for any registered
-      // threads whose bits are now zero (and forwards ClearAxisThread to us).
+      // threads whose bits are now zero (and forwards ClearAxisThread to us,
+      // and ReleaseThread to the CI actor's allocation gate).
       // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries above)
       // rather than the raw QR threadStatus byte, so IS sees accurate per-thread
       // completions even when the QR byte is stuck stale post-CMDERR.
-      internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte)
+      // The observed set (our axisThreads at scan time) tells IS which registry
+      // entries this byte is authoritative for: an entry we did not query has a
+      // vacuously-0 bit that must not be read as a completion (this scan may
+      // predate the RegisterAxisThread for it).
+      internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte, axisThreads.values.toSet)
 
       Behaviors.same
     catch
@@ -1135,7 +1157,12 @@ class ControllerStatusActor(
     }
     unexplainedAxes.foreach { axis =>
       val msg = "Embedded program ended unexpectedly without controller error"
-      log.warn(s"Axis $axis: $msg (ae=1, no errorCode)")
+      // Forensic snapshot: this WARN historically appeared in the wake of
+      // thread-attribution anomalies (S82); the raw attribution inputs make
+      // any recurrence diagnosable from logs alone.
+      log.warn(s"Axis $axis: $msg (ae=1, no errorCode) " +
+        s"[axisThreads=$axisThreads, aeValues=$aeValues, " +
+        s"axesWithClearedThread=$axesWithClearedThread]")
       reportAxisError(axis, msg)
     }
 
@@ -1274,8 +1301,14 @@ class ControllerStatusActor(
         lastReportedAxisError = lastReportedAxisError - axis
     }
 
-    val anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
-    val targetRate = if anyAxisActive then actionPollingRateHz else standbyPollingRateHz
+    anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
+    activeAxesDesc =
+      if anyAxisActive then
+        hcdState.axes.collect {
+          case (axis, ax) if ActiveAxisStates.contains(ax.axisState) =>
+            s"${axis}:${ax.axisState}"
+        }.mkString(", ")
+      else ""
 
     // Update cache of which axes are in Tracking, used by handleQRResponse to
     // decide whether to poll _PV<x>/_BT<x>.  Recomputed on every state change
@@ -1284,16 +1317,35 @@ class ControllerStatusActor(
       case (axis, ax) if ax.axisState == AxisStateEnum.Tracking => axis
     }.toSet
 
+    reevaluatePollingRate()
+    Behaviors.same
+
+  /**
+   * Apply the polling-rate policy against the current activity picture.
+   *
+   * Action rate while ANY axis is in an active state (Homing, Moving,
+   * Tracking) OR any thread is registered in axisThreads; standby rate
+   * otherwise. The registered-threads term matters for programs that never
+   * enter an active axis state — e.g. #StopX on an already-idle axis — whose
+   * completion must still be observed promptly: the CI actor's allocation
+   * gate holds the thread reserved until a scan attributes the completion,
+   * so observation latency directly bounds thread-pool turnaround.
+   *
+   * Called from handleAxisStateChanged (axis activity changes) and from the
+   * RegisterAxisThread / ClearAxisThread / NotifyAxisHalted handlers (thread
+   * registration changes).
+   */
+  private def reevaluatePollingRate(): Unit =
+    val anyActivity = anyAxisActive || axisThreads.nonEmpty
+    val targetRate = if anyActivity then actionPollingRateHz else standbyPollingRateHz
+
     if targetRate != pollingRateHz then
-      val reason = if anyAxisActive then
-        val activeAxes = hcdState.axes.collect {
-          case (axis, ax) if ActiveAxisStates.contains(ax.axisState) =>
-            s"${axis}:${ax.axisState}"
-        }.mkString(", ")
-        s"active axes [$activeAxes]"
-      else
-        "all axes standby"
-      
+      val reason =
+        if anyAxisActive then s"active axes [$activeAxesDesc]"
+        else if axisThreads.nonEmpty then
+          s"registered threads [${axisThreads.toSeq.map((a, t) => s"$a:$t").sorted.mkString(", ")}]"
+        else "all axes standby, no registered threads"
+
       pollingRateHz = targetRate
       log.info(s"Polling rate → ${pollingRateHz}Hz ($reason)")
       if pollingEnabled then
@@ -1305,8 +1357,6 @@ class ControllerStatusActor(
         Map("currentPollingRateHz" -> pollingRateHz),
         context.system.ignoreRef
       )
-    
-    Behaviors.same
   
   private def handlePollAnalogInputs(): Behavior[Command] =
     if !pollingEnabled then return Behaviors.same
