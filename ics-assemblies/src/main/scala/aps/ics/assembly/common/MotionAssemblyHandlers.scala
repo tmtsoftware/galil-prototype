@@ -1,5 +1,6 @@
 package aps.ics.assembly.common
 
+import org.apache.pekko.actor.Cancellable
 import org.apache.pekko.actor.typed.scaladsl.ActorContext
 import org.apache.pekko.util.Timeout
 import com.typesafe.config.{Config, ConfigFactory}
@@ -18,7 +19,7 @@ import csw.params.commands.{CommandIssue, CommandName, ControlCommand, Setup}
 import csw.params.core.generics.Parameter
 import csw.params.core.models.{Choice, Id}
 import csw.params.core.states.{CurrentState, StateName}
-import csw.prefix.models.Prefix
+import csw.prefix.models.{Prefix, Subsystem}
 import csw.time.core.models.UTCTime
 
 import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion` as Hcd
@@ -149,6 +150,21 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
   private val stopRequested = new AtomicBoolean(false)
   // alarm raised while the HCD this assembly depends on is Faulted
   private val hcdFaultedAlarm = AlarmKey(assemblyPrefix, "hcdFaulted")
+  // CSW alarm severities EXPIRE (csw-alarm reference.conf: refresh-interval 3s ×
+  // max-missed-refresh-counts 3 ⇒ ~9s TTL) and lapse to Disconnected unless
+  // refreshed — so the truthful value, including Okay, must be re-set
+  // continuously. Disconnected then correctly means "assembly not reporting".
+  // The severity is DERIVED from the live operationalState at every push
+  // (Faulted ⇒ Major, else Okay) — never cached: assemblies are BORN Faulted
+  // ("until configured"), so a shadow variable initialized to Okay would have
+  // the refresh assert a healthy alarm on a Faulted-from-birth assembly (S82).
+  private def hcdFaultedSeverity: AlarmSeverity =
+    if operationalState == OperationalState.Faulted then AlarmSeverity.Major else AlarmSeverity.Okay
+  private var alarmRefreshTimer: Option[Cancellable] = None
+  private val AlarmRefreshInterval = 5.seconds // must stay under the ~9s TTL
+  // edge-logging state for the quiet refresh path: warn once when refreshes
+  // start failing, info once when they recover — never per-tick
+  private val alarmRefreshFailing = new AtomicBoolean(false)
   // throttle telemetry to the SDD rate (1 Hz online, 30 s offline)
   private var lastPublishMs: Long = 0L
 
@@ -171,6 +187,15 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
     // the application.conf logLevel=debug floor keeps that elevation possible.
     LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
 
+    // Quiet the CSW alarm CLIENT library's per-call chatter (CSW.alarm_service_lib:
+    // DEBUG get-severity/metadata/status + INFO "Updating current severity" on
+    // EVERY setSeverity). With the 5s hcdFaulted refresh across 16 assemblies
+    // that is a flood. WARN keeps genuine problems visible. JVM-wide effect
+    // (LogAdminUtil's map is process-global); idempotent across the assemblies
+    // sharing this container. Logger prefix verified against CSW 6.0.0
+    // AlarmServiceLogger: Prefix(CSW, "alarm_service_lib").
+    LogAdminUtil.setComponentLogLevel(Prefix(Subsystem.CSW, "alarm_service_lib"), Level.WARN)
+
     log.info(s"$assemblyPrefix: initialize")
     // Config Service active version (path namespaced under aps/), else the bundled
     // resource. Loaded once here and shared with subclasses via componentConfig.
@@ -186,7 +211,14 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
     isOnline = true
     // HCD connectivity + configure happen when the HCD location arrives.
 
+    // Keep the hcdFaulted severity alive under the ~9s alarm TTL, pushing the
+    // severity derived from the live operationalState each tick (see
+    // hcdFaultedSeverity). Runnable is a SAM; runs on the component's ec.
+    alarmRefreshTimer = Some(ctx.system.scheduler.scheduleWithFixedDelay(
+      AlarmRefreshInterval, AlarmRefreshInterval)(() => refreshAlarm()))
+
   override def onShutdown(): Unit =
+    alarmRefreshTimer.foreach(_.cancel())
     log.info(s"$assemblyPrefix: onShutdown")
 
   override def onGoOffline(): Unit =
@@ -218,6 +250,10 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
         val prefix = connection.componentId.prefix.toString.toLowerCase
         log.warn(s"$assemblyPrefix: HCD connection removed: ${connection.componentId.prefix}")
         hcdServices = hcdServices - prefix
+        // Immediate alarm push on entering Faulted via connection loss —
+        // previously only the HCD-controller-Faulted reconcile path raised.
+        // (The 5s derived refresh would catch it anyway; this removes latency.)
+        if operationalState != OperationalState.Faulted then raiseHcdFaultedAlarm()
         transitionOperational(OperationalState.Faulted)
         publishTelemetry()
       case other =>
@@ -341,14 +377,36 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
   private def raiseHcdFaultedAlarm(): Unit = setAlarm(AlarmSeverity.Major)
   private def clearHcdFaultedAlarm(): Unit = setAlarm(AlarmSeverity.Okay)
 
-  /** Set the hcdFaulted alarm severity, tolerating an absent Alarm Service (the
-   *  alarm only surfaces with `csw-services -a` and the alarm loaded; otherwise
-   *  the failed future is logged and the assembly continues). */
+  /** Immediate push on an operationalState TRANSITION, with an INFO breadcrumb.
+   *  The explicit severity argument exists only for the log line; correctness
+   *  does not depend on it — the 5s refreshAlarm() re-derives from the live
+   *  operationalState, so a missed or mis-ordered push self-heals within one
+   *  refresh tick. Tolerates an absent Alarm Service (the alarm only surfaces
+   *  with `csw-services -a` and the alarm seeded via scripts/load-alarms.sh). */
   private def setAlarm(severity: AlarmSeverity): Unit =
     alarmService.setSeverity(hcdFaultedAlarm, severity).onComplete {
       case Success(_) => log.info(s"$assemblyPrefix: hcdFaulted alarm -> $severity")
       case Failure(t) => log.warn(s"$assemblyPrefix: could not set hcdFaulted alarm to $severity " +
-        s"(Alarm Service unavailable or alarm undefined?): ${t.getMessage}")
+        s"(Alarm Service unavailable or alarm not seeded? scripts/load-alarms.sh): ${t.getMessage}")
+    }
+
+  /** Periodic keep-alive: push the severity DERIVED from the live
+   *  operationalState (see hcdFaultedSeverity) under the ~9s TTL so the alarm
+   *  reflects truth continuously — including for assemblies that are Faulted
+   *  from birth and never made a transition INTO Faulted. Quiet by design —
+   *  logs only on the failure/recovery EDGES, never per tick (a 5s log
+   *  metronome is exactly what S82's logging rework removed). */
+  private def refreshAlarm(): Unit =
+    val severity = hcdFaultedSeverity
+    alarmService.setSeverity(hcdFaultedAlarm, severity).onComplete {
+      case Success(_) =>
+        if alarmRefreshFailing.compareAndSet(true, false) then
+          log.info(s"$assemblyPrefix: hcdFaulted alarm refresh recovered " +
+            s"(current severity $severity)")
+      case Failure(t) =>
+        if alarmRefreshFailing.compareAndSet(false, true) then
+          log.warn(s"$assemblyPrefix: hcdFaulted alarm refresh failing " +
+            s"(Alarm Service unavailable or alarm not seeded? scripts/load-alarms.sh): ${t.getMessage}")
     }
 
   private def throttledPublish(): Unit =
