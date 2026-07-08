@@ -152,6 +152,7 @@ DM hoff[8]
 DM mdelay[8]
 DM cpr[8]
 DM homing[8]
+DM whlpos[8]
 ' default the motor parameters to those in flash EEPROM
 accel[0]=_ACA
 accel[1]=_ACB
@@ -187,6 +188,7 @@ hspd[6]=_HVG
 REM
 JS #fill("ae",0)
 JS #fill("homing",0)
+JS #fill("whlpos",0)
 REM setup home offset values
 REM (motion after index before setting position to 0)
 JS #fill("hoff",0); 'default to 0 home offset
@@ -231,7 +233,6 @@ REM print some Status info, usefull during testing
 REM MG "axisErr error codes:  "; JS #print("ae")
  MG "axis error codes: ",ae[0]{F1.0}, ae[1], ae[2], ae[3], ae[4], ae[5], ae[6]
  MG "HCD STATUS positions: ", _TPA, _TPB, _TPC, _TPD, _TDE, _TDF, _TDG
- MG "HCD STATUS version: ",version{F8.0}
 EN
 REM Call all Setup Routines in parallel
 REM Call this on thread 0, spawn the others
@@ -690,6 +691,31 @@ etime3=TIME
 dtime3=etime3-stime3
 tcon=1000000/_TM
 MG "Motor D (ALAR) MOVE to ",_TPD," in ",dtime3/tcon," sec"
+ae[3]=0
+EN
+REM ----------------------------------------------------------------------------
+#SelectD
+ae[3]=1
+' Move rotational device A to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[3]=-1
+SPB=speed[3]
+ACB=accel[3]
+DCB=decel[3]
+SHD
+PAD=(dmd[3]-1)*(cpr[3]/8)
+stime3=TIME
+BGD
+MCD
+IF (mdelay[3]>0)
+  WT mdelay[3]
+ENDIF
+etime3=TIME
+dtime3=etime3-stime3
+tcon=1000000/_TM
+whlpos[3]=dmd[3]
+MG "Motor D select #", dmd[3]," move to ",_TPD," in ", dtime3/tcon," sec"
 ae[3]=0
 EN
 REM ----------------------------------------------------------------------------
