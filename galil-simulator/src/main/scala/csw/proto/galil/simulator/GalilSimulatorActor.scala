@@ -226,6 +226,16 @@ object GalilSimulatorActor {
   // realistic program durations, not exercise the corner on every command.
   private val ProgramCompleteDelay = 250.millis
 
+  // Stop is the ONE embedded program that legitimately finishes within a single
+  // QR scan on real hardware (STx / #StopX): a stop on an idle axis starts AND
+  // completes between two action-rate scans (S82). The simulator models that
+  // here so a wave of stops reproduces the sub-scan-completion regime that
+  // surfaced the S82 thread-reservation race — deliberately, for stop ONLY (all
+  // other programs keep the >=1-scan ProgramCompleteDelay above, which is
+  // realistic for homes/moves/setups/tracks). The HCD's thread-reservation gate
+  // (S82) is what must hold under this; see AssemblyLoadApp's stop-idle scenario.
+  private val StopCompleteDelay = 30.millis
+
   /** Threshold below which we snap to target (counts) */
   private val SnapThreshold = 0.5
 
@@ -701,7 +711,7 @@ object GalilSimulatorActor {
               + (s"ae[$idx]" -> 0.0)
           )
         }
-        scheduleThreadComplete(timer, thread, ProgramCompleteDelay)
+        scheduleThreadComplete(timer, thread, StopCompleteDelay)
 
       case s if s.startsWith("Select") =>
         // #SelectX: positions a rotating mechanism (e.g. filter wheel) to one of its slots.

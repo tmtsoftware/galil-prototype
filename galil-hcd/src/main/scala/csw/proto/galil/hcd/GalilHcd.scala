@@ -85,7 +85,11 @@ object GalilCommandMessage {
   case class ExecuteProgram(
     label: String,
     replyTo: ActorRef[ExecuteProgramResult],
-    preCommands: Option[String] = None
+    preCommands: Option[String] = None,
+    // When Some(t): reuse the caller-supplied thread t (an interrupt's just-halted
+    // thread, still reserved) instead of allocating a fresh one — the S84
+    // interrupt->follow-on thread-reuse path. None: allocate from the pool as before.
+    forceThread: Option[Int] = None
   ) extends GalilCommandMessage
 
   /**

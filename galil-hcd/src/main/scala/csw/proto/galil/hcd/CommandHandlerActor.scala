@@ -545,8 +545,9 @@ object CommandHandlerActor {
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
     ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command],
-    sendST: Boolean = true
-  ): Unit = {
+    sendST: Boolean = true,
+    reuseHaltedThread: Boolean = false
+  ): Option[Int] = {
     // Step 1: Query activeThread from IS
     val (activeThread, activeCmd) = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
@@ -642,11 +643,20 @@ object CommandHandlerActor {
     // (INTERRUPTED) before the activeThread→0 notification could reach it;
     // mailbox order from CH to IS, and IS to the watcher, preserves this.
     // Idempotent in IS if a scan completion raced the halt.
-    if haltSucceeded then
+    // Step 8 (S84): skip the registry exit when the follow-on will REUSE this
+    // thread — retain its reservation and registry entry (released later via normal
+    // attribution) instead of releasing and racing a re-allocation. Safe in the
+    // gap: NotifyAxisHalted (step 3) already pruned CS's axis->thread map, so no
+    // scan attributes this thread until executeProgramAndWatch re-registers it.
+    if haltSucceeded && !reuseHaltedThread then
       internalStateActor ! InternalStateActor.UnregisterThread(activeThread, axis)
 
     log.info(s"checkAndInterrupt: interruption complete for axis $axis — " +
       s"new command $commandName may proceed")
+
+    // S84: hand the halted thread back for reuse when we retained its reservation
+    // (reuseHaltedThread); None otherwise, so callers then allocate as before.
+    if haltSucceeded && reuseHaltedThread then Some(activeThread) else None
   }
 
   // ========================================
@@ -857,7 +867,8 @@ object CommandHandlerActor {
     loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout,
     preCommands: Option[String] = None,
-    onSuccessAxisUpdates: Map[String, Any] = Map.empty
+    onSuccessAxisUpdates: Map[String, Any] = Map.empty,
+    forceThread: Option[Int] = None
   ): Unit = {
     // Step 1: Pre-escalate polling rate so ControllerStatusActor is at action rate
     // before the program starts. This ensures IS updates flow quickly.
@@ -867,7 +878,7 @@ object CommandHandlerActor {
     // and "XQ;MG _XQ<thread>" compound all inside galilIo.synchronized in the CI actor)
     val result = Try {
       val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.ExecuteProgramResult](
-        ref => GalilCommandMessage.ExecuteProgram(label, ref, preCommands)
+        ref => GalilCommandMessage.ExecuteProgram(label, ref, preCommands, forceThread)
       )(askTimeout, askScheduler)
       Await.result(future, askTimeout.duration)
     }
@@ -984,10 +995,9 @@ object CommandHandlerActor {
       Await.result(future, askTimeout.duration)
     }.getOrElse(None)
 
-    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
-    // the new command: halt active thread (HX + ST), signal watcher, then proceed.
-    if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
+    // SDD 4.8.1 interruption is applied BELOW, just before executing the move (after
+    // the soft-limit and at-target checks), so a rejected or no-op command never
+    // disturbs an in-flight move and the halted thread is always reused. (S84 Option 1)
 
     // For rotating axes with countsPerRevolution configured, apply the approach algorithm
     // to resolve the algorithm-adjusted count target. This may add or subtract a whole
@@ -1046,6 +1056,16 @@ object CommandHandlerActor {
       case None => defaultMotionTimeout
     }
 
+    // SDD 4.8.1 interruption, applied here (after all early-return checks, before
+    // setting the new command's state so a dying interrupted watcher's
+    // clearActiveCommand cannot wipe the new activeCommand): halt the in-flight
+    // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
+    val reuseThread: Option[Int] =
+      if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
+        checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+          reuseHaltedThread = true)
+      else None
+
     // 1. Update AxisState: demand (for inPosition calc) + transition to Moving
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
@@ -1063,6 +1083,7 @@ object CommandHandlerActor {
       label = s"Move${axis.char}",
       axis = axis,
       commandName = "positionAxis",
+      forceThread = reuseThread,
       runId = runId,
       mask = CommandWatcherActor.CompletionMask.positionAxis,
       completionAxisState = AxisStateEnum.Idle,
@@ -1227,8 +1248,11 @@ object CommandHandlerActor {
     // there's no embedded thread; PVT runs FIFO-driven on the controller; so
     // there's nothing to interrupt.  #StopX (run next) begins with STx, which
     // handles the actual motor stop in all three cases.
-    if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
-      checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx, sendST = false)
+    val reuseThread: Option[Int] =
+      if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
+        checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+          sendST = false, reuseHaltedThread = true)
+      else None
 
     // Update active command for this stop
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
@@ -1249,6 +1273,7 @@ object CommandHandlerActor {
       label = s"Stop${axis.char}",
       axis = axis,
       commandName = "stopAxis",
+      forceThread = reuseThread,
       runId = runId,
       mask = CommandWatcherActor.CompletionMask.stopAxis,
       completionAxisState = completionState,
@@ -1309,10 +1334,10 @@ object CommandHandlerActor {
     )
     val currentState = Await.result(posFuture, askTimeout.duration)
 
-    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol before starting
-    // the new command: halt active thread (HX + ST), signal watcher, then proceed.
-    if currentState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
+    // SDD 4.8.1 interruption is applied BELOW, just before executing the move (after
+    // the not-initialized, soft-limit and zero-distance checks), so a rejected or
+    // no-op command never disturbs an in-flight move and the halted thread is always
+    // reused. (S84 Option 1)
 
     val currentPosition = currentState match {
       case Some(state) => state.position
@@ -1365,6 +1390,16 @@ object CommandHandlerActor {
       crm.updateCommand(Completed(runId))
       return
 
+    // SDD 4.8.1 interruption, applied here (after all early-return checks, before
+    // setting the new command's state so a dying interrupted watcher's
+    // clearActiveCommand cannot wipe the new activeCommand): halt the in-flight
+    // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
+    val reuseThread: Option[Int] =
+      if currentState.exists(_.axisState == AxisStateEnum.Moving) then
+        checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+          reuseHaltedThread = true)
+      else None
+
     // Update state
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
@@ -1383,6 +1418,7 @@ object CommandHandlerActor {
       label = s"Move${axis.char}",
       axis = axis,
       commandName = "offsetAxis",
+      forceThread = reuseThread,
       runId = runId,
       mask = CommandWatcherActor.CompletionMask.positionAxis,
       completionAxisState = AxisStateEnum.Idle,
@@ -1454,8 +1490,11 @@ object CommandHandlerActor {
       Await.result(future, askTimeout.duration)
     }.getOrElse(None)
 
-    if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
+    val reuseThread: Option[Int] =
+      if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
+        checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+          reuseHaltedThread = true)
+      else None
 
     // 1. Update AxisCmdState: set active command, clear error
     internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
@@ -1476,6 +1515,7 @@ object CommandHandlerActor {
       label = s"Select${axis.char}",
       axis = axis,
       commandName = "selectWheel",
+      forceThread = reuseThread,
       runId = runId,
       mask = CommandWatcherActor.CompletionMask.selectWheel,
       completionAxisState = AxisStateEnum.Idle,
@@ -1568,9 +1608,9 @@ object CommandHandlerActor {
 
     val cpr = countsPerRev.get
 
-    // If axis is currently Moving, apply SDD 4.8.1 interruption protocol
-    if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-      checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx)
+    // SDD 4.8.1 interruption is applied BELOW, just before executing the move (after
+    // the at-target check), so a no-op command never disturbs an in-flight move and
+    // the halted thread is always reused. (S84 Option 1)
 
     // Convert angular demand to raw count target
     val rawTarget = (angleDeg / 360.0) * cpr
@@ -1605,6 +1645,16 @@ object CommandHandlerActor {
       case None => defaultMotionTimeout
     }
 
+    // SDD 4.8.1 interruption, applied here (after all early-return checks, before
+    // setting the new command's state so a dying interrupted watcher's
+    // clearActiveCommand cannot wipe the new activeCommand): halt the in-flight
+    // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
+    val reuseThread: Option[Int] =
+      if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
+        checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+          reuseHaltedThread = true)
+      else None
+
     // 1. Update AxisState: demand (for inPosition calc) + transition to Moving
     internalStateActor ! InternalStateActor.UpdateAxisState(axis,
       Map("demand" -> target, "axisState" -> AxisStateEnum.Moving),
@@ -1622,6 +1672,7 @@ object CommandHandlerActor {
       label = s"Move${axis.char}",
       axis = axis,
       commandName = "positionWheel",
+      forceThread = reuseThread,
       runId = runId,
       mask = CommandWatcherActor.CompletionMask.positionAxis,
       completionAxisState = AxisStateEnum.Idle,

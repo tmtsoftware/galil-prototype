@@ -63,7 +63,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
           commandLog.add(cmdString)
           replyTo ! GalilCommandMessage.SendCommandResult(":")
           Behaviors.same
-        case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
+        case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands, _) =>
           preCommands.foreach(cmd => commandLog.add(cmd))
           val thread = nextThread.getAndIncrement()
           commandLog.add(s"XQ #$label,$thread")

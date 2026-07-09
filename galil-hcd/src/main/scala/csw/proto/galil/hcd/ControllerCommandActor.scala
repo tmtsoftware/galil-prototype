@@ -453,11 +453,14 @@ private[hcd] object ControllerCommandActor {
           // then sends "XQ #label,thread;MG _XQ<thread>" as one line buffer. The _XQ
           // result reports whether thread N is mid-execution (line >= 0) or has already
           // run to completion (-1). All steps run inside galilIo.synchronized.
-          case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands) =>
+          case GalilCommandMessage.ExecuteProgram(label, replyTo, preCommands, forceThread) =>
             try {
               galilIo.synchronized {
-                // Step 1: Allocate a thread (queries MG _NO for free bits, updates IS)
-                allocateThread() match {
+                // Step 1: Reuse the caller-supplied (already-reserved, just-halted)
+                // thread if given; otherwise allocate a fresh one from the pool.
+                // Option.orElse is by-name, so allocateThread() and its MG _NO query
+                // run only when no forceThread was supplied. (S84)
+                forceThread.orElse(allocateThread()) match {
                   case None =>
                     replyTo ! GalilCommandMessage.ExecuteProgramResult(
                       thread = -1, threadWasActive = false,

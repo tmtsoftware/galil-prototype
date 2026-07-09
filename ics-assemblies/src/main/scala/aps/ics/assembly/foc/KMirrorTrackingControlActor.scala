@@ -281,7 +281,12 @@ object KMirrorTrackingControlActor:
             Behaviors.same
 
           case StopSlewing =>
-            stopAxis()
+            // Suspend the slew/track loop so no further HCD commands are issued. The
+            // axis halt is performed by the assembly's super.runStop() (a single HCD
+            // stopAxis). This previously ALSO called stopAxis(), issuing a second
+            // concurrent stopAxis on the same channel that raced the primary stop and
+            // could starve/error under load — the sole residual after the S84 HCD
+            // thread-reuse fix. setMode is the clean way back (clears suspended).
             suspended = true
             Behaviors.same
 
