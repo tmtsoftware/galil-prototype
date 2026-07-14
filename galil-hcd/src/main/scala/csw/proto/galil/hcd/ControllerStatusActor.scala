@@ -26,6 +26,14 @@ import csw.time.core.models.TAITime
  *   - Polls the DataRecord (QR) at an adaptive rate (1Hz standby / 10Hz action)
  *   - Polls analog inputs (MG @AN[1..8]) at 1Hz independently
  *   - Parses DataRecord and updates InternalStateActor with positions, I/O, threads
+ *
+ * CS is a PURE OBSERVER of the thread lifecycle (ADR-001): it gathers raw
+ * per-scan observations (_XQ-synthesized thread status for ALL 8 threads, the
+ * observation timestamp, ae[] values, errorCode, eagerly-fetched TC text) and
+ * ships them to IS in one ScanObservations message. All attribution —
+ * completions and errors — happens in IS against its authoritative thread
+ * registry, gated on observation freshness (observedAt vs registeredAt;
+ * ADR-001 Amendment A). CS keeps no thread bookkeeping.
  */
 object ControllerStatusActor:
   
@@ -39,14 +47,6 @@ object ControllerStatusActor:
 
   /** Internal: result of the command-connection probe sent after a status IOException. */
   private case class CommandProbeResult(result: GalilCommandMessage.SendCommandResult) extends Command
-
-  /**
-   * Internal: result of the "safe all motors" command (ST;MO) sent when the HCD
-   * transitions to Faulted due to an unattributable controller error. Fire-and-
-   * forget from the decision logic's perspective; this handler just logs the
-   * outcome. Failure here does not propagate; the HCD is already Faulted.
-   */
-  private case class SafeAllResult(result: GalilCommandMessage.SendCommandResult, reason: String) extends Command
 
   /**
    * Periodic analog input polling trigger (1Hz, independent of QR rate)
@@ -125,55 +125,23 @@ object ControllerStatusActor:
   private[hcd] case class AxisStateChanged(stateChanged: InternalStateActor.StateChanged) extends Command
 
   /**
-   * Notify CS that an axis has acquired a controller thread for command execution.
+   * Advise CS whether IS's thread registry is non-empty (ADR-001 Amendment A).
    *
-   * IS forwards this from CommandHandlerActor's RegisterThread call. CS uses the
-   * map to interpret per-axis ae[] reads on each scan: ae[i]==1 only counts as
-   * a program failure when the axis's thread is no longer running (per the
-   * synthesized threadStatus byte built from _XQ<n> queries each scan).
+   * Feeds ONLY the polling-rate policy: action rate while any thread is
+   * registered, so completion observation (and thus reservation release) is
+   * bounded by one action-rate scan even for programs that never enter an
+   * active axis state (e.g. #StopX on an idle axis).
    *
-   * Sent by IS, never by external callers.
+   * This replaced the per-thread AddScanThread/RemoveScanThread advisory set:
+   * the scan now queries `MG _XQ0..7` unconditionally, so CS needs no thread
+   * bookkeeping at all — the S85 storm showed any CS-side thread view can lag
+   * the registry by seconds under mailbox pressure, and freshness is instead
+   * carried per-observation (ScanObservations.observedAt).
+   *
+   * Sent by IS on registry empty↔non-empty transitions, never by external
+   * callers.
    */
-  case class RegisterAxisThread(axis: Axis, thread: Int) extends Command
-
-  /**
-   * Notify CS that an axis's thread has been cleared (program ended).
-   *
-   * IS sends this when handleUpdateThreadStatus detects a registered thread's
-   * bit transition to 0. CS removes the entry from its local axis-thread map.
-   *
-   * Sent by IS, never by external callers.
-   */
-  case class ClearAxisThread(axis: Axis) extends Command
-
-  /**
-   * Notify CS that CommandHandlerActor has halted the active thread on this
-   * axis (via HX in checkAndInterrupt).
-   *
-   * Without this notification, the next QR scan would see "axis X registered
-   * with thread N, but thread N is no longer running" and could attribute
-   * residual ae[X]==1 (the entry-time flag from the program we just halted) as
-   * an unexplained program failure on whatever command runs next on this axis , 
-   * particularly when the next command happens to reuse the same thread number.
-   *
-   * The handler prunes the axis from CS's axisThreads map. CH owns the
-   * lifecycle: it will RegisterAxisThread again when it launches the next
-   * program. The reply (NotifyAxisHaltedAck) confirms the notification has been
-   * processed (synchronization point for the caller; needed so CH can be sure
-   * the prune is in place before launching the next program).
-   *
-   * Note: ae[] values >= 2 (#POSERR/#LIMSWI/#MCTIME) are independent of program
-   * execution and are detected by the regular QR scan's Step 2; no special
-   * post-HX handling for them is needed here.
-   */
-  case class NotifyAxisHalted(axis: Axis, replyTo: ActorRef[NotifyAxisHaltedAck]) extends Command
-
-  /**
-   * Acknowledgement of NotifyAxisHalted. Carries no information; the caller
-   * just needs a synchronization point confirming the notification has been
-   * processed.
-   */
-  case class NotifyAxisHaltedAck()
+  case class ThreadRegistryActivity(active: Boolean) extends Command
 
   /**
    * Response to GetPollingStatus
@@ -317,38 +285,22 @@ class ControllerStatusActor(
   private val MaxConsecutiveFormatErrors = 3
   private var qrFormatErrorCount: Int = 0
 
-  // Set true after the first controller error is detected and reported.
-  // Suppresses repeat TC 1 calls on subsequent QR polls; a running embedded error
-  // handler can fire CMDERR every few seconds, leaving errorCode nonzero on every poll.
-  // The HCD requires restart to clear a fault; there is no recovery path.
-  private var controllerFaulted: Boolean = false
+  // Whether IS's thread registry is non-empty, per ThreadRegistryActivity
+  // (ADR-001 Amendment A). Feeds ONLY the polling-rate policy. CS keeps no
+  // per-thread bookkeeping: the scan queries all 8 threads unconditionally,
+  // and attribution freshness travels with each observation (observedAt).
+  private var registryActive: Boolean = false
 
-  // Local axis→thread map fed by IS via RegisterAxisThread / ClearAxisThread.
-  // Used to interpret per-scan ae[] reads: ae[axis]==1 only counts as a program
-  // failure when axis has no live thread (per QR threadStatus). Mirrors the
-  // authoritative threadRegistry in IS. Also feeds the polling-rate policy
-  // (action rate while any thread is registered; see reevaluatePollingRate)
-  // and the observed set sent with UpdateThreadStatus.
-  private var axisThreads: Map[Axis, Int] = Map.empty
+  // All controller threads, queried by every scan (`MG _XQ0,...,_XQ7`). One
+  // compound round-trip regardless of activity; querying unconditionally
+  // removes any dependence of observation coverage on message timeliness.
+  private val AllThreads: Set[Int] = (0 to 7).toSet
 
   // Cached axis-activity picture from the most recent AxisStateChanged, so
   // reevaluatePollingRate can be re-run on thread registration changes
   // without an hcdState in hand.
   private var anyAxisActive: Boolean = false
   private var activeAxesDesc: String = ""
-
-  // True when a previous scan saw errorCode != 0 but couldn't attribute the
-  // error to any axis (no axes had both ae==1 AND a just-cleared thread).
-  // The next scan re-evaluates with one more cycle of _XQ<n> updates available;
-  // if still unattributable, the HCD is faulted then. This single-scan deferral
-  // covers the race where errorCode latches before _XQ<n> reports -1 for the
-  // thread CMDERR just halted.
-  private var pendingControllerError: Boolean = false
-
-  // Per-axis last-reported axisErrorMsg (deduplication for steady-state ae[]
-  // values like POSERR/LIMSWI/MCTIME that persist across scans). Reset to "" on
-  // axis state changes that imply error clearing (operator recovery via Home/Stop).
-  private var lastReportedAxisError: Map[Axis, String] = Map.empty
 
   // Set of axes currently in axisState == Tracking, derived from the IS
   // StateChanged subscription.  Drives the per-scan PVT monitoring read
@@ -358,7 +310,7 @@ class ControllerStatusActor(
 
   // Subscribe to IS axisState changes via message adapter.  Drives polling-rate
   // adaptation (1Hz standby / 10Hz when any axis is Homing/Moving/Tracking) and
-  // dedupe-cache cleanup for lastReportedAxisError when an axis leaves Error.
+  // the trackingAxes cache for the per-scan PVT monitoring read.
   private val stateChangedAdapter = context.messageAdapter[InternalStateActor.StateChanged](
     sc => AxisStateChanged(sc)
   )
@@ -431,40 +383,10 @@ class ControllerStatusActor(
       case AxisStateChanged(stateChanged) =>
         handleAxisStateChanged(stateChanged)
 
-      case RegisterAxisThread(axis, thread) =>
-        log.debug(s"RegisterAxisThread: axis=$axis thread=$thread")
-        axisThreads = axisThreads + (axis -> thread)
-        // Poll at action rate while any thread is registered, so completion
-        // observation (and thus reservation release) is bounded by one
-        // action-rate scan even for programs that never enter an active axis
-        // state (e.g. #StopX on an idle axis).
+      case ThreadRegistryActivity(active) =>
+        log.debug(s"ThreadRegistryActivity: active=$active")
+        registryActive = active
         reevaluatePollingRate()
-        Behaviors.same
-
-      case ClearAxisThread(axis) =>
-        log.debug(s"ClearAxisThread: axis=$axis")
-        axisThreads = axisThreads - axis
-        reevaluatePollingRate()
-        Behaviors.same
-
-      case NotifyAxisHalted(axis, replyTo) =>
-        // Notification from CommandHandlerActor that it has just halted the
-        // active thread on this axis. Any ae[axis]==1 residue is the entry-time
-        // flag from a program we deliberately stopped; not an error.
-        // (ae >= 2 codes from #POSERR/#LIMSWI/#MCTIME are independent of program
-        // execution and are caught by the regular QR scan's Step 2; no special
-        // handling is needed here.)
-        //
-        // The only thing we need to do post-HX is prune this axis from
-        // axisThreads, so the next QR scan's Step 3 doesn't see "axis registered
-        // with a thread that just cleared" and misattribute the residue to
-        // whatever command runs next on this axis. CH owns the lifecycle: it
-        // will RegisterAxisThread again when it launches the next program.
-        if axisThreads.contains(axis) then
-          log.debug(s"NotifyAxisHalted($axis): pruning axisThreads (was ${axisThreads(axis)})")
-          axisThreads = axisThreads - axis
-          reevaluatePollingRate()
-        replyTo ! NotifyAxisHaltedAck()
         Behaviors.same
 
       case CommandProbeResult(result) =>
@@ -472,13 +394,6 @@ class ControllerStatusActor(
           log.error(s"Command connection probe after status loss — ALSO FAILED: ${result.error.get}. Controller is likely completely unreachable.")
         else
           log.error(s"Command connection probe after status loss — OK (response: '${result.response.trim}'). Status connection died in isolation; controller is still alive.")
-        Behaviors.same
-
-      case SafeAllResult(result, reason) =>
-        if result.error.isDefined then
-          log.warn(s"SafeAllMotors after fault ('$reason') — FAILED: ${result.error.get}. Motors may still be energized; controller may be unreachable.")
-        else
-          log.info(s"SafeAllMotors after fault ('$reason') — OK. All motion stopped, drives disabled.")
         Behaviors.same
   
   /**
@@ -514,8 +429,9 @@ class ControllerStatusActor(
     // Clear the controller's TC error latch and log the result.
     // Called after any successful reconnect to consume any error recorded during
     // the disconnect event (e.g. "123 TCP lost sync or timeout"). This prevents
-    // the first post-recovery QR poll from seeing a stale errorCode and re-faulting.
-    // Resets controllerFaulted so genuine future errors will be detected.
+    // the first post-recovery QR poll from seeing a stale errorCode and shipping
+    // spurious error evidence to IS. (The faulted-state gate itself lives in IS,
+    // which suppresses attribution while HcdState is Faulted; ADR-001.)
     def clearTcLatch(io: GalilIo): Unit =
       try
         val responses = io.send("TC 1")
@@ -524,10 +440,9 @@ class ControllerStatusActor(
           log.info(s"Reconnect: cleared controller error latch — TC 1: '$tcText' (expected after disconnect event)")
         else
           log.info("Reconnect: TC 1 — no latched controller error")
-        controllerFaulted = false
       catch
         case ex: Exception =>
-          log.warn(s"Reconnect: TC 1 failed: ${ex.getMessage} — controllerFaulted flag unchanged")
+          log.warn(s"Reconnect: TC 1 failed: ${ex.getMessage}")
 
     def testCurrentSocket(): Boolean =
       try
@@ -697,19 +612,35 @@ class ControllerStatusActor(
   /**
    * Handle QR response from controller.
    *
+   * CS is a PURE OBSERVER (ADR-001): this scan gathers raw observations and
+   * ships them to IS in a single ScanObservations message. ALL attribution —
+   * program completions and error decisions alike — happens in IS against its
+   * authoritative thread registry, under one freshness gate. CS makes no
+   * attribution decisions and pushes no axisErrorMsg/axisState=Error updates.
+   *
    * Per scan, in order:
    *   1. Parse QR DataRecord; captures threadStatus and errorCode at one moment.
-   *   2. Compute the set of registered axes whose threads just transitioned from
-   *      active to cleared since the previous scan.
+   *   2. Stamp observedAt (monotonic nanoTime), then query per-thread execution
+   *      state via MG _XQ0..7 (ALL threads, unconditionally) and synthesize the
+   *      threadStatus byte. The stamp is taken BEFORE the read, so it can only
+   *      understate the observation's freshness — IS's staleness gate
+   *      (observedAt > entry.registeredAt) stays conservative.
    *   3. Read MG ae[i] for each configured axis (single compound read). Done after
    *      QR so that ae values reflect any errors that arose during this scan;
    *      reversing the order would race with successful program endings.
-   *   4. Run the error decision logic (see decideAxisAndControllerErrors).
-   *   5. Push HCD-level updates (position, I/O, timing).
-   *   6. Push per-axis QR-derived updates (position, velocity, switches).
-   *   7. Push UpdateThreadStatus to IS; this clears activeThread for completed
-   *      threads. Must happen LAST so any axisErrorMsg from step 4 lands first
-   *      and the CommandWatcher fails the command before seeing the cleared thread.
+   *   4. If errorCode != 0: eagerly fetch TC 1 (consumes the controller latch)
+   *      and carry the text in the observation message. IS holds the text
+   *      across its one-scan attribution deferral, so the hardware latch no
+   *      longer needs to stay set for the retry.
+   *   5. Push HCD-level + per-axis QR-derived updates (position, velocity,
+   *      switches, moving). Sent BEFORE ScanObservations so the watcher's
+   *      inPosition/moving picture is fresh when IS attributes completions.
+   *   6. Ship ScanObservations to IS. IS sequences error attribution before
+   *      completion attribution internally, preserving the contract that a
+   *      watcher sees axisErrorMsg before activeThread→0. Delivery latency is
+   *      harmless: a delayed observation is EXCLUDED by IS's staleness gate
+   *      for any entry registered after observedAt, never misapplied (the S85
+   *      storm delivered scans up to ~1.4s late under mailbox pressure).
    */
   private def handleQRResponse(dataRecord: DataRecord): Behavior[Command] =
     try
@@ -722,7 +653,10 @@ class ControllerStatusActor(
       val rawThreadStatusByte = dataRecord.generalState.threadStatus & 0xFF
       val rawErrorCode        = dataRecord.generalState.errorCode    & 0xFF
 
-      // Step 2: query per-thread execution state via MG _XQ<n>.
+      // Step 2: query per-thread execution state via MG _XQ0..7 — ALL threads,
+      // unconditionally (ADR-001 Amendment A). One compound round-trip; no
+      // dependence on any CS-side thread bookkeeping that could lag under
+      // mailbox pressure.
       //
       // Why not use rawThreadStatusByte (from QR)?
       //   Empirically, on this controller firmware, after CMDERR halts a thread,
@@ -732,51 +666,32 @@ class ControllerStatusActor(
       //   motion. _XQ<n> is the authoritative per-thread status: -1 means
       //   stopped, regardless of what _NO claims.
       //
-      // Skip the round-trip when no threads are registered. In that case
-      // there's nothing to attribute against, and we synthesize threadStatus=0.
-      val xqValues: Map[Int, Int] = readXqValues(axisThreads.values.toSet)
+      // observedAt is stamped BEFORE the read so it can only understate the
+      // observation's freshness; IS's staleness gate compares it against each
+      // registry entry's registeredAt (monotonic nanoTime, same JVM).
+      val observedAt: Long = System.nanoTime()
+      val xqValues: Map[Int, Int] = readXqValues(AllThreads)
 
       // Synthesize a threadStatus byte from _XQ results: bit N set if _XQ<n>
-      // returned a non-(-1) value (thread is executing). Threads we didn't
-      // query (i.e. not in axisThreads) appear as 0 in this synthesized byte;
-      // the observed set sent alongside the byte (Step 8) tells IS those
-      // vacuous zeros are NOT completions, so IS only evaluates entries this
-      // scan actually queried.
-      // If readXqValues returned empty (e.g. parse failure) we fall back to
-      // the raw QR byte to fail-closed (stale-active bits in the raw byte can
-      // only delay a completion by a scan, never fabricate one).
+      // returned a non-(-1) value (thread is executing).
+      // If readXqValues returned short/empty (e.g. parse failure) we fall back
+      // to the raw QR byte to fail-closed (stale-active bits in the raw byte
+      // can only delay attribution by a scan, never fabricate one).
       val threadStatusByte: Int =
-        if axisThreads.isEmpty then 0
-        else if xqValues.size != axisThreads.size then
-          // Couldn't determine state for all registered threads; fall back to
-          // the raw QR byte. This is the safer behavior because if the QR byte
-          // says "still running" we won't fire spurious completion/error.
-          log.debug(s"_XQ query returned ${xqValues.size} of ${axisThreads.size} expected; " +
+        if xqValues.size != AllThreads.size then
+          log.debug(s"_XQ query returned ${xqValues.size} of ${AllThreads.size} expected; " +
             s"falling back to QR threadStatus byte 0x${rawThreadStatusByte.toHexString}")
           rawThreadStatusByte
         else
-          axisThreads.values.foldLeft(0) { (acc, thread) =>
+          AllThreads.foldLeft(0) { (acc, thread) =>
             if xqValues.getOrElse(thread, -1) != -1 then acc | (1 << thread)
             else acc
           }
 
-      // Step 3: which registered axes have their thread no longer running?
-      //
-      // Criterion: axis is in our axisThreads map AND its thread bit is clear
-      // in the synthesized (_XQ-derived) byte. Being in axisThreads means IS
-      // told us a thread was registered; a -1 from _XQ means the program ended.
-      // IS will send ClearAxisThread to prune the map on its next
-      // UpdateThreadStatus, so repeated detection on later scans is naturally
-      // bounded.
-      val axesWithClearedThread: Set[Axis] = axisThreads.collect {
-        case (axis, thread) if (threadStatusByte & (1 << thread)) == 0 =>
-          axis
-      }.toSet
-
-      // Step 4: read ae[] for configured axes (graceful on parse failure).
+      // Step 3: read ae[] for configured axes (graceful on parse failure).
       val aeValues: Map[Axis, Int] = readAeValues()
 
-      // Step 4b: PVT monitoring read for any axis currently tracking.  Single
+      // Step 3b: PVT monitoring read for any axis currently tracking.  Single
       // compound MG _PV<x>,_BT<x>,... round-trip; skipped if no axis is tracking.
       // The observedAt timestamp is captured close to the read so the IS-side
       // TAI comparison uses the moment the controller actually responded.
@@ -786,23 +701,30 @@ class ControllerStatusActor(
         if pvtReadings.nonEmpty then
           internalState ! InternalStateActor.ReportPvtMonitoring(pvtReadings, pvtObservedAt)
 
-      // Diagnostic: when an error is latched, log the raw inputs to the
-      // attribution decision so post-mortem analysis of any unexpected fault
-      // is possible without instrumenting further. Cheap (only fires on
-      // errorCode != 0) and at DEBUG so it doesn't clutter normal logs.
+      // Step 4: eager TC fetch on a latched controller error. Consuming the
+      // latch here is safe because IS (not the hardware latch) carries the
+      // error evidence across its one-scan deferral; and it is self-limiting
+      // because consumption clears QR's errorCode for subsequent scans (a
+      // re-latch by a running embedded error handler simply repeats the fetch
+      // with fresh text). Fetched BEFORE the observation message is built so
+      // the text and the errorCode travel together.
+      val tcText: Option[String] =
+        if rawErrorCode != 0 then Some(fetchTcMessage(rawErrorCode))
+        else None
+
+      // Diagnostic: when an error is latched, log the raw observation inputs
+      // so post-mortem analysis of any unexpected fault is possible without
+      // instrumenting further. Cheap (only fires on errorCode != 0) and at
+      // DEBUG so it doesn't clutter normal logs. (The attribution decision and
+      // its forensic snapshot now live in IS; ADR-001.)
       if rawErrorCode != 0 then
         log.debug(s"QR scan with errorCode=$rawErrorCode: " +
           s"threadStatusByte=0x${threadStatusByte.toHexString} " +
           s"(raw QR=0x${rawThreadStatusByte.toHexString}, _XQ=$xqValues), " +
-          s"axisThreads=$axisThreads, " +
-          s"axesWithClearedThread=$axesWithClearedThread, " +
-          s"aeValues=$aeValues, " +
-          s"pendingControllerError=$pendingControllerError")
+          s"aeValues=$aeValues, tcText=$tcText")
 
-      // Step 5: error decision logic; may push axisErrorMsg/axisState updates.
-      decideAxisAndControllerErrors(rawErrorCode, aeValues, axesWithClearedThread)
-
-      // Steps 6-7: existing HCD-level + per-axis updates from QR
+      // Step 5: HCD-level + per-axis updates from QR. Before ScanObservations
+      // so the watcher's inPosition/moving picture is fresh at attribution.
       updateHcdState(dataRecord.generalState, activeAxisChars)
       activeAxisChars
         .zip(dataRecord.axisStatuses)
@@ -810,17 +732,15 @@ class ControllerStatusActor(
           updateAxisState(axisChar, axisStatus)
         }
 
-      // Step 8: thread status; IS clears activeThread for any registered
-      // threads whose bits are now zero (and forwards ClearAxisThread to us,
-      // and ReleaseThread to the CI actor's allocation gate).
-      // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries above)
-      // rather than the raw QR threadStatus byte, so IS sees accurate per-thread
-      // completions even when the QR byte is stuck stale post-CMDERR.
-      // The observed set (our axisThreads at scan time) tells IS which registry
-      // entries this byte is authoritative for: an entry we did not query has a
-      // vacuously-0 bit that must not be read as a completion (this scan may
-      // predate the RegisterAxisThread for it).
-      internalState ! InternalStateActor.UpdateThreadStatus(threadStatusByte, axisThreads.values.toSet)
+      // Step 6: ship the complete observation set to IS in one message.
+      // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries
+      // above) rather than the raw QR threadStatus byte, so IS sees accurate
+      // per-thread state even when the QR byte is stuck stale post-CMDERR.
+      // observedAt lets IS's staleness gate exclude this scan from any
+      // registry entry registered after the _XQ read — however late the
+      // message is delivered (ADR-001 Amendment A).
+      internalState ! InternalStateActor.ScanObservations(
+        threadStatusByte, observedAt, aeValues, rawErrorCode, tcText)
 
       Behaviors.same
     catch
@@ -933,9 +853,9 @@ class ControllerStatusActor(
           Map.empty
 
   /**
-   * Read MG _XQ<n> for each currently-registered thread and return a
-   * Map[thread, line], where line is the current execution line number, or -1
-   * if the thread is stopped.
+   * Read MG _XQ<n> for each requested thread (the per-scan caller passes
+   * AllThreads) and return a Map[thread, line], where line is the current
+   * execution line number, or -1 if the thread is stopped.
    *
    * Why this exists: empirically, after a CMDERR halts a thread on this
    * controller firmware, the thread bit in QR's `threadStatus` byte (and in
@@ -1040,168 +960,13 @@ class ControllerStatusActor(
           Map.empty
 
   /**
-   * Decide whether the controller error code (if any) and per-axis ae[] values
-   * indicate a per-axis fault, an HCD-wide fault, or steady-state ae[] errors
-   * (POSERR/LIMSWI/MCTIME) that occurred outside any motion command.
-   *
-   * Logic:
-   *   1. If errorCode != 0 (and not already faulted):
-   *      a. Fetch TC 1 to retrieve and clear the controller error latch.
-   *      b. Find candidate axes with ae[i]==1 AND thread just cleared this scan.
-   *      c. If exactly one candidate → attribute to that axis as
-   *         "Embedded program error: <TC text>", set axisState=Error.
-   *      d. If zero or 2+ candidates → HCD-wide Faulted (controller error not
-   *         attributable to a single program failure).
-   *   2. For each axis where ae[i] in {2, 3, 4}: report as per-axis error
-   *      (POSERR/LIMSWI/MCTIME) with the appropriate description. Independent
-   *      of errorCode; these handlers set ae[] without invoking #CMDERR.
-   *   3. Edge case: ae[i]==1 AND thread just cleared AND errorCode==0 →
-   *      program ended without clearing ae[] and without controller error.
-   *      Should not happen with current embedded design; log warn and treat
-   *      as a per-axis error to fail safe.
-   *
-   * Deduplication for steady-state errors: lastReportedAxisError prevents
-   * repeated UpdateAxisCmdState calls when ae[] persists at the same value
-   * across many scans.
-   */
-  private def decideAxisAndControllerErrors(
-    errorCode: Int,
-    aeValues: Map[Axis, Int],
-    axesWithClearedThread: Set[Axis]
-  ): Unit =
-    // Step 1: controller error latch present
-    //
-    // Three-way decision in the size==0 (unattributable) case:
-    //
-    //   First time we see this: defer one scan. The QR snapshot returns
-    //   errorCode and threadStatus from the same moment, but the controller
-    //   updates these on slightly different cycles; errorCode latches the
-    //   instant a command fails, while _XQ<n> may not yet report -1 for the
-    //   dead thread until the next servo cycle. If we attribute too eagerly
-    //   we miss the axis whose thread cleared in the very next scan. Setting
-    //   the pendingControllerError flag without consuming TC lets the next
-    //   scan try again with one more cycle of _XQ<n> state available.
-    //
-    //   Second consecutive scan still 0: genuinely unattributable , 
-    //   consume TC, fault HCD, safe motors.
-    //
-    //   The 1-candidate (clean attribution) and 2+ (multi-axis ambiguity)
-    //   cases are decided immediately on the first scan; deferral wouldn't
-    //   help either.
-    if errorCode != 0 && !controllerFaulted then
-      val programErrorCandidates = axesWithClearedThread.filter(ax =>
-        aeValues.getOrElse(ax, 0) == 1
-      )
-
-      if programErrorCandidates.size == 1 then
-        // Per-axis attribution; consume TC, report on the affected axis.
-        val tcText = fetchTcMessage(errorCode)
-        val axis = programErrorCandidates.head
-        val msg  = s"Embedded program error: $tcText"
-        log.warn(s"Axis $axis: program failed → $msg")
-        reportAxisError(axis, msg)
-        pendingControllerError = false
-      else if programErrorCandidates.isEmpty && !pendingControllerError then
-        // First scan with unattributable error; defer one scan.
-        // Do NOT consume TC; we need the latch persistent for the retry.
-        pendingControllerError = true
-        log.debug(s"errorCode=$errorCode but no axis program just completed " +
-          s"(axisThreads=$axisThreads, axesWithClearedThread=$axesWithClearedThread, " +
-          s"aeValues=$aeValues) — deferring one scan to let _XQ<n> settle")
-      else
-        // Either (a) second scan still empty, or (b) 2+ candidates.
-        // Both warrant HCD-wide fault. Consume TC and report.
-        val tcText = fetchTcMessage(errorCode)
-        val reason = if programErrorCandidates.isEmpty then
-          "no axis program just completed (after one-scan defer)"
-        else
-          s"multiple axes just completed (${programErrorCandidates.mkString(",")})"
-        log.error(s"Controller Error: $tcText ($reason) — faulting HCD")
-        controllerFaulted = true
-        pendingControllerError = false
-        val faultMsg = s"Controller Error: $tcText"
-        internalState ! InternalStateActor.EnterFaulted(faultMsg)
-        // Connection is still alive (we just got a QR back and fetched TC).
-        // Safe all motors: ST stops any motion, MO disables the motor drives.
-        // Fire-and-forget; we're already faulted, the result is informational.
-        safeAllMotors(faultMsg)
-    else if errorCode == 0 && pendingControllerError then
-      // The latch cleared on its own (e.g. another path consumed it). Reset
-      // our deferral flag so a fresh future error starts the cycle from scratch.
-      log.debug("pendingControllerError cleared (errorCode now 0)")
-      pendingControllerError = false
-
-    // Step 2: independent ae[] codes (POSERR/LIMSWI/MCTIME) on configured axes.
-    // Reported regardless of errorCode; these handlers set ae[] but do not
-    // generate a controller error code. Skip ae==1 here: that's program-flow
-    // (handled above when the thread clears) or in-flight (ignored until clear).
-    aeValues.foreach { case (axis, ae) =>
-      if ae >= 2 && ae <= 4 then
-        val msg = aeDescription(ae)
-        if lastReportedAxisError.getOrElse(axis, "") != msg then
-          log.warn(s"Axis $axis: ae=$ae → $msg")
-          reportAxisError(axis, msg)
-    }
-
-    // Step 3: edge case; program ended with ae[i]==1 but no controller error.
-    // Means embedded program exited (thread cleared) without clearing ae[i] and
-    // without any TC error. Defensive: treat as per-axis error.
-    //
-    // Deduped because an axis may remain in axisThreads for a scan or two before
-    // IS processes UpdateThreadStatus and sends ClearAxisThread. Skip this axis
-    // entirely if ANY error has already been reported for it (step 1 may have
-    // attributed the same failure one scan earlier with a richer message).
-    val unexplainedAxes = axesWithClearedThread.filter { axis =>
-      aeValues.getOrElse(axis, 0) == 1 && errorCode == 0 &&
-        lastReportedAxisError.getOrElse(axis, "").isEmpty
-    }
-    unexplainedAxes.foreach { axis =>
-      val msg = "Embedded program ended unexpectedly without controller error"
-      // Forensic snapshot: this WARN historically appeared in the wake of
-      // thread-attribution anomalies (S82); the raw attribution inputs make
-      // any recurrence diagnosable from logs alone.
-      log.warn(s"Axis $axis: $msg (ae=1, no errorCode) " +
-        s"[axisThreads=$axisThreads, aeValues=$aeValues, " +
-        s"axesWithClearedThread=$axesWithClearedThread]")
-      reportAxisError(axis, msg)
-    }
-
-  /**
-   * Send a per-axis error to IS: sets axisErrorMsg and transitions axisState
-   * to Error. Called from decideAxisAndControllerErrors.
-   *
-   * Sent BEFORE UpdateThreadStatus in the QR scan so the watcher's
-   * CmdStateChanged notification carries the error and the watcher fails the
-   * command before seeing the cleared activeThread.
-   */
-  private def reportAxisError(axis: Axis, msg: String): Unit =
-    internalState ! InternalStateActor.UpdateAxisCmdState(
-      axis,
-      Map("axisErrorMsg" -> msg),
-      context.system.ignoreRef
-    )
-    internalState ! InternalStateActor.UpdateAxisState(
-      axis,
-      Map("axisState" -> AxisStateEnum.Error),
-      context.system.ignoreRef
-    )
-    lastReportedAxisError = lastReportedAxisError + (axis -> msg)
-
-  /**
-   * Map an embedded ae[] code to a descriptive axis error message.
-   * Codes set by #POSERR (2), #LIMSWI (3), #MCTIME (4). Code 1 (program failed)
-   * is handled separately because it requires a TC fetch for context.
-   */
-  private def aeDescription(ae: Int): String = ae match
-    case 2 => "Position error exceeded limit"
-    case 3 => "Limit switch hit"
-    case 4 => "Motion timeout"
-    case _ => s"Embedded error code $ae"
-
-  /**
    * Fetch and clear the controller error latch via TC 1. Returns the message
    * string (e.g. "22 Begin not possible due to limit switch"), or a fallback
    * description if the call fails or returns empty/zero.
+   *
+   * Called eagerly from the QR scan whenever errorCode != 0 (ADR-001): the
+   * text travels to IS inside ScanObservations, and IS — not the hardware
+   * latch — carries the evidence across its one-scan attribution deferral.
    */
   private def fetchTcMessage(rawErrorCode: Int): String =
     Try {
@@ -1212,36 +977,6 @@ class ControllerStatusActor(
       else
         tcText
     }.getOrElse(s"$rawErrorCode (TC call failed)")
-
-  /**
-   * Safe all motors on the controller by sending a compound ST;MO command via
-   * the command connection.
-   *
-   * Called from decideAxisAndControllerErrors when an unattributable controller
-   * error forces the HCD into Faulted state. Defensive: if embedded code is
-   * corrupted or in an unknown state, we want motors stopped and drives
-   * disabled rather than left in whatever state they happened to be in.
-   *
-   * Unconditional targeting:
-   *   - ST (no axis arg) stops any motion on every axis. Idempotent on
-   *     stationary axes.
-   *   - MO (no axis arg) disables motor drives on every axis.
-   *
-   * Fire-and-forget from the caller's perspective. Result arrives as a
-   * SafeAllResult message and is logged; failure does not escalate (the HCD is
-   * already Faulted; the operator must intervene via faultReset anyway).
-   *
-   * Only called on the "status connection healthy, controller reachable" fault
-   * path. The two other Faulted-entry paths (connection loss, faultReset
-   * recovery failure) involve a dead connection; sending would IOException
-   * and offer no benefit.
-   */
-  private def safeAllMotors(reason: String): Unit =
-    val adapter = context.messageAdapter[GalilCommandMessage.SendCommandResult](
-      result => SafeAllResult(result, reason)
-    )
-    log.info(s"SafeAllMotors: sending 'ST;MO' (reason: $reason)")
-    commandActor ! GalilCommandMessage.SendCommand("ST;MO", adapter)
 
   /**
    * Handle QR error from controller
@@ -1289,18 +1024,6 @@ class ControllerStatusActor(
   private def handleAxisStateChanged(stateChanged: InternalStateActor.StateChanged): Behavior[Command] =
     val hcdState = stateChanged.hcdState
 
-    // Clear lastReportedAxisError for any axis that has left Error state.
-    // The dedupe cache should not persist past an operator recovery; without
-    // this, the next occurrence of the same error on the same axis would not
-    // be reported because the cached message still matches. Triggered by the
-    // axisState field on any of the state-change notifications IS sends.
-    hcdState.axes.foreach { case (axis, axState) =>
-      if axState.axisState != AxisStateEnum.Error
-         && lastReportedAxisError.getOrElse(axis, "").nonEmpty then
-        log.debug(s"Clearing lastReportedAxisError($axis): axis left Error state")
-        lastReportedAxisError = lastReportedAxisError - axis
-    }
-
     anyAxisActive = hcdState.axes.values.exists(ax => ActiveAxisStates.contains(ax.axisState))
     activeAxesDesc =
       if anyAxisActive then
@@ -1324,26 +1047,24 @@ class ControllerStatusActor(
    * Apply the polling-rate policy against the current activity picture.
    *
    * Action rate while ANY axis is in an active state (Homing, Moving,
-   * Tracking) OR any thread is registered in axisThreads; standby rate
-   * otherwise. The registered-threads term matters for programs that never
+   * Tracking) OR IS's thread registry is non-empty (ThreadRegistryActivity);
+   * standby rate otherwise. The registry term matters for programs that never
    * enter an active axis state — e.g. #StopX on an already-idle axis — whose
    * completion must still be observed promptly: the CI actor's allocation
    * gate holds the thread reserved until a scan attributes the completion,
    * so observation latency directly bounds thread-pool turnaround.
    *
    * Called from handleAxisStateChanged (axis activity changes) and from the
-   * RegisterAxisThread / ClearAxisThread / NotifyAxisHalted handlers (thread
-   * registration changes).
+   * ThreadRegistryActivity handler (registry empty↔non-empty transitions).
    */
   private def reevaluatePollingRate(): Unit =
-    val anyActivity = anyAxisActive || axisThreads.nonEmpty
+    val anyActivity = anyAxisActive || registryActive
     val targetRate = if anyActivity then actionPollingRateHz else standbyPollingRateHz
 
     if targetRate != pollingRateHz then
       val reason =
         if anyAxisActive then s"active axes [$activeAxesDesc]"
-        else if axisThreads.nonEmpty then
-          s"registered threads [${axisThreads.toSeq.map((a, t) => s"$a:$t").sorted.mkString(", ")}]"
+        else if registryActive then "threads registered in IS"
         else "all axes standby, no registered threads"
 
       pollingRateHz = targetRate
@@ -1417,10 +1138,9 @@ class ControllerStatusActor(
   /**
    * Update HCD-level state from GeneralState (positions, I/O, timing).
    *
-   * NOTE: Thread status reporting (UpdateThreadStatus) and controller error
-   * handling are now done in handleQRResponse / decideAxisAndControllerErrors
-   * for proper per-axis vs HCD-wide error attribution. This method only
-   * publishes the bulk per-scan status updates.
+   * NOTE: Thread status and error evidence travel to IS via ScanObservations
+   * (built in handleQRResponse); attribution happens in IS (ADR-001). This
+   * method only publishes the bulk per-scan status updates.
    */
   private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
@@ -1492,7 +1212,7 @@ class ControllerStatusActor(
     // Build command state update.
     // moving: bit 15 of status word ("Move in Progress"); reliable for ALL motor types.
     // activeThread is NOT set here; IS owns the thread→axis registry and updates
-    // activeThread via RegisterThread (set) and UpdateThreadStatus (clear).
+    // activeThread via RegisterThread (set) and ScanObservations (clear).
     // inPosition is mirrored automatically by InternalStateActor from AxisState.
     val cmdUpdates = Map[String, Any](
       "moving"   -> status.moveInProgress,

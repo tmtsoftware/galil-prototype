@@ -517,17 +517,18 @@ object CommandHandlerActor {
    * Sequence:
    *   1. Query IS CmdState for activeThread
    *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills the thread)
-   *   3. After successful HX: prompt ControllerStatusActor to update its per-axis
-   *      tracking, so the next QR scan doesn't misattribute the halted program's
-   *      ae[] residue to whatever command runs next on this axis.
+   *   3. After successful HX: mark the registry entry Halted in IS
+   *      (ThreadHalted; ADR-001), so scan attribution neither completes the
+   *      dead thread nor misattributes the halted program's ae[] residue to
+   *      whatever command runs next on this axis.
    *   4. If sendST: send ST to stop motor motion
    *   5. Set commandHalted=true; active CommandWatcher sees this and reports CommandFailure
    *   6. 10ms delay for watcher to observe the flag
    *   7. Clear commandHalted; new command will set its own activeCommand
    *   8. UnregisterThread to IS (after successful HX): removes the registry
    *      entry and releases the CI actor's thread reservation. Required
-   *      because CS pruned axisThreads in step 3, so no scan will ever
-   *      observe this thread's completion.
+   *      because a Halted entry is excluded from scan attribution, so no
+   *      scan will ever complete it.
    *
    * Tracking special case: no embedded thread is running (PVT executes from the
    * controller's per-axis FIFO, not an embedded program), so activeThread=0 and
@@ -540,7 +541,6 @@ object CommandHandlerActor {
     axis: Axis,
     ciActor: ActorRef[GalilCommandMessage],
     internalStateActor: ActorRef[InternalStateActor.Command],
-    statusMonitor: ActorRef[ControllerStatusActor.Command],
     log: csw.logging.api.scaladsl.Logger,
     askTimeout: Timeout,
     askScheduler: org.apache.pekko.actor.typed.Scheduler,
@@ -548,15 +548,26 @@ object CommandHandlerActor {
     sendST: Boolean = true,
     reuseHaltedThread: Boolean = false
   ): Option[Int] = {
-    // Step 1: Query activeThread from IS
-    val (activeThread, activeCmd) = Try {
+    // Step 1: Query the axis's thread from IS's REGISTRY (GetAxisThread) —
+    // the authoritative source — not from AxisCmdState.activeThread, which is
+    // display state and diverges when a watcher timeout fires
+    // clearActiveCommand (zeroing it) while the program still runs. Trusting
+    // the display state made a post-timeout stopAxis skip the HX and the
+    // Halted mark, then allocate a fresh thread while the axis's real thread
+    // was still registered and reserved (S85 finding 4). activeCommand is
+    // still read from CmdState (log context only).
+    val activeThread: Int = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[Int]](
+        ref => InternalStateActor.GetAxisThread(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }.toOption.flatten.getOrElse(0)
+    val activeCmd: Option[ActiveCommand] = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
         ref => InternalStateActor.GetAxisCmdState(axis, ref)
       )(askTimeout, askScheduler)
-      val cmdState = Await.result(future, askTimeout.duration)
-      (cmdState.map(_.activeThread).getOrElse(0),
-       cmdState.flatMap(_.activeCommand))
-    }.getOrElse((0, None))
+      Await.result(future, askTimeout.duration).flatMap(_.activeCommand)
+    }.getOrElse(None)
 
     log.info(s"checkAndInterrupt: $commandName interrupting axis $axis " +
       s"(thread=$activeThread, cmd=$activeCmd)")
@@ -586,27 +597,29 @@ object CommandHandlerActor {
     else
       log.info(s"checkAndInterrupt: axis $axis activeThread=0, skipping HX (already released)")
 
-    // Step 3: After successful HX, prompt CS to update its per-axis tracking
-    // before the next program registers. Without this, the next QR scan could
-    // see "axis registered with thread N, but thread N just cleared, ae==1" and
-    // misattribute the residue (the entry-time flag from the program we just
-    // halted) as an unexplained failure of whatever command runs next on this
-    // axis; particularly when the next command happens to reuse the same
-    // thread number. Skipped on HX failure (nothing was halted) and on the
-    // already-released path (no activeThread to begin with; Tracking case).
+    // Step 3: After successful HX, mark the registry entry Halted in IS
+    // (ADR-001) before the next program registers. A Halted entry is excluded
+    // from scan attribution: the dead thread's observed-clear must neither
+    // complete the interrupted command (the watcher owns that response via
+    // the commandHalted pulse) nor let the halted program's ae[axis]==1
+    // residue be misattributed as a failure of whatever command runs next on
+    // this axis — particularly when the follow-on reuses the same thread
+    // number. The synchronous ask guarantees the mark is in place before the
+    // follow-on program launches. Skipped on HX failure (nothing was halted)
+    // and on the already-released path (no activeThread; Tracking case).
     if haltSucceeded then
       val notifyResult = Try {
-        val future = AskPattern.Askable(statusMonitor).ask[ControllerStatusActor.NotifyAxisHaltedAck](
-          ref => ControllerStatusActor.NotifyAxisHalted(axis, ref)
+        val future = AskPattern.Askable(internalStateActor).ask[InternalStateActor.ThreadHaltedAck](
+          ref => InternalStateActor.ThreadHalted(activeThread, axis, ref)
         )(askTimeout, askScheduler)
         Await.result(future, askTimeout.duration)
       }
       notifyResult match {
         case Failure(ex) =>
-          log.warn(s"checkAndInterrupt: NotifyAxisHalted($axis) failed: ${ex.getMessage} " +
-            s"— next QR scan's Step 3 backstop may misattribute residue")
+          log.warn(s"checkAndInterrupt: ThreadHalted($activeThread, $axis) failed: ${ex.getMessage} " +
+            s"— scan attribution may misattribute the halted program's residue")
         case Success(_) =>
-          log.debug(s"checkAndInterrupt: axis $axis halt notification acked by CS")
+          log.debug(s"checkAndInterrupt: axis $axis thread $activeThread marked Halted in IS")
       }
 
     // Step 4: Stop motor motion if requested.  Omitted when the follow-on
@@ -635,19 +648,20 @@ object CommandHandlerActor {
       Map("commandHalted" -> false),
       ctx.system.ignoreRef)
 
-    // Step 8: Explicit registry exit for the halted thread. CS pruned its
-    // axisThreads on NotifyAxisHalted (step 3), so no subsequent scan will
-    // ever observe this thread — IS's registry entry and the CI actor's
-    // reservation need this explicit release. Sent AFTER the commandHalted
-    // pulse (steps 5-7) so the old watcher terminates on commandHalted
-    // (INTERRUPTED) before the activeThread→0 notification could reach it;
-    // mailbox order from CH to IS, and IS to the watcher, preserves this.
-    // Idempotent in IS if a scan completion raced the halt.
+    // Step 8: Explicit registry exit for the halted thread. The entry was
+    // marked Halted in step 3, so no scan will ever attribute (complete) it —
+    // IS's registry entry and the CI actor's reservation need this explicit
+    // release. Sent AFTER the commandHalted pulse (steps 5-7) so the old
+    // watcher terminates on commandHalted (INTERRUPTED) before the
+    // activeThread→0 notification could reach it; mailbox order from CH to
+    // IS, and IS to the watcher, preserves this. Idempotent in IS if a scan
+    // completion raced the halt.
     // Step 8 (S84): skip the registry exit when the follow-on will REUSE this
-    // thread — retain its reservation and registry entry (released later via normal
-    // attribution) instead of releasing and racing a re-allocation. Safe in the
-    // gap: NotifyAxisHalted (step 3) already pruned CS's axis->thread map, so no
-    // scan attributes this thread until executeProgramAndWatch re-registers it.
+    // thread — retain its reservation and registry entry (released later via
+    // normal attribution) instead of releasing and racing a re-allocation.
+    // Safe in the gap: the Halted mark (step 3) excludes the entry from scan
+    // attribution until executeProgramAndWatch re-registers it (Halted →
+    // Active, same thread, same axis).
     if haltSucceeded && !reuseHaltedThread then
       internalStateActor ! InternalStateActor.UnregisterThread(activeThread, axis)
 
@@ -876,12 +890,26 @@ object CommandHandlerActor {
 
     // Step 2: Execute program via CI actor (thread allocated from pool, optional preCommands,
     // and "XQ;MG _XQ<thread>" compound all inside galilIo.synchronized in the CI actor)
-    val result = Try {
+    def executeOnce(): Try[GalilCommandMessage.ExecuteProgramResult] = Try {
       val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.ExecuteProgramResult](
         ref => GalilCommandMessage.ExecuteProgram(label, ref, preCommands, forceThread)
       )(askTimeout, askScheduler)
       Await.result(future, askTimeout.duration)
     }
+    var result = executeOnce()
+
+    // Transient-exhaustion retry (S85 finding 3): under a stop burst, the
+    // ReleaseThread messages from the scan that attributed the previous
+    // completions can still be queued BEHIND our ExecuteProgram in the CI
+    // actor's mailbox — allocation then sees every thread reserved while the
+    // hardware shows them all free, and fails a command that would succeed
+    // milliseconds later. One bounded retry after a beat covers exactly that
+    // in-flight-release race; a second failure is reported as before (genuine
+    // exhaustion, or a leaked reservation to investigate).
+    if result.toOption.exists(_.error.exists(_.startsWith("No threads available"))) then
+      log.warn(s"$commandName $axis: no threads allocatable (releases may be in flight) — retrying once in 200ms")
+      Thread.sleep(200)
+      result = executeOnce()
 
     result match {
       case Failure(ex) =>
@@ -1062,7 +1090,7 @@ object CommandHandlerActor {
     // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
     val reuseThread: Option[Int] =
       if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-        checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+        checkAndInterrupt("positionAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx,
           reuseHaltedThread = true)
       else None
 
@@ -1250,7 +1278,7 @@ object CommandHandlerActor {
     // handles the actual motor stop in all three cases.
     val reuseThread: Option[Int] =
       if currentAxisState == AxisStateEnum.Moving || currentAxisState == AxisStateEnum.Homing then
-        checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+        checkAndInterrupt("stopAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx,
           sendST = false, reuseHaltedThread = true)
       else None
 
@@ -1396,7 +1424,7 @@ object CommandHandlerActor {
     // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
     val reuseThread: Option[Int] =
       if currentState.exists(_.axisState == AxisStateEnum.Moving) then
-        checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+        checkAndInterrupt("offsetAxis", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx,
           reuseHaltedThread = true)
       else None
 
@@ -1492,7 +1520,7 @@ object CommandHandlerActor {
 
     val reuseThread: Option[Int] =
       if maybeWheelState.exists(_.axisState == AxisStateEnum.Moving) then
-        checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+        checkAndInterrupt("selectWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx,
           reuseHaltedThread = true)
       else None
 
@@ -1651,7 +1679,7 @@ object CommandHandlerActor {
     // move's thread and reuse it via forceThread. (S84 Option 1 reorder)
     val reuseThread: Option[Int] =
       if maybeAxisState.exists(_.axisState == AxisStateEnum.Moving) then
-        checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, statusMonitor, log, askTimeout, askScheduler, ctx,
+        checkAndInterrupt("positionWheel", axis, ciActor, internalStateActor, log, askTimeout, askScheduler, ctx,
           reuseHaltedThread = true)
       else None
 

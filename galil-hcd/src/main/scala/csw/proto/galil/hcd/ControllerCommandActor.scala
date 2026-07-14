@@ -42,6 +42,33 @@ private[hcd] object ControllerCommandActor {
     rawResponse: String
   )
 
+  /**
+   * Pure thread-selection policy (S85): prefer threads 1-7 in ascending
+   * order; thread 0 is the LAST RESORT, allocatable only when every other
+   * thread is unavailable.
+   *
+   * Rationale: the controller has 8 threads for up to 8 motors. Reserving
+   * thread 0 outright caps simultaneous motion at 7 axes — fine for the
+   * 6-motor APS controllers, but a needless limit for a fully-populated one.
+   * Thread 0's dedicated jobs (#Init, #Setup, #AUTO) run only while motion
+   * commands are gated out (Uninitialized/Initializing/Faulted), so lending
+   * it to an eighth concurrent motion is safe; the hardware-busy check below
+   * still protects against a genuinely active #Init/#Setup, and a faultReset
+   * issued while a motion occupies thread 0 fails cleanly at XQ (operator
+   * retries after stopping axes) rather than corrupting state.
+   *
+   * A candidate must be hardware-free (its bit clear in threadStatus, i.e.
+   * MG _NO) AND observed (not awaiting completion attribution — see the
+   * unobservedThreads gate in behavior()).
+   *
+   * @param threadStatus MG _NO bitmask; bit N set = thread N executing
+   * @param unobserved   threads reserved pending completion attribution
+   * @return the thread to allocate, or None if none is allocatable
+   */
+  private[hcd] def selectThread(threadStatus: Int, unobserved: Set[Int]): Option[Int] =
+    val preference = (1 to 7) :+ 0
+    preference.find(t => (threadStatus & (1 << t)) == 0 && !unobserved.contains(t))
+
   def behavior(
       galilConfig: GalilConfig,
       loggerFactory: LoggerFactory,
@@ -157,14 +184,16 @@ private[hcd] object ControllerCommandActor {
         // ========================================
         // Thread Allocation (from hardware state + observation gate)
         // ========================================
-        // Thread 0 is reserved for #Init / general purpose.
-        // Threads 1-7 are available for embedded programs.
+        // Threads 1-7 are preferred for embedded programs; thread 0 (the
+        // #Init/#Setup/#AUTO general-purpose thread) is lent out as a last
+        // resort so a fully-populated 8-motor controller can move all axes
+        // at once (S85; policy in ControllerCommandActor.selectThread).
         // Allocation queries MG _NO directly for hardware state, gated by
         // unobservedThreads below. Hardware-free is necessary but NOT
         // sufficient: a short program (e.g. #StopX on an idle axis) can start
         // and finish entirely between two QR scans, so the hardware shows the
         // thread free while its completion has not yet been observed and
-        // attributed by the scan pipeline (CS → IS.UpdateThreadStatus).
+        // attributed by the scan pipeline (CS → IS.ScanObservations).
         // Reusing such a thread would overwrite IS's thread→axis registry
         // entry, misattribute the completion to the new occupant, and orphan
         // the previous command's watcher (stuck Homing symptom, S82).
@@ -172,7 +201,7 @@ private[hcd] object ControllerCommandActor {
         // Threads XQ'd by this HCD whose completion has not yet been observed
         // by the scan pipeline. Added on successful XQ; removed on
         // ReleaseThread from IS (sent when IS attributes the completion via
-        // UpdateThreadStatus, or when CH explicitly unregisters after an HX).
+        // ScanObservations, or when CH explicitly unregisters after an HX).
         var unobservedThreads: Set[Int] = Set.empty
 
         /**
@@ -199,7 +228,10 @@ private[hcd] object ControllerCommandActor {
 
         /**
          * Allocate a thread: hardware-free (MG _NO bit clear) AND observed
-         * (not awaiting completion attribution). Thread 0 is reserved.
+         * (not awaiting completion attribution). Selection order is the
+         * selectThread policy: 1-7 ascending, thread 0 as last resort (S85).
+         * A thread-0 allocation is logged at INFO — it means the controller
+         * is running programs on every thread it has.
          *
          * The two failure modes are logged distinctly:
          *   - all threads hardware-busy: genuine exhaustion
@@ -213,20 +245,25 @@ private[hcd] object ControllerCommandActor {
          */
         def allocateThread(): Option[Int] = {
           val threadStatus = queryThreadStatus()
-          val hwFree = (1 to 7).filter(t => (threadStatus & (1 << t)) == 0)
-          hwFree.find(t => !unobservedThreads.contains(t)) match {
+          ControllerCommandActor.selectThread(threadStatus, unobservedThreads) match {
+            case Some(0) =>
+              log.info(s"Allocated thread 0 — LAST RESORT, threads 1-7 exhausted " +
+                s"(_NO=0x${threadStatus.toHexString}, " +
+                s"unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")})")
+              Some(0)
             case Some(thread) =>
               log.debug(s"Allocated thread $thread (_NO=0x${threadStatus.toHexString}, " +
                 s"unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")})")
               Some(thread)
-            case None if hwFree.nonEmpty =>
-              log.warn(s"No allocatable threads: hardware-free ${hwFree.mkString("[", ",", "]")} " +
-                s"all awaiting completion observation " +
-                s"(unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")}, " +
-                s"_NO=0x${threadStatus.toHexString}). Clears within one QR scan.")
-              None
             case None =>
-              log.warn(s"No free threads available (_NO=0x${threadStatus.toHexString})")
+              val hwFree = ((1 to 7) :+ 0).filter(t => (threadStatus & (1 << t)) == 0)
+              if (hwFree.nonEmpty)
+                log.warn(s"No allocatable threads: hardware-free ${hwFree.mkString("[", ",", "]")} " +
+                  s"all awaiting completion observation " +
+                  s"(unobserved=${unobservedThreads.toSeq.sorted.mkString("[", ",", "]")}, " +
+                  s"_NO=0x${threadStatus.toHexString}). Clears within one QR scan.")
+              else
+                log.warn(s"No free threads available (_NO=0x${threadStatus.toHexString})")
               None
           }
         }

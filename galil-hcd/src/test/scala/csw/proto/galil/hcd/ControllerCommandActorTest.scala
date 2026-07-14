@@ -349,4 +349,39 @@ class ControllerCommandActorTest extends AnyFunSuite with Matchers with BeforeAn
     // Should complete reasonably fast
     duration should be < 2000L  // < 2 seconds for 10 commands
   }
+
+  // ========================================
+  // Thread-selection policy (S85): 1-7 preferred, thread 0 as last resort
+  //
+  // Pure-function tests of ControllerCommandActor.selectThread — the policy
+  // behind allocateThread. No controller required. The controller has 8
+  // threads for up to 8 motors; reserving thread 0 outright would cap
+  // simultaneous motion at 7 axes.
+  // ========================================
+
+  test("selectThread prefers threads 1-7 in ascending order") {
+    ControllerCommandActor.selectThread(0x00, Set.empty) shouldBe Some(1)
+    // threads 1,2 hardware-busy -> next preferred is 3, NOT 0
+    ControllerCommandActor.selectThread(0x06, Set.empty) shouldBe Some(3)
+    // thread 0 hardware-busy (#Init/#Setup running) is irrelevant while 1-7 have room
+    ControllerCommandActor.selectThread(0x01, Set.empty) shouldBe Some(1)
+  }
+
+  test("selectThread lends thread 0 only when threads 1-7 are exhausted") {
+    // 1-7 hardware-busy, 0 free -> last resort fires (the 8-motor case)
+    ControllerCommandActor.selectThread(0xFE, Set.empty) shouldBe Some(0)
+    // mixed exhaustion: 1-4 hardware-busy, 5-7 reserved pending observation -> 0
+    ControllerCommandActor.selectThread(0x1E, Set(5, 6, 7)) shouldBe Some(0)
+    // all 8 hardware-busy -> genuine exhaustion
+    ControllerCommandActor.selectThread(0xFF, Set.empty) shouldBe None
+  }
+
+  test("selectThread applies the observation gate to thread 0 like any other thread") {
+    // 1-7 hardware-busy; 0 hardware-free but awaiting completion attribution -> None
+    ControllerCommandActor.selectThread(0xFE, Set(0)) shouldBe None
+    // everything hardware-free but all reserved -> None (transient back-pressure)
+    ControllerCommandActor.selectThread(0x00, (0 to 7).toSet) shouldBe None
+    // 1-7 reserved, 0 free and observed -> 0
+    ControllerCommandActor.selectThread(0x00, (1 to 7).toSet) shouldBe Some(0)
+  }
 }

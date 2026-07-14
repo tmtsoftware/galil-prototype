@@ -386,9 +386,24 @@ operator recovery.
 
 ### Thread management
 
-Thread 0 is reserved for automated subroutines (`#POSERR`, `#LIMSWI`, etc.). Threads 1-7
-are allocated dynamically by the HCD for per-axis motion commands; allocation reads
-`MG _NO` to find an unused thread.
+Threads 1-7 are allocated dynamically by the HCD for per-axis motion commands;
+allocation reads `MG _NO` to find an unused thread. Thread 0 — home of the automatic
+subroutines (`#POSERR`, `#LIMSWI`, `#MCTIME`) and of `#Init`/`#Setup`/`#AUTO` — is lent
+out as a **last resort** when threads 1-7 are all in use, so a fully-populated 8-motor
+controller can move every axis simultaneously (S85; policy in
+`ControllerCommandActor.selectThread`). Notes on the last-resort case:
+
+- An automatic subroutine firing while a motion program occupies thread 0 interrupts it
+  and resumes it on `RE` (Galil interrupt semantics). The motion itself is
+  profiler-driven, so the suspension only delays the program's monitoring/completion —
+  but this interrupt-resume behavior is queued for empirical STB verification before
+  8-motor operation is relied upon.
+- A handler running on an *idle* thread 0 sets `_NO` bit 0, so the allocator correctly
+  sees it hardware-busy for the handler's duration.
+- `#Init` is allocated dynamically like any program (it does NOT run on thread 0);
+  only `#Setup` runs on the literal thread 0. A `faultReset` re-init issued while a
+  last-resort motion occupies thread 0 fails cleanly at `XQ #Setup,0`; stop axes and
+  retry.
 
 Per-thread state uses `MG _XQ<n>`, not `MG _NO` or the QR `threadStatus` byte. When one
 thread is mid-motion and another thread's program is killed by `#CMDERR`, both `_NO` and

@@ -1320,3 +1320,292 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     s.axisState shouldBe AxisStateEnum.Idle
     s.trackingSession shouldBe Some(reseeded)  // explicit value preserved
   }
+  // ========================================
+  // Scan attribution in IS (ADR-001, Amendment A)
+  //
+  // IS owns the thread→axis registry and performs ALL attribution —
+  // completions AND errors — from CS's per-scan ScanObservations, under one
+  // invariant: an entry participates only if it is not Halted, its thread's
+  // bit is clear, AND the observation is fresher than the registration
+  // (observedAt > registeredAt). The freshness clause is what makes message
+  // delivery latency harmless (the S85 storm delivered scans up to ~1.4s
+  // late, after threads had been released and reallocated).
+  //
+  // These are pure-message tests: no GalilIo stubs — registry + observations
+  // in, state changes out. The end-to-end pipeline (CS scan → ScanObservations
+  // → these decisions) is covered by ControllerStatusActorTest.
+  // ========================================
+
+  private def cmdStateOf(
+    actor: org.apache.pekko.actor.typed.ActorRef[InternalStateActor.Command],
+    axis: Axis
+  ): AxisCmdState =
+    val q = testKit.createTestProbe[Option[AxisCmdState]]()
+    actor ! InternalStateActor.GetAxisCmdState(axis, q.ref)
+    q.receiveMessage().getOrElse(fail(s"axis $axis cmd state missing"))
+
+  /**
+   * Mailbox barrier: a synchronous ask guarantees every message previously
+   * sent to `actor` from this test has been processed (single-sender FIFO).
+   * Used to order test-side System.nanoTime() captures against RegisterThread
+   * processing, which stamps the registeredAt staleness fence.
+   */
+  private def barrier(actor: org.apache.pekko.actor.typed.ActorRef[InternalStateActor.Command]): Unit =
+    val q = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(q.ref)
+    q.receiveMessage()
+    ()
+
+  /** A timestamp guaranteed fresher than every registration already sent. */
+  private def freshObservedAt(actor: org.apache.pekko.actor.typed.ActorRef[InternalStateActor.Command]): Long =
+    barrier(actor)
+    System.nanoTime()
+
+  test("S85 regression: in-flight program's ae==1 is not misattributed (stop_storm false positive)") {
+    // The original 2026-07-13 18:24 incident: axis A's #MoveA (thread 4) had
+    // completed; #StopA had just launched on thread 2 with its ae[A]=1 entry
+    // flag. Under Amendment A the scan observes all 8 threads: bit 2 SET
+    // (StopA running) — so ae[A]==1 means "in flight", not "died". No error,
+    // no completion.
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)   // #StopA just launched
+    actor ! InternalStateActor.ScanObservations(1 << 2, freshObservedAt(actor), Map(Axis.A -> 1), 0, None)
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.A)
+    cmd.axisErrorMsg shouldBe ""             // the S85 bug latched an error here
+    cmd.activeThread shouldBe 2              // StopA still running, not completed
+    axisStateOf(actor, Axis.A).axisState should not be AxisStateEnum.Error
+  }
+
+  test("S85 storm regression: a stale scan cannot attribute against a reallocated thread") {
+    // HCD.1 23:11:21.416 replay: #StopB completed on thread 2 and was
+    // attributed; thread 2 was released and reallocated to #SelectB. A scan
+    // whose _XQ read PREdated the SelectB launch (bit 2 clear — it observed
+    // StopB's completed incarnation) was delivered ~1.4s late, after the
+    // SelectB registration, and both failed and completed the just-started
+    // command. The staleness gate (observedAt < registeredAt) excludes it.
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.B)))
+    val staleObservedAt = System.nanoTime()                // read before the launch
+    actor ! InternalStateActor.RegisterThread(2, Axis.B)   // #SelectB launches
+    barrier(actor)
+    actor ! InternalStateActor.ScanObservations(0x00, staleObservedAt, Map(Axis.B -> 1), 0, None)
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.B)
+    cmd.axisErrorMsg shouldBe ""
+    cmd.activeThread shouldBe 2              // no spurious completion either
+    axisStateOf(actor, Axis.B).axisState should not be AxisStateEnum.Error
+  }
+
+  test("S85 storm regression: a halt-window scan cannot attribute after reuse re-registration") {
+    // HCD.2 23:11:46.955 replay: #MoveD (thread 5) was HX'd; #StopD reused
+    // thread 5 (Halted → Active). A scan whose _XQ read fell in the halt
+    // window (bit clear) was delivered after the re-registration. The
+    // re-registration refreshes registeredAt, so the stale observation is
+    // excluded; a fresh scan then completes StopD normally.
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.D)))
+    actor ! InternalStateActor.RegisterThread(5, Axis.D)   // #MoveD
+    val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    actor ! InternalStateActor.ThreadHalted(5, Axis.D, ack.ref)  // HX
+    ack.receiveMessage(500.millis)
+    val haltWindowObservedAt = System.nanoTime()           // scan reads _XQ5=-1 here
+    actor ! InternalStateActor.RegisterThread(5, Axis.D)   // #StopD reuses thread 5
+    barrier(actor)
+    actor ! InternalStateActor.ScanObservations(0x00, haltWindowObservedAt, Map(Axis.D -> 1), 0, None)
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.D)
+    cmd.axisErrorMsg shouldBe ""
+    cmd.activeThread shouldBe 5
+    // Fresh observation: StopD's clean completion attributes normally.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.D -> 0), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.D).activeThread shouldBe 0
+  }
+
+  test("Halted entry is excluded from attribution: no error, no completion") {
+    // After checkAndInterrupt's HX + ThreadHalted, the dead thread's observed
+    // clear must neither complete the interrupted command nor misattribute
+    // its residual ae==1 (the S55 hazard, now an explicit registry state).
+    // The observation here is FRESH — the Halted flag, not staleness, is
+    // what excludes it.
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A)))
+    actor ! InternalStateActor.RegisterThread(3, Axis.A)
+    val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    actor ! InternalStateActor.ThreadHalted(3, Axis.A, ack.ref)
+    ack.receiveMessage(500.millis)
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.A -> 1), 0, None)
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.A)
+    cmd.axisErrorMsg shouldBe ""
+    cmd.activeThread shouldBe 3              // entry retained, awaiting exit
+  }
+
+  test("S84 reuse lifecycle: Halted → re-register same thread → normal completion") {
+    // checkAndInterrupt(reuseHaltedThread=true) retains the reservation and
+    // registry entry; executeProgramAndWatch re-registers the SAME thread for
+    // the SAME axis (Halted → Active). The follow-on then completes normally.
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A)))
+    val cmdProbe = testKit.createTestProbe[GalilCommandMessage]()
+    actor ! InternalStateActor.SetCommandActor(cmdProbe.ref)
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)         // interrupted move
+    val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    actor ! InternalStateActor.ThreadHalted(2, Axis.A, ack.ref)  // HX'd
+    ack.receiveMessage(500.millis)
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)         // follow-on reuses thread 2
+    // In-flight scan: thread 2 active, ae[A]=1 (follow-on's entry flag) → no error.
+    actor ! InternalStateActor.ScanObservations(1 << 2, freshObservedAt(actor), Map(Axis.A -> 1), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe ""
+    // Completion scan: thread 2 cleared, ae cleaned by the program's success path.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.A -> 0), 0, None)
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.A)
+    cmd.axisErrorMsg shouldBe ""
+    cmd.activeThread shouldBe 0
+    // Exactly one ReleaseThread(2), from the completion (reuse retained the
+    // reservation across the halt; no release at halt time).
+    cmdProbe.expectMessage(GalilCommandMessage.ReleaseThread(2))
+    cmdProbe.expectNoMessage(200.millis)
+  }
+
+  test("controller error with a single candidate is attributed to that axis, then completed") {
+    // errorCode!=0 evidence + exactly one axis whose current thread was
+    // observed-cleared (fresh) with ae==1 → per-axis "Embedded program
+    // error", and the watcher-ordering contract: axisErrorMsg lands, THEN
+    // activeThread→0.
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
+    actor ! InternalStateActor.RegisterThread(3, Axis.B)
+    actor ! InternalStateActor.ScanObservations(
+      0x00, freshObservedAt(actor), Map(Axis.B -> 1), 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.B)
+    cmd.axisErrorMsg shouldBe "Embedded program error: 17 Program not valid"
+    cmd.activeThread shouldBe 0              // completion still attributed after the error
+    axisStateOf(actor, Axis.B).axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("controller error defers one scan, then attributes when the thread settles") {
+    // errorCode latches before _XQ reports -1 for the dead thread. First scan:
+    // evidence but thread still reads active → hold the TC text. Second scan:
+    // thread observed-cleared with ae==1 → attributed with the HELD text (the
+    // hardware latch was already consumed by CS's eager TC fetch).
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.C)))
+    actor ! InternalStateActor.RegisterThread(4, Axis.C)
+    actor ! InternalStateActor.ScanObservations(
+      1 << 4, freshObservedAt(actor), Map(Axis.C -> 1), 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.C).axisErrorMsg shouldBe ""   // deferred, not yet attributed
+    // Retry scan: errorCode back to 0 (latch consumed), thread now cleared.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.C -> 1), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.C).axisErrorMsg shouldBe "Embedded program error: 17 Program not valid"
+  }
+
+  test("unattributable controller error faults the HCD after the one-scan defer and safes motors") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    val cmdProbe = testKit.createTestProbe[GalilCommandMessage]()
+    actor ! InternalStateActor.SetCommandActor(cmdProbe.ref)
+    // No registry entry can explain the error; two scans exhaust the defer.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map.empty, 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    val hcdProbe1 = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(hcdProbe1.ref)
+    hcdProbe1.receiveMessage().state should not be HcdStateEnum.Faulted  // deferred
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map.empty, 0, None)
+    Thread.sleep(50)
+    val hcdProbe2 = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(hcdProbe2.ref)
+    val faulted = hcdProbe2.receiveMessage()
+    faulted.state shouldBe HcdStateEnum.Faulted
+    faulted.controllerErrorMsg shouldBe "Controller Error: 17 Program not valid"
+    // Defensive motor safing went out on the CI actor (command connection).
+    val sent = cmdProbe.expectMessageType[GalilCommandMessage.SendCommand]
+    sent.commandString shouldBe "ST;MO"
+  }
+
+  test("controller error with 2+ candidates faults the HCD immediately (multi-axis ambiguity)") {
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)
+    actor ! InternalStateActor.RegisterThread(3, Axis.B)
+    actor ! InternalStateActor.ScanObservations(
+      0x00, freshObservedAt(actor), Map(Axis.A -> 1, Axis.B -> 1), 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    hcdProbe.receiveMessage().state shouldBe HcdStateEnum.Faulted
+  }
+
+  test("controller-error attribution is suppressed while the HCD is already Faulted") {
+    // A running embedded error handler can re-latch CMDERR every few seconds
+    // post-fault; the evidence is consumed by CS's eager TC fetch and must be
+    // dropped here (the old CS-side controllerFaulted gate, relocated).
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    actor ! InternalStateActor.EnterFaulted("pre-existing fault")
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)
+    actor ! InternalStateActor.ScanObservations(
+      0x00, freshObservedAt(actor), Map(Axis.A -> 1), 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    // Neither per-axis attribution nor a new fault reason.
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe ""
+    val hcdProbe = testKit.createTestProbe[HcdState]()
+    actor ! InternalStateActor.GetHcdState(hcdProbe.ref)
+    hcdProbe.receiveMessage().controllerErrorMsg shouldBe "pre-existing fault"
+  }
+
+  test("ae codes 2/3/4 report per-axis errors directly from observations, deduped across scans") {
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
+    val watcher = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    actor ! InternalStateActor.SubscribeCmdState(Axis.A, watcher.ref)
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.A -> 2), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe "Position error exceeded limit"
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Error
+    watcher.expectMessageType[InternalStateActor.CmdStateChanged]
+    // Same steady-state ae on the next scan: deduped, no second notification.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.A -> 2), 0, None)
+    watcher.expectNoMessage(200.millis)
+  }
+
+  test("registry activity is signalled to CS on empty↔non-empty transitions only") {
+    val actor = testKit.spawn(InternalStateActor(
+      HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
+    val cs = testKit.createTestProbe[ControllerStatusActor.Command]()
+    actor ! InternalStateActor.SetStatusActor(cs.ref)
+    actor ! InternalStateActor.RegisterThread(2, Axis.A)
+    cs.expectMessage(ControllerStatusActor.ThreadRegistryActivity(true))
+    actor ! InternalStateActor.RegisterThread(3, Axis.B)      // still non-empty: edge-triggered, no signal
+    cs.expectNoMessage(200.millis)
+    // One fresh scan completes both entries; only the non-empty→empty edge signals.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map.empty, 0, None)
+    cs.expectMessage(ControllerStatusActor.ThreadRegistryActivity(false))
+    cs.expectNoMessage(200.millis)
+  }
+
+  test("GetAxisThread answers from the registry and excludes Halted entries") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.A)))
+    val q = testKit.createTestProbe[Option[Int]]()
+    actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
+    q.receiveMessage() shouldBe None                          // nothing registered
+    actor ! InternalStateActor.RegisterThread(4, Axis.A)
+    actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
+    q.receiveMessage() shouldBe Some(4)                       // registry-authoritative
+    // Display-state divergence (S85 finding 4): clearActiveCommand zeroes
+    // AxisCmdState.activeThread (e.g. on a watcher timeout) while the program
+    // still runs — the registry answer must be unaffected.
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("clearActiveCommand" -> true), testKit.system.ignoreRef)
+    cmdStateOf(actor, Axis.A).activeThread shouldBe 0         // display state zeroed...
+    actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
+    q.receiveMessage() shouldBe Some(4)                       // ...registry still knows
+    val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    actor ! InternalStateActor.ThreadHalted(4, Axis.A, ack.ref)
+    ack.receiveMessage(500.millis)
+    actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
+    q.receiveMessage() shouldBe None                          // Halted: nothing to interrupt
+  }

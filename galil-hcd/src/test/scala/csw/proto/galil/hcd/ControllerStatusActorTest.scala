@@ -1002,7 +1002,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     // The Step-3 defensive edge case: thread exited without clearing ae[] and
     // without any controller error.  This shouldn't happen with the
     // documented #X.../#StopX convention, but is treated as a per-axis Error
-    // defensively (per the decideAxisAndControllerErrors code).
+    // defensively (per IS.handleScanObservations, ADR-001).
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
@@ -1030,21 +1030,23 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     stateProbe.receiveMessage().get.axisState shouldBe AxisStateEnum.Error
   }
 
-  test("S55: NotifyAxisHalted pruning prevents spurious ae==1 error after CH-initiated HX") {
+  test("S55: ThreadHalted marking prevents spurious ae==1 error after CH-initiated HX") {
     // The S55 edge case: CommandHandlerActor's checkAndInterrupt issues HX to
     // stop a running axis program before launching a new one.  The next QR
     // scan sees ae[axis]==1 (the entry-time flag from the halted program that
-    // never reached its success path).  Without pruning, CS would treat this
-    // as the defensive "program ended unexpectedly" Error.
+    // never reached its success path).  Without the halt mark, IS would treat
+    // this as the defensive "program ended unexpectedly" Error.
     //
-    // Fix: CH sends NotifyAxisHalted(axis) right after the HX, which prunes
-    // the axis from CS's axisThreads map.  Without the axis in axisThreads,
-    // axesWithClearedThread won't include it, and the defensive Step-3 check
-    // won't fire.
+    // Fix (ADR-001 form): CH sends IS.ThreadHalted(thread, axis) right after
+    // the HX, which marks the registry entry Halted.  Halted entries are
+    // excluded from scan attribution — neither error-attributed nor completed
+    // — so the residual ae==1 from the deliberately-killed program is ignored.
+    // (Previously this was CS.NotifyAxisHalted pruning CS's replica map; the
+    // synchronization point is unchanged, only the owner moved.)
     //
-    // Test: register axis A on thread 1, simulate halt via NotifyAxisHalted,
-    // then drive a scan where thread is cleared AND ae[A]==1.  Expect NO
-    // axis error.
+    // Test: register axis A on thread 1, simulate halt via ThreadHalted, then
+    // drive a full CS scan where _XQ reports the thread cleared AND ae[A]==1.
+    // Expect NO axis error.
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
@@ -1059,18 +1061,22 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     Thread.sleep(20)
     internalState ! InternalStateActor.RegisterThread(1, Axis.A)
     Thread.sleep(20)
-    // Simulate the post-HX prune — CH would send this synchronously after HX.
-    val ackProbe = testKit.createTestProbe[ControllerStatusActor.NotifyAxisHaltedAck]()
-    sm ! ControllerStatusActor.NotifyAxisHalted(Axis.A, ackProbe.ref)
+    // Simulate the post-HX halt mark — CH sends this synchronously after HX.
+    val ackProbe = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    internalState ! InternalStateActor.ThreadHalted(1, Axis.A, ackProbe.ref)
     ackProbe.receiveMessage(500.millis)
-    // Drive a scan: thread cleared, ae[A]==1 (residual entry-time flag).
+    // Drive a scan: thread cleared (_XQ1=-1), ae[A]==1 (residual entry flag).
     val dr = createExtendedDataRecord(threadStatus = 0x00.toByte)
     sm ! ControllerStatusActor.QRResponse(dr)
     Thread.sleep(150)
     val cmdProbe = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, cmdProbe.ref)
-    // No error — the prune kept axis A out of axesWithClearedThread.
-    cmdProbe.receiveMessage().get.axisErrorMsg shouldBe ""
+    val cmd = cmdProbe.receiveMessage().get
+    // No error — the Halted mark excluded the entry from attribution.
+    cmd.axisErrorMsg shouldBe ""
+    // And no completion either: activeThread is still 1 (the entry awaits its
+    // explicit exit via UnregisterThread or reuse re-registration).
+    cmd.activeThread shouldBe 1
   }
 
   test("ae[] reads are gated on SetEmbeddedArraysReady (startup suppression)") {

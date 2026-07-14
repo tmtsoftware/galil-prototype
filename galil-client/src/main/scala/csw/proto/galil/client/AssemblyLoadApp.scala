@@ -359,7 +359,6 @@ object AssemblyLoadApp {
     case _: Locked    => "Locked"
     case _: Cancelled => "Cancelled"
     case _: Started   => "Started" // submitAndWait resolves to a final response; Started is anomalous
-    case other        => s"Other(${other.getClass.getSimpleName.stripSuffix("$")})"
 
   // ---------------------------------------------------------------------------
   // Actor system / services

@@ -111,7 +111,7 @@ object GalilCommandMessage {
    * Release a thread reservation held by the CI actor.
    *
    * Sent by InternalStateActor when a registered thread's completion has been
-   * observed and attributed (via UpdateThreadStatus), or when the thread was
+   * observed and attributed (via ScanObservations), or when the thread was
    * explicitly unregistered after an HX (UnregisterThread from CommandHandlerActor).
    * Until released, the thread is excluded from allocation even when the
    * hardware reports it free (MG _NO bit clear): a program can start and finish
@@ -614,10 +614,11 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     log.info(s"ControllerStatusActor created - standby: ${standbyRate}Hz, action: ${actionRate}Hz, " +
       s"configured axes: ${configuredAxesSet.toSeq.sortBy(_.index).mkString(",")}")
 
-    // Wire IS → CS so IS can forward RegisterAxisThread / ClearAxisThread
-    // events. Must happen after CS is spawned (CS doesn't exist when IS is
-    // constructed at HCD startup). Without this, CS's axis→thread map stays
-    // empty and per-axis program-error attribution from ae[] is disabled.
+    // Wire IS → CS so IS can signal ThreadRegistryActivity (ADR-001
+    // Amendment A: CS keeps no thread bookkeeping — the scan queries all 8
+    // threads unconditionally; this signal only feeds CS's polling-rate
+    // policy). Must happen after CS is spawned (CS doesn't exist when IS is
+    // constructed at HCD startup).
     internalStateActor ! InternalStateActor.SetStatusActor(statusMonitor)
 
     // Store configured controller id and polling rates in IS. controllerId is
@@ -1697,11 +1698,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   // ========================================
   
   /**
-   * Initialize controller - execute #Init program on thread 0.
+   * Initialize controller - execute the #Init program.
    *
    * #Init declares and initializes all embedded variables (arrays, defaults).
-   * Thread 0 is the general-purpose thread; threads 1-7 are reserved for
-   * per-axis operations. #Init completes quickly (<1s).
+   * The thread is allocated dynamically via ExecuteProgram like any other
+   * program (S85 correction: an earlier version of this comment claimed
+   * thread 0; the allocator has always assigned from the pool — e.g. thread 1
+   * on a quiet controller). Only #Setup runs on the literal thread 0
+   * ("XQ #Setup,0" in setupAxes). #Init completes quickly (<1s).
    */
   private def initController(): Future[Unit] = {
     import scala.concurrent.duration._
@@ -2218,6 +2222,18 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         if !completed then
           throw new RuntimeException(
             s"Thread $allocatedThread timed out after $timeout waiting for '#$label' to complete")
+
+      // Release the CI actor's reservation now that the thread is confirmed
+      // stopped (both branches: instant completion and polled completion).
+      // This path allocates via ExecuteProgram — which reserves the thread —
+      // but never registers it with IS (no axis, no watcher), so scan
+      // attribution can never release it. Without this explicit release the
+      // reservation leaks for the whole session: S85 found #Init's thread
+      // held in unobservedThreads for the entire storm, shrinking the motion
+      // pool to 6 threads. NOT sent on the timeout throw above — a program
+      // that may still be running must stay reserved (the gate is protective
+      // there, exactly as designed).
+      controllerCommandActor ! GalilCommandMessage.ReleaseThread(allocatedThread)
 
       // Whether the thread was observed active or completed instantly, query TC 1
       // on the command connection to check for a controller error from this execution.

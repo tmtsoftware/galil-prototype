@@ -124,12 +124,17 @@ object InternalStateActor:
   /**
    * Register a thread as executing a command on behalf of an axis.
    * IS will track the thread→axis mapping and automatically clear the axis's
-   * activeThread when UpdateThreadStatus reports the thread has stopped.
+   * activeThread when a ScanObservations reports the thread has stopped.
    * This replaces the former UpdateAxisCmdState(activeThread=N) approach and
    * eliminates any hardcoded axis-index-to-thread-number mapping.
    *
-   * IS also forwards a RegisterAxisThread to ControllerStatusActor (if known)
-   * so CS can interpret per-axis ae[] reads correctly.
+   * Stamps the entry's registeredAt staleness fence and signals CS's
+   * polling-rate policy via ThreadRegistryActivity on the empty→non-empty
+   * transition (ADR-001 Amendment A).
+   *
+   * Re-registering the SAME thread for the SAME axis is the normal S84
+   * interrupt→follow-on reuse path: the entry transitions Halted → Active
+   * with the new command's program.
    */
   case class RegisterThread(thread: Int, axis: Axis) extends Command
 
@@ -137,9 +142,9 @@ object InternalStateActor:
    * Wire ControllerStatusActor reference into IS.
    *
    * Called once from GalilHcd.initialize() after CS is spawned. Without it,
-   * IS will still function but won't forward thread register/clear events to
-   * CS; which means CS's axis→thread map stays empty and its ae[] decision
-   * logic cannot attribute program errors to specific axes. Sent as a normal
+   * IS still functions but cannot signal ThreadRegistryActivity, so CS's
+   * polling-rate policy loses its registered-threads term (observation of
+   * completions then rides the axis-activity term alone). Sent as a normal
    * message rather than baked into the constructor because IS is spawned at
    * HCD construction (before config is loaded), while CS is created later in
    * initialize().
@@ -147,38 +152,96 @@ object InternalStateActor:
   case class SetStatusActor(statusActor: ActorRef[ControllerStatusActor.Command]) extends Command
 
   /**
-   * Report per-thread execution status from a QR scan.
-   * IS compares against registered threads to detect completions:
-   * for each registered (thread→axis) whose thread is in observedThreads AND
-   * whose bit is clear in threadStatusByte, IS attributes the completion —
-   * activeThread=0 on the owning axis, CmdStateChanged fired, ClearAxisThread
-   * forwarded to CS, ReleaseThread forwarded to the CI actor.
-   * Sent by ControllerStatusActor on every poll cycle.
+   * Complete raw observation set from one ControllerStatusActor QR scan
+   * (ADR-001; supersedes UpdateThreadStatus). IS — owner of the authoritative
+   * thread registry — performs ALL attribution from it, in this order:
    *
-   * @param threadStatusByte bitmask; bit N set = thread N executing
-   * @param observedThreads  the threads the scan actually queried (CS's
-   *        axisThreads.values at scan time). Registry entries NOT in this set
-   *        are never completed by this message: the scan predates CS learning
-   *        of them (RegisterThread → RegisterAxisThread was still in flight),
-   *        so their bits in the synthesized byte are vacuously 0, not observed
-   *        completions. Without this gate, a scan computed before registration
-   *        but delivered after it would complete a just-started command.
+   *   1. Error attribution (controller-error evidence, ae[] codes) against the
+   *      registry under the freshness invariant: ae[axis]==1 counts as a
+   *      program failure ONLY when the thread CURRENTLY registered for that
+   *      axis (and not marked halted) was observed-cleared by this same scan.
+   *   2. Completion attribution: each non-halted registry entry whose
+   *      thread's bit is clear and whose observation is fresh
+   *      (observedAt > registeredAt) → activeThread=0, CmdStateChanged fired,
+   *      ReleaseThread forwarded to the CI actor.
+   *
+   * Errors are processed BEFORE completions so a watcher sees axisErrorMsg
+   * before activeThread→0 and fails the command instead of completing it —
+   * the ordering contract that previously spanned two actors (CS pushed
+   * axisErrorMsg, then sent UpdateThreadStatus last) is now local sequencing
+   * in one handler.
+   *
+   * @param threadStatusByte bitmask over ALL 8 controller threads; bit N set =
+   *        thread N executing. Built by CS from `MG _XQ0..7` (the
+   *        authoritative source; QR's own byte can stay stale for seconds
+   *        post-CMDERR), falling back to the raw QR byte if the _XQ read
+   *        failed (fail-closed: a stale "running" bit only delays attribution
+   *        one scan, never fabricates).
+   * @param observedAt monotonic timestamp (System.nanoTime, same JVM) stamped
+   *        by CS immediately BEFORE the _XQ read. THE STALENESS GATE (ADR-001
+   *        Amendment A): a registry entry participates in attribution only if
+   *        observedAt > entry.registeredAt. RegisterThread is only sent after
+   *        the XQ succeeded, so registeredAt always postdates the program's
+   *        actual start; any scan that read _XQ before the program started
+   *        therefore carries observedAt < registeredAt and is excluded —
+   *        regardless of how long the message sat in a mailbox. This closes
+   *        the S85 storm race, where a scan observing a thread's PREVIOUS
+   *        incarnation (completed program) was delivered up to ~1.4s late,
+   *        after the thread had been released and reallocated, and both
+   *        failed and completed the just-started command.
+   * @param aeValues   per-axis embedded error flags (MG ae[i]); Map.empty when
+   *        the read was suppressed (pre-#Init) or failed benignly.
+   * @param errorCode  raw QR errorCode byte (0 = no latched controller error).
+   * @param tcText     TC 1 text, eagerly fetched by CS iff errorCode != 0.
+   *        Fetching consumes the hardware latch; IS carries this text across
+   *        its one-scan attribution deferral instead of relying on the latch.
    */
-  case class UpdateThreadStatus(threadStatusByte: Int, observedThreads: Set[Int]) extends Command
+  case class ScanObservations(
+    threadStatusByte: Int,
+    observedAt: Long,
+    aeValues: Map[Axis, Int],
+    errorCode: Int,
+    tcText: Option[String]
+  ) extends Command
+
+  /**
+   * Mark a registry entry Halted: CommandHandlerActor has deliberately stopped
+   * this thread (HX in checkAndInterrupt) ahead of a follow-on command.
+   *
+   * A Halted entry is excluded from BOTH attribution kinds until it exits:
+   *   - not completed (the interrupted command's response is owned by the
+   *     watcher via the commandHalted pulse, not by scan attribution; and a
+   *     later bit-clear must never fire a completion against the follow-on),
+   *   - not error-attributed (residual ae[axis]==1 is the entry-time flag of
+   *     a program we deliberately killed, not a failure — the S55 hazard).
+   *
+   * Exits from Halted: RegisterThread with the same thread+axis (S84 reuse —
+   * entry returns to Active under the new command) or UnregisterThread
+   * (non-reuse — entry removed, reservation released).
+   *
+   * Replaces CS.NotifyAxisHalted (ADR-001): the halted state used to be
+   * encoded implicitly as absence from CS's axis→thread replica; it is now an
+   * explicit, logged, testable registry state in the attribution authority.
+   * The reply is the same synchronization point the CS ask provided: CH must
+   * know the mark is in place before launching the follow-on program.
+   */
+  case class ThreadHalted(thread: Int, axis: Axis, replyTo: ActorRef[ThreadHaltedAck]) extends Command
+
+  /** Acknowledgement of ThreadHalted (synchronization point only). */
+  case class ThreadHaltedAck()
 
   /**
    * Explicitly remove a thread→axis registry entry after the thread was
-   * halted (HX) by CommandHandlerActor's checkAndInterrupt.
+   * halted (HX) by CommandHandlerActor's checkAndInterrupt, when the follow-on
+   * will NOT reuse the thread.
    *
-   * With observation-gated completion (see UpdateThreadStatus.observedThreads),
-   * a halted thread's registry entry has no natural exit: CS prunes its
-   * axisThreads on NotifyAxisHalted, so subsequent scans never observe the
-   * thread again. This message is that exit — it removes the entry, clears
+   * A Halted entry is excluded from scan attribution, so it has no natural
+   * exit: this message is that exit — it removes the entry, clears
    * activeThread on the axis, and releases the CI actor's reservation so the
    * thread is allocatable again.
    *
    * No-op (debug log) if the entry is absent or maps to a different axis:
-   * a scan completion may legitimately race the halt notification.
+   * a scan completion may legitimately race the halt.
    */
   case class UnregisterThread(thread: Int, axis: Axis) extends Command
 
@@ -187,10 +250,57 @@ object InternalStateActor:
    *
    * Called once from GalilHcd.initialize() after the CI actor is spawned.
    * IS uses it to send ReleaseThread when a registered thread's completion
-   * is observed/attributed, returning the thread to the allocation pool.
+   * is observed/attributed, returning the thread to the allocation pool, and
+   * to send the defensive `ST;MO` (safe all motors) when an unattributable
+   * controller error faults the HCD (ADR-001).
    * Same late-binding rationale as SetStatusActor.
    */
   case class SetCommandActor(commandActor: ActorRef[GalilCommandMessage]) extends Command
+
+  /**
+   * Internal: result of the "safe all motors" command (ST;MO) sent when the
+   * HCD transitions to Faulted due to an unattributable controller error.
+   * Fire-and-forget from the attribution logic's perspective; the handler
+   * just logs the outcome. Failure does not propagate; the HCD is already
+   * Faulted and the operator must intervene via faultReset anyway.
+   */
+  private[hcd] case class SafeAllMotorsResult(
+    result: GalilCommandMessage.SendCommandResult,
+    reason: String
+  ) extends Command
+
+  /**
+   * One thread→axis registry entry.
+   *
+   * @param axis   the axis whose embedded program runs on this thread
+   * @param halted true after CommandHandlerActor deliberately stopped the
+   *               thread (HX; see ThreadHalted). Halted entries are excluded
+   *               from scan attribution (completions AND errors) and exit via
+   *               re-registration (S84 reuse) or UnregisterThread.
+   * @param registeredAt monotonic timestamp (System.nanoTime) of registration
+   *               processing. The staleness gate: only observations stamped
+   *               AFTER this participate in attribution for this entry
+   *               (ADR-001 Amendment A). Re-registration (S84 reuse) refreshes
+   *               it, so scans from the halt window can never attribute
+   *               against the follow-on command.
+   */
+  case class ThreadEntry(axis: Axis, halted: Boolean = false, registeredAt: Long = 0L)
+
+  /**
+   * Query the thread currently registered (and not Halted) for an axis —
+   * the REGISTRY-authoritative answer, used by checkAndInterrupt to decide
+   * whether an HX is needed (ADR-001 Amendment A).
+   *
+   * AxisCmdState.activeThread is display state and diverges from the registry
+   * when a watcher timeout fires clearActiveCommand (which zeroes it) while
+   * the program still runs: trusting it made a post-timeout stopAxis skip the
+   * HX and the Halted mark, then allocate a fresh thread while the axis's
+   * real thread was still registered and reserved (S85 finding 4).
+   *
+   * Halted entries answer None: their program is already stopped, so there is
+   * nothing to interrupt (and checkAndInterrupt must not HX them again).
+   */
+  case class GetAxisThread(axis: Axis, replyTo: ActorRef[Option[Int]]) extends Command
 
   /**
    * Report connection status for one TCP handle.
@@ -217,8 +327,8 @@ object InternalStateActor:
    *   - Per-axis AxisCmdState: clearActiveCommand=true on axes that had an active command
    *
    * Callers:
-   *   - ControllerStatusActor.decideAxisAndControllerErrors when a controller
-   *     error cannot be attributed to a single axis (0 or 2+ candidates).
+   *   - InternalStateActor.handleScanObservations when a controller error
+   *     cannot be attributed to a single axis (0 or 2+ candidates; ADR-001).
    *   - InternalStateActor.ReportConnectionStatus(Disconnected) handler; self-message
    *     after the connection field is updated.
    *   - GalilHcd.handleFaultReset when recovery fails.
@@ -362,17 +472,42 @@ class InternalStateActor(
   // Maps subscriber to the axis they're watching
   private var cmdSubscribers: Map[ActorRef[CmdStateChanged], Axis] = Map.empty
 
-  // Thread→axis registry: tracks which Galil thread is executing for which axis.
-  // Written by RegisterThread (from CH after XQ). Exactly three exits, each of
-  // which also releases the CI actor's thread reservation:
-  //   1. UpdateThreadStatus observes the thread stopped (normal completion)
-  //   2. UnregisterThread from CH after an HX (halted thread; CS no longer
-  //      queries it, so no scan would ever observe it)
+  // Thread→axis registry: tracks which Galil thread is executing for which
+  // axis — THE authoritative source for all attribution (ADR-001).
+  // Written by RegisterThread (from CH after XQ); an entry is marked Halted
+  // by ThreadHalted (from CH after HX) and excluded from attribution while so
+  // marked. Exactly three exits, each of which also releases the CI actor's
+  // thread reservation:
+  //   1. ScanObservations observes a non-halted thread stopped (normal
+  //      completion)
+  //   2. UnregisterThread from CH after an HX without reuse
   //   3. RegisterThread invariant-violation recovery (should never occur;
   //      logged at ERROR)
+  // (A fourth transition — RegisterThread on a Halted entry with the same
+  // thread+axis — is the S84 reuse path: Halted → Active, no exit.)
   // No hardcoded axis↔thread mapping.
-  private var threadRegistry: Map[Int, Axis] = Map.empty
-  private var lastThreadStatusByte: Int = 0
+  private var threadRegistry: Map[Int, ThreadEntry] = Map.empty
+
+  // Last registry-activity value forwarded to CS (ThreadRegistryActivity).
+  // CS uses it only for the polling-rate policy; sent on empty↔non-empty
+  // transitions to keep the signal edge-triggered and low-rate.
+  private var lastNotifiedRegistryActive: Boolean = false
+
+  // Controller-error evidence carried across the one-scan attribution
+  // deferral (ADR-001). When a scan brings errorCode != 0 but no axis
+  // satisfies the attribution invariant, the TC text is held here for exactly
+  // one more scan: errorCode latches the instant a command fails, while
+  // _XQ<n> may not report -1 for the dead thread until the next servo cycle.
+  // The retry scan always resolves it: clean attribution (one candidate),
+  // or HCD-wide fault (still none, or 2+). CS consumed the hardware latch at
+  // eager TC fetch, so this field — not the latch — is the retry evidence.
+  private var pendingControllerError: Option[String] = None
+
+  // Per-axis last-reported axisErrorMsg (deduplication for steady-state ae[]
+  // values like POSERR/LIMSWI/MCTIME that persist across scans). Cleared when
+  // the axis leaves Error state (operator recovery via Home/Stop) in
+  // handleUpdateAxisState.
+  private var lastReportedAxisError: Map[Axis, String] = Map.empty
 
   // ControllerStatusActor reference, wired in via SetStatusActor after CS is
   // spawned. None until then; thread register/clear events are not forwarded
@@ -440,15 +575,38 @@ class InternalStateActor(
       case RegisterThread(thread, axis) =>
         handleRegisterThread(thread, axis)
 
+      case ThreadHalted(thread, axis, replyTo) =>
+        handleThreadHalted(thread, axis, replyTo)
+
       case UnregisterThread(thread, axis) =>
         handleUnregisterThread(thread, axis)
 
-      case UpdateThreadStatus(threadStatusByte, observedThreads) =>
-        handleUpdateThreadStatus(threadStatusByte, observedThreads)
+      case GetAxisThread(axis, replyTo) =>
+        replyTo ! threadRegistry.collectFirst {
+          case (t, e) if e.axis == axis && !e.halted => t
+        }
+        Behaviors.same
+
+      case ScanObservations(threadStatusByte, observedAt, aeValues, errorCode, tcText) =>
+        handleScanObservations(threadStatusByte, observedAt, aeValues, errorCode, tcText)
+
+      case SafeAllMotorsResult(result, reason) =>
+        if result.error.isDefined then
+          log.warn(s"SafeAllMotors after fault ('$reason') — FAILED: ${result.error.get}. " +
+            s"Motors may still be energized; controller may be unreachable.")
+        else
+          log.info(s"SafeAllMotors after fault ('$reason') — OK. All motion stopped, drives disabled.")
+        Behaviors.same
 
       case SetStatusActor(sa) =>
-        log.info(s"SetStatusActor: wiring CS reference for axis-thread forwarding")
+        log.info(s"SetStatusActor: wiring CS reference for registry-activity signalling")
         statusActor = Some(sa)
+        // Bring the newly-wired CS up to date if the registry is already
+        // non-empty (unlikely at init-time wiring, but cheap and removes the
+        // ordering assumption).
+        if threadRegistry.nonEmpty then
+          lastNotifiedRegistryActive = true
+          sa ! ControllerStatusActor.ThreadRegistryActivity(true)
         Behaviors.same
 
       case SetCommandActor(ca) =>
@@ -683,6 +841,15 @@ class InternalStateActor(
       if leavingError && !updates.contains("axisError") then
         currentState = currentState.updateAxis(axis, Map("axisError" -> ""))
 
+      // Clear the ae[] error dedup cache when the axis leaves Error state.
+      // The cache must not persist past an operator recovery; without this,
+      // the next occurrence of the same error on the same axis would not be
+      // reported because the cached message still matches. (Moved here from
+      // CS's StateChanged subscription with the attribution logic; ADR-001.)
+      if leavingError && lastReportedAxisError.getOrElse(axis, "").nonEmpty then
+        log.debug(s"Clearing lastReportedAxisError($axis): axis left Error state")
+        lastReportedAxisError = lastReportedAxisError - axis
+
       // Invariant: trackingSession is meaningful only while axisState == Tracking.
       // The session ledger (lastTargetCounts, lastValidTime, btFiredAt) is the
       // anchor for computing the NEXT PVA segment's ΔP and T; if axisState leaves
@@ -863,29 +1030,36 @@ class InternalStateActor(
   /**
    * Register a thread as executing a command on behalf of an axis.
    * Sets activeThread on the axis CmdState to the thread number and stores
-   * the thread→axis mapping for UpdateThreadStatus to resolve completions.
+   * the thread→axis registry entry for ScanObservations to resolve
+   * attribution (completions and errors).
    *
-   * Also forwards a RegisterAxisThread to ControllerStatusActor (if wired)
-   * so CS can interpret per-axis ae[] reads on its scan cycle.
+   * Stamps registeredAt (the staleness fence for scan attribution) and
+   * signals ThreadRegistryActivity to CS on the empty→non-empty transition.
    */
   private def handleRegisterThread(thread: Int, axis: Axis): Behavior[Command] =
     log.info(s"RegisterThread: thread=$thread → axis=$axis")
 
-    // Invariant check: the CI actor's allocation gate (unobservedThreads)
-    // guarantees a thread is never reallocated before its previous completion
-    // was observed and attributed — so an existing entry for this thread under
-    // a DIFFERENT axis means the prevention invariant broke somewhere.
-    // Recover (the prior program has necessarily finished on the controller;
-    // allocation only reuses hardware-free threads) but log loudly: silent
-    // clobbering here is exactly the S82 stuck-Homing bug.
-    threadRegistry.get(thread).foreach { prevAxis =>
-      if prevAxis != axis then
+    threadRegistry.get(thread) match
+      // Invariant check: the CI actor's allocation gate (unobservedThreads)
+      // guarantees a thread is never reallocated before its previous completion
+      // was observed and attributed — so an existing entry for this thread under
+      // a DIFFERENT axis means the prevention invariant broke somewhere.
+      // Recover (the prior program has necessarily finished on the controller;
+      // allocation only reuses hardware-free threads) but log loudly: silent
+      // clobbering here is exactly the S82 stuck-Homing bug.
+      case Some(entry) if entry.axis != axis =>
         log.error(s"RegisterThread: INVARIANT VIOLATION — thread=$thread reallocated " +
-          s"$prevAxis→$axis before its completion was observed. Synthesizing missed " +
-          s"completion for $prevAxis. Investigate: the CI reservation gate should " +
+          s"${entry.axis}→$axis before its completion was observed. Synthesizing missed " +
+          s"completion for ${entry.axis}. Investigate: the CI reservation gate should " +
           s"have prevented this reallocation.")
-        completeRegisteredThread(thread, prevAxis)
-    }
+        completeRegisteredThread(thread, entry.axis)
+      // S84 interrupt→follow-on reuse: same thread, same axis, previously
+      // marked Halted by checkAndInterrupt (which retained the reservation and
+      // handed the thread back via forceThread). Normal path — the entry
+      // returns to Active under the new command's program below.
+      case Some(entry) if entry.halted =>
+        log.debug(s"RegisterThread: thread=$thread reused for axis=$axis (Halted → Active)")
+      case _ => ()
 
     // Stale reverse mapping: this axis may still be registered under an OLDER
     // thread whose completion was never observed (e.g. an HX whose
@@ -894,17 +1068,21 @@ class InternalStateActor(
     // reservation, WITHOUT synthesizing a completion — activeThread is about
     // to be overwritten by this registration, and a later bit-clear on the
     // stale thread must not fire a completion against the new command.
-    threadRegistry.collect { case (t, a) if a == axis && t != thread => t }.foreach { staleThread =>
+    threadRegistry.collect { case (t, e) if e.axis == axis && t != thread => t }.foreach { staleThread =>
       log.warn(s"RegisterThread: dropping stale registry entry thread=$staleThread → axis=$axis " +
         s"(superseded by thread=$thread; releasing reservation)")
       threadRegistry = threadRegistry - staleThread
       commandActor.foreach(_ ! GalilCommandMessage.ReleaseThread(staleThread))
     }
 
-    threadRegistry = threadRegistry + (thread -> axis)
-
-    // Forward to CS so it can correlate ae[axis]==1 with thread-just-cleared events.
-    statusActor.foreach(_ ! ControllerStatusActor.RegisterAxisThread(axis, thread))
+    // registeredAt is the staleness fence (ADR-001 Amendment A): stamped at
+    // registration processing, it necessarily postdates the program's XQ
+    // (RegisterThread is only sent after the XQ succeeded), so any scan whose
+    // _XQ read predates the program start carries an older observedAt and is
+    // excluded from attributing this entry. Re-registration (S84 reuse)
+    // refreshes the fence for the follow-on command.
+    threadRegistry = threadRegistry + (thread -> ThreadEntry(axis, halted = false, registeredAt = System.nanoTime()))
+    notifyRegistryActivity()
 
     // Set activeThread on the axis CmdState immediately so the watcher's
     // initial snapshot reflects the running thread. This prevents premature
@@ -923,55 +1101,228 @@ class InternalStateActor(
     Behaviors.same
 
   /**
-   * Process per-thread execution status from a ControllerStatusActor QR scan.
-   * For each registered (thread→axis) that the scan actually observed
-   * (thread ∈ observedThreads): if the thread bit is now clear, the thread
-   * has finished; set activeThread=0 on the owning axis, remove from
-   * registry, release the CI actor's reservation, and fire CmdStateChanged
-   * so the watcher can evaluate its mask.
+   * Process the complete observation set from one ControllerStatusActor QR
+   * scan: error attribution first, then completion attribution (ADR-001).
    *
-   * Also forwards a ClearAxisThread to ControllerStatusActor (if wired) so
-   * CS can prune its axis→thread map. Sent after CS has already done its
-   * decideAxisAndControllerErrors pass for this scan (CS sends UpdateThreadStatus
-   * last in handleQRResponse), so ordering is: CS reads ae+QR → CS evaluates and
-   * pushes axisErrorMsg → CS sends UpdateThreadStatus → IS clears activeThread
-   * AND tells CS to drop the axis-thread mapping. Watcher sees axisErrorMsg
-   * first (mailbox order from IS), then activeThread=0; mask check fails
-   * correctly even on the same scan.
+   * ORDERING CONTRACT (previously spanning two actors, now local): errors are
+   * reported before completions so a watcher's CmdStateChanged carries
+   * axisErrorMsg before it sees activeThread→0, failing the command instead
+   * of completing it. reportAxisError and completeRegisteredThread both
+   * notify subscribers synchronously, so statement order here IS delivery
+   * order at the watcher.
+   *
+   * THE ATTRIBUTION INVARIANT (both kinds): a registry entry participates
+   * only if it is not Halted AND its thread's bit is clear in
+   * threadStatusByte AND the observation is FRESHER than the registration
+   * (observedAt > registeredAt; ADR-001 Amendment A). The freshness clause is
+   * what makes delivery latency harmless: a scan that read _XQ before this
+   * entry's program started — however late it arrives — can never attribute
+   * against it. The S82 completion race, the S85 stop_storm misattribution,
+   * and the S85 storm's reallocation/reuse races are all instances of judging
+   * an axis by an observation of a thread's PREVIOUS incarnation.
    */
-  private def handleUpdateThreadStatus(threadStatusByte: Int, observedThreads: Set[Int]): Behavior[Command] =
-    // Find threads that were registered, actually observed by this scan, and
-    // are now inactive. The observedThreads gate excludes entries the scan
-    // predates (RegisterAxisThread still in flight to CS): their bits are
-    // vacuously 0 in the synthesized byte, not observed completions. They
-    // will be evaluated by the next scan, which queries them.
-    val completed = threadRegistry.filter { (thread, _) =>
-      val bit = 1 << thread
-      observedThreads.contains(thread) && (threadStatusByte & bit) == 0
+  private def handleScanObservations(
+    threadStatusByte: Int,
+    observedAt: Long,
+    aeValues: Map[Axis, Int],
+    errorCode: Int,
+    tcText: Option[String]
+  ): Behavior[Command] =
+    // Non-halted registry entries whose thread this scan observed as cleared,
+    // with the observation made after the entry was registered.
+    val clearedEntries: Map[Int, Axis] = threadRegistry.collect {
+      case (t, e) if !e.halted && observedAt > e.registeredAt &&
+          (threadStatusByte & (1 << t)) == 0 => t -> e.axis
+    }
+    val clearedAxes: Set[Axis] = clearedEntries.values.toSet
+
+    // ---- Error attribution (must precede completions; see contract above) ----
+
+    // Step 1: controller-error evidence — fresh this scan (errorCode != 0,
+    // TC text eagerly fetched by CS) or held from last scan's deferral.
+    // NOTE: on the deferral's retry scan errorCode is EXPECTED to be 0 (the
+    // eager TC fetch consumed the hardware latch); pendingControllerError is
+    // the evidence, and it always resolves on that retry scan — attributed,
+    // or faulted. It can never dangle.
+    val evidence: Option[String] =
+      if errorCode != 0 then Some(tcText.getOrElse(s"$errorCode (description unavailable)"))
+      else pendingControllerError
+    val hadErrorEvidence = evidence.isDefined
+
+    if currentState.state == HcdStateEnum.Faulted then
+      // Already Faulted (attribution fault, connection loss, or recovery in
+      // progress): suppress controller-error attribution — mirrors the old
+      // CS-side controllerFaulted gate. A running embedded error handler can
+      // re-latch CMDERR every few seconds while faulted; each is consumed by
+      // CS's eager TC fetch and dropped here.
+      evidence.foreach(text => log.debug(s"Controller-error evidence while Faulted — dropped: '$text'"))
+      pendingControllerError = None
+    else
+      evidence.foreach { text =>
+        // Candidate axes: current thread observed-cleared this scan AND the
+        // embedded entry-flag ae[axis]==1 (program died before clearing it).
+        val candidates = clearedAxes.filter(ax => aeValues.getOrElse(ax, 0) == 1)
+
+        if candidates.size == 1 then
+          // Clean per-axis attribution.
+          val axis = candidates.head
+          val msg  = s"Embedded program error: $text"
+          log.warn(s"Axis $axis: program failed → $msg")
+          reportAxisError(axis, msg)
+          pendingControllerError = None
+        else if candidates.isEmpty && pendingControllerError.isEmpty then
+          // First scan with unattributable error: defer exactly one scan.
+          // errorCode latches the instant a command fails, while _XQ<n> may
+          // not report -1 for the dead thread until the next servo cycle;
+          // attributing eagerly would miss the axis whose thread clears on
+          // the very next scan. The TC text (latch already consumed by CS)
+          // is held as the retry evidence.
+          pendingControllerError = Some(text)
+          log.debug(s"errorCode evidence '$text' but no axis program just completed " +
+            s"(threadRegistry=$threadRegistry, observedAt=$observedAt, " +
+            s"clearedAxes=$clearedAxes, aeValues=$aeValues) — deferring one scan to let _XQ<n> settle")
+        else
+          // Either (a) retry scan still without a candidate, or (b) 2+
+          // candidates (multi-axis ambiguity). Both warrant HCD-wide fault.
+          val reason = if candidates.isEmpty then
+            "no axis program just completed (after one-scan defer)"
+          else
+            s"multiple axes just completed (${candidates.mkString(",")})"
+          log.error(s"Controller Error: $text ($reason) — faulting HCD")
+          pendingControllerError = None
+          val faultMsg = s"Controller Error: $text"
+          handleEnterFaulted(faultMsg)
+          // Connection is alive (the scan that brought this evidence just
+          // completed). Safe all motors: ST stops any motion, MO disables the
+          // drives. Fire-and-forget via the CI actor; we're already Faulted,
+          // the result is informational.
+          safeAllMotors(faultMsg)
+      }
+
+    // Step 2: independent ae[] codes (POSERR/LIMSWI/MCTIME) on configured axes.
+    // Reported regardless of errorCode or fault state; these embedded handlers
+    // set ae[] without generating a controller error code. Skip ae==1 here:
+    // that's program-flow (handled above / below when the thread clears) or
+    // in-flight (ignored until the thread clears).
+    aeValues.foreach { case (axis, ae) =>
+      if ae >= 2 && ae <= 4 then
+        val msg = aeDescription(ae)
+        if lastReportedAxisError.getOrElse(axis, "") != msg then
+          log.warn(s"Axis $axis: ae=$ae → $msg")
+          reportAxisError(axis, msg)
     }
 
-    completed.foreach { (thread, axis) =>
+    // Step 3: edge case; program ended with ae[i]==1 but no controller error
+    // evidence (neither fresh nor pending). Means the embedded program exited
+    // without clearing ae[i] and without any TC error. Should not happen with
+    // the current embedded design; log warn and treat as a per-axis error to
+    // fail safe. Gated by the same attribution invariant as step 1 — only the
+    // axis's CURRENT, observed-cleared, non-halted thread counts (the S85
+    // stop_storm fix: a residual ae==1 from a just-launched program evaluated
+    // against a stale thread no longer reaches this path).
+    // Skip any axis with an error already reported (step 1 may have attributed
+    // the same failure one scan earlier with a richer message).
+    val unexplainedAxes = clearedAxes.filter { axis =>
+      aeValues.getOrElse(axis, 0) == 1 && !hadErrorEvidence &&
+        lastReportedAxisError.getOrElse(axis, "").isEmpty
+    }
+    unexplainedAxes.foreach { axis =>
+      val msg = "Embedded program ended unexpectedly without controller error"
+      // Forensic snapshot: this WARN historically appeared in the wake of
+      // thread-attribution anomalies (S82, S85); the raw attribution inputs
+      // make any recurrence diagnosable from logs alone.
+      log.warn(s"Axis $axis: $msg (ae=1, no errorCode) " +
+        s"[threadRegistry=$threadRegistry, observedAt=$observedAt, " +
+        s"aeValues=$aeValues, clearedAxes=$clearedAxes]")
+      reportAxisError(axis, msg)
+    }
+
+    // ---- Completion attribution (after errors; see contract above) ----
+    clearedEntries.foreach { (thread, axis) =>
       log.info(s"Thread $thread completed → axis=$axis activeThread→0")
       completeRegisteredThread(thread, axis)
     }
 
-    lastThreadStatusByte = threadStatusByte
     Behaviors.same
 
   /**
-   * Attribute a registered thread's completion: remove the registry entry,
-   * prune CS's axis→thread map, release the CI actor's reservation, clear
-   * activeThread on the owning axis, and notify command-state subscribers.
+   * Mark a registry entry Halted (see ThreadHalted): deliberately stopped by
+   * CommandHandlerActor's checkAndInterrupt, excluded from scan attribution
+   * until re-registered (S84 reuse) or unregistered. Ack unconditionally —
+   * the reply is the synchronization point CH awaits before launching the
+   * follow-on program.
+   */
+  private def handleThreadHalted(thread: Int, axis: Axis, replyTo: ActorRef[ThreadHaltedAck]): Behavior[Command] =
+    threadRegistry.get(thread) match
+      case Some(entry) if entry.axis == axis =>
+        log.info(s"ThreadHalted: thread=$thread axis=$axis — marking Halted (excluded from attribution)")
+        threadRegistry = threadRegistry + (thread -> entry.copy(halted = true))
+      case Some(entry) =>
+        log.warn(s"ThreadHalted: thread=$thread registered to ${entry.axis}, not $axis — ignoring")
+      case None =>
+        log.debug(s"ThreadHalted: thread=$thread not registered (completion already attributed); ignoring")
+    replyTo ! ThreadHaltedAck()
+    Behaviors.same
+
+  /**
+   * Send a per-axis error: sets axisErrorMsg (CmdState channel, so the
+   * watcher fails the command) and axisState=Error (operational channel).
+   * Called from handleScanObservations, always BEFORE any completion
+   * attribution in the same scan — the direct synchronous calls preserve
+   * notification order at the watcher.
+   */
+  private def reportAxisError(axis: Axis, msg: String): Unit =
+    handleUpdateAxisCmdState(axis, Map("axisErrorMsg" -> msg), context.system.ignoreRef)
+    handleUpdateAxisState(axis, Map("axisState" -> AxisStateEnum.Error), context.system.ignoreRef)
+    lastReportedAxisError = lastReportedAxisError + (axis -> msg)
+
+  /**
+   * Map an embedded ae[] code to a descriptive axis error message.
+   * Codes set by #POSERR (2), #LIMSWI (3), #MCTIME (4). Code 1 (program
+   * failed / in flight) is handled separately because it requires the
+   * thread-cleared correlation and TC text for context.
+   */
+  private def aeDescription(ae: Int): String = ae match
+    case 2 => "Position error exceeded limit"
+    case 3 => "Limit switch hit"
+    case 4 => "Motion timeout"
+    case _ => s"Embedded error code $ae"
+
+  /**
+   * Safe all motors on the controller by sending a compound ST;MO command via
+   * the CI actor (command connection).
    *
-   * Shared by handleUpdateThreadStatus (observed completion), the
+   * Called from handleScanObservations when an unattributable controller
+   * error forces the HCD into Faulted state — and ONLY from there: the other
+   * Faulted-entry paths (connection loss, faultReset recovery failure)
+   * involve a dead connection where sending would only IOException.
+   * Defensive: if embedded code is corrupted or in an unknown state, we want
+   * motors stopped (ST, all axes) and drives disabled (MO, all axes) rather
+   * than left in whatever state they happened to be in.
+   */
+  private def safeAllMotors(reason: String): Unit =
+    commandActor match
+      case Some(ca) =>
+        val adapter = context.messageAdapter[GalilCommandMessage.SendCommandResult](
+          result => SafeAllMotorsResult(result, reason)
+        )
+        log.info(s"SafeAllMotors: sending 'ST;MO' (reason: $reason)")
+        ca ! GalilCommandMessage.SendCommand("ST;MO", adapter)
+      case None =>
+        log.warn(s"SafeAllMotors: no CI actor wired — cannot send ST;MO ($reason)")
+
+  /**
+   * Attribute a registered thread's completion: remove the registry entry,
+   * release the CI actor's reservation, clear activeThread on the owning
+   * axis, and notify command-state subscribers.
+   *
+   * Shared by handleScanObservations (observed completion), the
    * RegisterThread invariant-violation recovery, and handleUnregisterThread
-   * (explicit exit after HX).
+   * (explicit exit after HX without reuse).
    */
   private def completeRegisteredThread(thread: Int, axis: Axis): Unit =
     threadRegistry = threadRegistry - thread
-
-    // Forward to CS so it drops the axis-thread mapping.
-    statusActor.foreach(_ ! ControllerStatusActor.ClearAxisThread(axis))
+    notifyRegistryActivity()
 
     // Return the thread to the CI actor's allocation pool.
     commandActor.foreach(_ ! GalilCommandMessage.ReleaseThread(thread))
@@ -987,6 +1338,19 @@ class InternalStateActor(
       newCmdState.foreach(cs => notifyCmdSubscribers(axis, cs, Set("activeThread")))
 
   /**
+   * Signal CS on registry empty↔non-empty transitions (ThreadRegistryActivity;
+   * ADR-001 Amendment A). Feeds only CS's polling-rate policy: action rate
+   * while any thread is registered, so completion observation — and thus
+   * reservation release — is bounded by one action-rate scan. Edge-triggered
+   * so the signal stays low-rate.
+   */
+  private def notifyRegistryActivity(): Unit =
+    val active = threadRegistry.nonEmpty
+    if active != lastNotifiedRegistryActive then
+      lastNotifiedRegistryActive = active
+      statusActor.foreach(_ ! ControllerStatusActor.ThreadRegistryActivity(active))
+
+  /**
    * Explicit registry exit for a thread halted via HX (see UnregisterThread).
    * Idempotent: if the entry is already gone (a scan completion raced the
    * halt) or maps to a different axis (a new command already registered the
@@ -994,11 +1358,11 @@ class InternalStateActor(
    */
   private def handleUnregisterThread(thread: Int, axis: Axis): Behavior[Command] =
     threadRegistry.get(thread) match
-      case Some(a) if a == axis =>
-        log.info(s"UnregisterThread: thread=$thread axis=$axis (halted) — removing registry entry")
+      case Some(entry) if entry.axis == axis =>
+        log.info(s"UnregisterThread: thread=$thread axis=$axis (halted=${entry.halted}) — removing registry entry")
         completeRegisteredThread(thread, axis)
-      case Some(other) =>
-        log.debug(s"UnregisterThread: thread=$thread now registered to $other (not $axis); ignoring")
+      case Some(entry) =>
+        log.debug(s"UnregisterThread: thread=$thread now registered to ${entry.axis} (not $axis); ignoring")
       case None =>
         log.debug(s"UnregisterThread: thread=$thread not registered (completion already observed); ignoring")
     Behaviors.same
