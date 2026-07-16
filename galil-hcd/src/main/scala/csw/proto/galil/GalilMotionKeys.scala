@@ -354,7 +354,7 @@ object GalilMotionKeys {
     object CommandStateAxisACurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisA"))
 
-      /** Thread number currently executing the command on axis A (0 if none). */
+      /** Thread number currently executing the command on axis A (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis A, if present. */
@@ -372,7 +372,7 @@ object GalilMotionKeys {
     object CommandStateAxisBCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisB"))
 
-      /** Thread number currently executing the command on axis B (0 if none). */
+      /** Thread number currently executing the command on axis B (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis B, if present. */
@@ -390,7 +390,7 @@ object GalilMotionKeys {
     object CommandStateAxisCCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisC"))
 
-      /** Thread number currently executing the command on axis C (0 if none). */
+      /** Thread number currently executing the command on axis C (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis C, if present. */
@@ -408,7 +408,7 @@ object GalilMotionKeys {
     object CommandStateAxisDCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisD"))
 
-      /** Thread number currently executing the command on axis D (0 if none). */
+      /** Thread number currently executing the command on axis D (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis D, if present. */
@@ -426,7 +426,7 @@ object GalilMotionKeys {
     object CommandStateAxisECurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisE"))
 
-      /** Thread number currently executing the command on axis E (0 if none). */
+      /** Thread number currently executing the command on axis E (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis E, if present. */
@@ -444,7 +444,7 @@ object GalilMotionKeys {
     object CommandStateAxisFCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisF"))
 
-      /** Thread number currently executing the command on axis F (0 if none). */
+      /** Thread number currently executing the command on axis F (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis F, if present. */
@@ -462,7 +462,7 @@ object GalilMotionKeys {
     object CommandStateAxisGCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisG"))
 
-      /** Thread number currently executing the command on axis G (0 if none). */
+      /** Thread number currently executing the command on axis G (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis G, if present. */
@@ -480,7 +480,7 @@ object GalilMotionKeys {
     object CommandStateAxisHCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CommandStateAxisH"))
 
-      /** Thread number currently executing the command on axis H (0 if none). */
+      /** Thread number currently executing the command on axis H (-1 if none). */
       val activeThreadKey: Key[Int] = IntKey.make("activeThread")
 
       /** Error message from the active command on axis H, if present. */

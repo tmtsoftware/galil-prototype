@@ -553,7 +553,7 @@ case class TrackingSession(
  * Internal-only fields (not published, used by CommandHandler/CommandWatcher):
  *   activeCommand, commandHalted, stopCode
  *
- * @param activeThread Thread number executing command on this axis (0 if none)
+ * @param activeThread Thread number executing command on this axis; -1 if none.
  * @param axisErrorMsg Error message from active command (from ae[] on controller)
  * @param inPosition Whether axis has reached target position (mirrored from AxisState)
  * @param moving Whether axis motor is physically in motion (from QR switches bit 4)
@@ -563,7 +563,7 @@ case class TrackingSession(
  */
 case class AxisCmdState(
   // Published in CommandStateAxis[A-H]
-  activeThread: Int = 0,
+  activeThread: Int = -1,
   axisErrorMsg: String = "",
   inPosition: Boolean = false,
   moving: Boolean = false,
@@ -584,7 +584,7 @@ case class AxisCmdState(
       case ("inPosition", v: Boolean) => updated = updated.copy(inPosition = v)
       case ("moving", v: Boolean) => updated = updated.copy(moving = v)
       case ("activeCommand", v: ActiveCommand) => updated = updated.copy(activeCommand = Some(v))
-      case ("clearActiveCommand", _: Boolean) => updated = updated.copy(activeCommand = None, activeThread = 0)
+      case ("clearActiveCommand", _: Boolean) => updated = updated.copy(activeCommand = None, activeThread = -1)
       case ("commandHalted", v: Boolean) => updated = updated.copy(commandHalted = v)
       case ("stopCode", v: Int) => updated = updated.copy(stopCode = v)
       case (key, value) =>

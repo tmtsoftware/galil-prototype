@@ -637,7 +637,7 @@ class ControllerStatusActor(
    *      inPosition/moving picture is fresh when IS attributes completions.
    *   6. Ship ScanObservations to IS. IS sequences error attribution before
    *      completion attribution internally, preserving the contract that a
-   *      watcher sees axisErrorMsg before activeThread→0. Delivery latency is
+   *      watcher sees axisErrorMsg before activeThread→-1. Delivery latency is
    *      harmless: a delayed observation is EXCLUDED by IS's staleness gate
    *      for any entry registered after observedAt, never misapplied (the S85
    *      storm delivered scans up to ~1.4s late under mailbox pressure).

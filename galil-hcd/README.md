@@ -98,27 +98,28 @@ sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf \
     "galil-hcd/testOnly *HcdIntegrationTest"                # 17 tests
 
 # Simulator behaviour
-sbt "galil-simulator/testOnly *GalilSimulatorActorTest"     # 102 tests
+sbt "galil-simulator/testOnly *GalilSimulatorActorTest"     # 104 tests
 ```
 
 | Suite | Tests | Dependencies | Coverage |
 |-------|------:|--------------|----------|
-| GalilHcdConfigTest | 9 | none | Config parsing, countsPerRevolution |
-| InternalStateActorTest | 67 | none | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, EnterFaulted transitions, trackingSession invariant |
-| ControllerStatusActorTest | 30 | none | QR polling, adaptive rate, AI polling, `_XQ<n>` synthesis, `ae[]` interpretation, NotifyAxisHalted pruning, `ae[]` startup gating |
+| GalilHcdConfigTest | 10 | none | Config parsing, countsPerRevolution, 8-axis default config |
+| InternalStateActorTest | 84 | none | State management, pub/sub, motorPosition/motorDemand/angularPosition, ConnectionStatus, EnterFaulted transitions, trackingSession invariant, thread-0 registry attribution (S86) |
+| ControllerStatusActorTest | 30 | none | QR polling, adaptive rate, AI polling, `_XQ<n>` synthesis, `ScanObservations` shipping, `ae[]` startup gating |
 | CommandHandlerActorTest | 16 | none | Immediate commands, validation, faultReset gating |
-| CommandWatcherActorTest | 15 | none | Completion mask evaluation |
+| CommandWatcherActorTest | 16 | none | Completion mask evaluation (incl. the S86 thread-0/-1 sentinel regression) |
+| EightAxisThreadingTest | 4 | none | Full-pool allocation via a pool-faithful CI mock (real `selectThread`, `forceThread` honored): thread-0 lend-last, scan-gated thread-0 completion, thread-0 interrupt-reuse (S86) |
 | LongRunningCommandTest | 34 | none | Motion handlers; trackAxis PVT internals (ΔP/V/T, deg→counts, 0/360 wrap, bound and velocity guards) |
 | RotatingMechanismTest | 26 | none | Approach algorithm, positionWheel, offsetAxis, no-cpr fallback |
 | AxisStateValidationTest | 14 | none | State machine rules, interruption mechanics, stopCompletionState(homed) |
 | IOTest | 17 | none | DIO bit extraction, setBit/clearBit dispatch, AI polling |
 | CommandGateTest | 19 | none | Shared command-gate checks and CSW/HMI parity |
 | ProgramFileManagerTest | 14 | none | DL upload prep (REM/blank strip, 80-char compression and guard), LS-download parsing |
-| ControllerCommandActorTest | 16 | hardware or simulator | Command-socket protocol |
+| ControllerCommandActorTest | 19 | hardware or simulator | Command-socket protocol |
 | CurrentStatePublisherActorTest | 4 | simulator | CurrentState publishing |
-| HcdIntegrationTest | 17 | hardware or simulator + FrameworkTestKit | End-to-end command lifecycle |
-| GalilSimulatorActorTest | 102 | none | Simulator behaviour |
-| **Total** | **400** | | |
+| HcdIntegrationTest | 18 | hardware or simulator + FrameworkTestKit | End-to-end command lifecycle, incl. 8 concurrent moves occupying threads 0-7 (8-axis config) |
+| GalilSimulatorActorTest | 104 | none | Simulator behaviour, incl. busy-thread XQ rejection (S86) |
+| **Total** | **429** | | |
 
 The HCD depends on `galil-io` for the controller wire protocol. That module has its
 own suite (`galil-io/GalilIoTest`, 45 tests) covering `writeRaw`, `send` (single and
@@ -414,19 +415,26 @@ currently executing, or `-1` if the thread has stopped, and is reliable.
 each scan, falling back to the raw QR byte only when the per-thread query fails (parse
 error, or a simulator without `_XQ` support).
 
-**Halt-time notification:** when `CommandHandlerActor.checkAndInterrupt` deliberately
-halts an axis's thread via `HX` (the SDD 4.8.1 interruption protocol for
+**Halt-time marking (ADR-001):** when `CommandHandlerActor.checkAndInterrupt`
+deliberately halts an axis's thread via `HX` (the SDD 4.8.1 interruption protocol for
 `positionAxis`/`stopAxis`/`offsetAxis`/`selectWheel`/`positionWheel` preempting an active
-move or home), it sends `ControllerStatusActor.NotifyAxisHalted(axis)` as a synchronous
-ask immediately after a successful `HX`. The handler removes the axis from the status
-actor's internal `axisThreads` map and replies with `NotifyAxisHaltedAck`. Without this,
-the next QR scan would observe "axis registered with thread N, thread N just cleared,
-`ae[axis] == 1`, errorCode == 0" and fire the defensive `unexplainedAxes` check, which
-would report "Embedded program ended unexpectedly" against whatever new command was just
-launched on the same axis (typically the same thread number, since the lowest free thread
-is reallocated). The subsequent `RegisterAxisThread` re-adds the axis under the new thread
-number. The ack is a synchronization point: the command handler waits for it before
-launching the next program, so the prune is in place before the new `RegisterAxisThread`.
+move or home), it sends `InternalStateActor.ThreadHalted(thread, axis)` as a synchronous
+ask immediately after a successful `HX`. IS marks the registry entry **Halted** —
+excluded from both completion and error attribution — and replies with
+`ThreadHaltedAck`. Without this, the next scan would observe "current thread just
+cleared, `ae[axis] == 1`, errorCode == 0" and fire the defensive `unexplainedAxes`
+check against a program that was deliberately killed. The ack is a synchronization
+point: the command handler waits for it before launching the follow-on program. On the
+S84 reuse path the follow-on re-registers the SAME thread (Halted → Active,
+`forceThread`), refreshing the freshness fence; without reuse, `UnregisterThread`
+removes the entry and releases the reservation explicitly (a Halted entry has no other
+exit — no scan will ever attribute it).
+
+The thread is queried from IS's registry (`GetAxisThread`), never from
+`AxisCmdState.activeThread` — display state that a watcher-timeout's
+`clearActiveCommand` resets while the program still runs (S85 finding 4). The query
+returns `Option[Int]`: `Some(0)` is a genuine thread-0 program and is halted like
+any other; `None` means nothing to interrupt.
 
 ### Atomic XQ and thread confirmation
 
@@ -543,8 +551,9 @@ Per-axis embedded program errors surface via `ae[]`. Each QR scan,
 `ControllerStatusActor.handleQRResponse` runs the following pipeline:
 
 1. Parse QR and snapshot the raw `threadStatus` byte and `errorCode` at one moment.
-2. Read per-thread state via `MG _XQ<n>` for each registered thread (single compound
-   query) and synthesize a `threadStatus` byte from the per-thread results.
+2. Stamp `observedAt` (monotonic `System.nanoTime`) immediately before the per-thread
+   reads, then read `MG _XQ0..7` for ALL 8 threads unconditionally (single compound
+   query; ADR-001 Amendment A) and synthesize a `threadStatus` byte from the results.
 3. Read `MG ae[<idx1>],ae[<idx2>],...` for configured axes (single compound read). QR is
    read before the `ae` reads: the reverse order races with successful program endings
    (the program clears `ae = 0` after it is read but before QR shows the thread cleared,
@@ -554,26 +563,37 @@ Per-axis embedded program errors surface via `ae[]`. Each QR scan,
    undimensioned `ae[]` makes the controller latch error 57, which on a cold boot (where
    `#AUTO` does not auto-run `#Init`) would otherwise surface as a spurious latch
    misattributed to the next `#Init`.
-4. Decide per-axis errors:
-   - `ae[i] = 2/3/4` reports the axis as POSERR/LIMSWI/MCTIME (deduplicated via
-     `lastReportedAxisError`).
-   - `errorCode != 0` (controller-level) fetches `TC 1` (consuming the latch) and looks
-     for axes with `ae = 1` and a thread that just cleared this scan. Exactly one
-     candidate attributes the controller error to that axis (`axisErrorMsg = "Embedded
-     program error: <TC text>"`, `axisState = Error`). Multiple candidates escalate to
-     HCD-Faulted via `EnterFaulted`. Zero candidates defer one scan, then escalate if
-     still unresolved.
-   - Defensive case (`ae = 1` and thread cleared and `errorCode == 0`): treat as a
-     per-axis Error. This catches a program ending without clearing `ae[]` and without a
-     controller error. It is suppressed for axes the command handler deliberately halted
-     (the `NotifyAxisHalted` post-HX prune; see Thread Management), where the `ae == 1` is
-     the entry-time flag from a program that was stopped, not a fault.
-5. Push HCD-level updates (position, I/O, timing).
-6. Push per-axis QR-derived updates (position, velocity, switches).
-7. Push `UpdateThreadStatus` to IS last, clearing `activeThread` for completed threads.
-   Order is critical: `axisErrorMsg` / `axisState = Error` must reach IS before
-   `activeThread = 0`, so the watcher's `CmdStateChanged` notification carries the error
-   and fails the command on its first evaluation.
+4. If `errorCode != 0`, eagerly fetch `TC 1` (consuming the hardware latch) so the text
+   can travel with the observations.
+5. Ship ONE `InternalStateActor.ScanObservations(threadStatusByte, observedAt, aeValues,
+   errorCode, tcText)` message. CS makes **no attribution decisions** — it is a pure
+   observer (ADR-001).
+6. Push HCD-level updates (position, I/O, timing) and per-axis QR-derived updates
+   (position, velocity, switches).
+
+Attribution happens in `InternalStateActor.handleScanObservations`, against the
+authoritative thread registry, under the single invariant (ADR-001 + Amendment A): a
+registry entry participates only if it is not Halted AND its thread's bit is clear in
+the scan AND `observedAt > registeredAt` (the freshness fence — a late-delivered scan
+can never judge a thread incarnation newer than its own read). Within one handler,
+errors are attributed BEFORE completions, so the watcher sees `axisErrorMsg` before
+`activeThread → -1` and fails rather than completes:
+
+- `ae[i] = 2/3/4` reports the axis as POSERR/LIMSWI/MCTIME (deduplicated via
+  `lastReportedAxisError`).
+- Controller-error evidence (fresh `errorCode`/TC text, or text held from last scan's
+  deferral) with exactly one candidate axis (`ae = 1`, current thread observed-cleared)
+  attributes to that axis (`axisErrorMsg = "Embedded program error: <TC text>"`,
+  `axisState = Error`). Zero candidates defer one scan (the TC text is held in IS —
+  the latch was already consumed); still-zero or 2+ candidates escalate to HCD-Faulted
+  via `EnterFaulted` + `ST;MO` motor safing.
+- Defensive case (`ae = 1`, current thread observed-cleared, no error evidence): treat
+  as a per-axis Error. Halted registry entries (deliberately HX'd by
+  `checkAndInterrupt`; see Thread Management) are excluded by the invariant, so a
+  halted program's entry-time `ae == 1` residue is never misattributed.
+- Completion attribution: each entry passing the invariant is removed, its CI
+  reservation released (`ReleaseThread`), and the axis's `activeThread` set to **-1**
+  (the no-thread sentinel; 0 is a valid thread number).
 
 ### Controller-level error detection
 

@@ -412,8 +412,8 @@ class HmiServer(
    * a stale HMI cannot start a jog while an embedded program is running):
    *   - HCD state == Ready
    *   - Axis state ∈ {Idle, Lost}              ← first jog from a quiescent state
-   *     OR (Axis state == Moving && activeThread == 0)  ← reentrant speed update
-   *       (activeThread > 0 means an embedded motion program is running, which
+   *     OR (Axis state == Moving && activeThread == -1)  ← reentrant speed update
+   *       (activeThread >= 0 means an embedded motion program is running, which
    *        we cannot interrupt without going through CommandHandlerActor.  The
    *        engineer must issue a CSW stopAxis first.)
    *
@@ -464,12 +464,12 @@ class HmiServer(
 
     val gatingOk = axState.axisState match
       case AxisStateEnum.Idle | AxisStateEnum.Lost => true
-      case AxisStateEnum.Moving if cmdState.activeThread == 0 => true   // reentrant
+      case AxisStateEnum.Moving if cmdState.activeThread == -1 => true  // reentrant (jog, no program)
       case _ => false
 
     if !gatingOk then
       val reason = axState.axisState match
-        case AxisStateEnum.Moving =>  // activeThread > 0
+        case AxisStateEnum.Moving =>  // activeThread >= 0
           s"axis $axisChar is executing an embedded program (thread ${cmdState.activeThread}) — issue stopAxis first"
         case other =>
           s"axis $axisChar is in $other state — engineering jog requires Idle, Lost, or active engineering jog"

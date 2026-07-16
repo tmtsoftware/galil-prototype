@@ -142,8 +142,8 @@ class CurrentStatePublisherActorTest
     
     val commandService = CommandServiceFactory.make(pekkoLocation)
     
-    // Test active axes (A and B per default GalilHcdConfig.conf)
-    // Inactive axes (C-H) won't have CurrentState published
+    // Spot-check a subset of the active axes (the default GalilHcdConfig.conf
+    // has all 8 active since S86; A and B suffice to prove the publication path)
     val activeAxisKeys = Seq(
       CurrentStateAxisACurrentState.eventKey,
       CurrentStateAxisBCurrentState.eventKey

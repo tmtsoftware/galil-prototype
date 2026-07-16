@@ -22,9 +22,10 @@ import scala.concurrent.duration._
  * Completion evaluation (SDD 4.8.4):
  *   The mask defines expected field values. When all mask conditions are satisfied
  *   simultaneously, the command is complete. Different commands use different masks:
- *     - positionAxis: activeThread==0, inPosition==true, axisErrorMsg=="", moving==false
- *     - homeAxis:     activeThread==0, axisErrorMsg=="", moving==false (no inPosition check)
- *     - stopAxis:     activeThread==0, moving==false
+ *     - positionAxis: activeThread==-1, inPosition==true, axisErrorMsg=="", moving==false
+ *     - homeAxis:     activeThread==-1, axisErrorMsg=="", moving==false (no inPosition check)
+ *     - stopAxis:     activeThread==-1, moving==false
+ *   activeThread==-1 means "thread released" (attribution complete).
  *
  * Error conditions:
  *   - axisErrorMsg is non-empty → Error
@@ -98,7 +99,7 @@ object CommandWatcherActor:
   object CompletionMask:
     /** positionAxis: thread released, in position, no error, not moving */
     val positionAxis: CompletionMask = CompletionMask(
-      activeThread = Some(0),
+      activeThread = Some(-1),
       inPosition = Some(true),
       axisErrorMsg = Some(""),
       moving = Some(false)
@@ -106,14 +107,14 @@ object CommandWatcherActor:
 
     /** homeAxis: thread released, no error, not moving (inPosition not checked; home sets position) */
     val homeAxis: CompletionMask = CompletionMask(
-      activeThread = Some(0),
+      activeThread = Some(-1),
       axisErrorMsg = Some(""),
       moving = Some(false)
     )
 
     /** stopAxis: thread released, not moving (errors/inPosition don't matter) */
     val stopAxis: CompletionMask = CompletionMask(
-      activeThread = Some(0),
+      activeThread = Some(-1),
       moving = Some(false)
     )
 
@@ -124,7 +125,7 @@ object CommandWatcherActor:
      * to map position numbers to angular positions.
      */
     val selectWheel: CompletionMask = CompletionMask(
-      activeThread = Some(0),
+      activeThread = Some(-1),
       axisErrorMsg = Some(""),
       moving = Some(false)
     )
@@ -160,7 +161,7 @@ object CommandWatcherActor:
     commandResponseManager: CommandResponseManager,
     completionAxisState: AxisStateEnum = AxisStateEnum.Idle,
     onSuccessAxisUpdates: Map[String, Any] = Map.empty,
-    activeThread: Int = 0,
+    activeThread: Int = -1,
     resultReporter: Option[(Id, Boolean, String) => Unit] = None,
     loggerFactory: LoggerFactory = null
   )
@@ -211,7 +212,7 @@ object CommandWatcherActor:
    * against the completion mask and error conditions.
    *
    * The CommandHandler pushes activeThread to CmdState before spawning the watcher,
-   * so the initial snapshot will have activeThread > 0 for normal commands. This
+   * so the initial snapshot will have activeThread >= 0 for normal commands. This
    * prevents premature completion on stale pre-command state.
    */
   private def watching(

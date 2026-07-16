@@ -400,3 +400,97 @@ semantics are unchanged.
        zero misattributions (0 axis mismatches across 521 completions), the
        #Init thread re-allocated 101/83 times (leak closed), balanced registry
        entry/exit accounting, and quiescent end state on both sampled HCDs.
+
+---
+
+# Amendment B: the no-thread sentinel vs thread 0 (S86)
+
+**Status:** Accepted (2026-07-15)
+**Date:** 2026-07-15 (S86)
+**Trigger:** Design review of the thread-0 last-resort policy while preparing
+8-axis simulator testing (the S85 storms never lent thread 0 — the fleet has
+≤7 axes — so this defect class was dormant and storm-invisible).
+
+## Findings
+
+`AxisCmdState.activeThread` used **0** as the "no thread" sentinel — in the
+code, in the ICD (`CommandStateAxisX.activeThread: "0 if none"`), and in the
+HMI. Thread 0 is a valid thread under the S85 last-resort policy, and the
+collision produced four latent defects, none reachable until a controller has
+8 configured axes:
+
+- **B1 — un-interruptible thread-0 programs.** `checkAndInterrupt` collapsed
+  `GetAxisThread`'s `Option[Int]` via `getOrElse(0)` and gated the halt on
+  `activeThread > 0`: `Some(0)` and `None` were indistinguishable, so a
+  program on thread 0 was never HX'd, never marked Halted, never reused — the
+  follow-on would try to allocate a fresh thread against a fully-lent pool
+  and hard-fail while the healthy program kept running.
+- **B2 — the scan-confirmation gate vanished.** Every `CompletionMask` used
+  `activeThread == 0` for "thread released"; a thread-0 command satisfied it
+  from the watcher's initial snapshot. Worst case `stopAxis` (mask:
+  released ∧ ¬moving) on a parked axis: instant completion with zero scan
+  confirmation, violating the one-scan rule.
+- **B3 — silent notification edges.** Register (0→0) and release (0→0) of a
+  thread-0 command never fired `CmdStateChanged` for `activeThread`, so a
+  watcher not rescued by another field change sat until its timeout.
+- **B4 — HMI jog-reentrancy gate.** `engJog`'s "reentrant speed update"
+  predicate (`Moving ∧ activeThread == 0`) would have allowed an engineering
+  jog on top of a running thread-0 program.
+- **B5 — `HaltExecution` itself skipped thread 0.** The CI actor's handler
+  gated on `thread >= 1` and reported *success* without sending `HX 0`
+  ("nothing to halt") — so even with B1 fixed, an interrupt of a thread-0
+  program would falsely succeed, mark the still-running program Halted
+  (leaking its registry entry and reservation: Halted entries have no scan
+  exit), and the reuse `XQ ...,0` would be rejected busy. Found by an
+  independent review pass of the B1-B4 fix; the pool-mock unit test could not
+  catch it (the mock had no such special case), which is why the end-to-end
+  8-axis test drives the REAL CI actor.
+
+## Decision
+
+**The no-thread sentinel becomes -1, end to end** (Angelic, S86). Internal
+state, watcher masks, HMI server/page, and the published
+`CommandStateAxisX.activeThread` all use -1 for "none"; 0 is exclusively a
+real thread. `checkAndInterrupt` preserves the `Option` (`Some(0)` ≠ `None`)
+rather than re-encoding it in an integer; `HaltExecution` halts any thread
+`>= 0` (B5). The ICD description changes from
+"0 if none" to "-1 if none" (Angelic to update the icd model files; the key
+type is unchanged). `aps-ics-ui` does not read `activeThread` today; if it
+gains a display, it must treat -1 as idle.
+
+Rejected alternative: keep 0-if-none on the wire and decouple only the
+internal decision paths (a `threadReleased` flag). Discarded because the
+published value would then be *false* whenever thread 0 is lent — an
+engineering UI showing "no thread" during a real motion program is the kind
+of display fib that costs an hour of confusion per incident.
+
+## Also in this change set
+
+- The simulator now **rejects `XQ` on a busy thread with `?`** (real
+  controller behavior). Without it, a regression of B1's follow-on path would
+  silently "work" in simulation via completion-timer replacement and only
+  fail on hardware.
+- Default (`GalilHcdConfig.conf`) and simulator (`GalilHcdConfig-Simulator.conf`)
+  configs go to **8 active axes**, making the thread-0 lend reachable in
+  simulation.
+- New `EightAxisThreadingTest` (pool-faithful CI mock honoring `forceThread` —
+  closing the S84 open item — with real `selectThread` policy): full-pool
+  allocation order, thread-0 lend-last, scan-gated thread-0 completion (B2/B3
+  regressions), thread-0 interrupt-reuse (B1 regression). `HcdIntegrationTest`
+  gains an end-to-end 8-concurrent-move test asserting the observed thread
+  union is exactly {0..7}. `InternalStateActorTest` gains thread-0
+  registration/attribution/freshness/`GetAxisThread` cases;
+  `CommandWatcherActorTest` pins that `activeThread = 0` does NOT satisfy any
+  completion mask.
+
+## Consequences
+
+- The wire value of an idle axis changes 0 → -1: any external consumer that
+  compared `activeThread == 0` for idleness must update (ICD description
+  change pending; no current consumer decides on it).
+- Old-log archaeology: pre-S86 logs show `activeThread→0` for releases.
+- The STB hardware-verification item (thread-0 interrupt-resume of automatic
+  subroutines, §Amendment A/PROJECT_STATE §10) is UNCHANGED — this amendment
+  makes the HCD side of thread-0 lending correct; the controller-side
+  interrupt-resume behavior still needs empirical verification before
+  8-motor reliance.

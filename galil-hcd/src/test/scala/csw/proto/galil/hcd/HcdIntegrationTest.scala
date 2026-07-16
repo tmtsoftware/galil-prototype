@@ -431,7 +431,7 @@ class HcdIntegrationTest
     assert(finalResponse.isInstanceOf[Completed], s"positionAxis should complete, got: $finalResponse")
 
     // After completion, verify CommandStateAxisA reflects a quiescent state:
-    // activeThread==0, moving==false, inPosition==true, no error.
+    // activeThread==-1, moving==false, inPosition==true, no error.
     // This confirms the StatusMonitor→IS→CommandWatcher pipeline is working.
     val cmdStateName = StateName(CommandStateAxisACurrentState.eventKey.eventName.name)
     val probe = TestProbe[CurrentState]()
@@ -448,7 +448,7 @@ class HcdIntegrationTest
     sub.cancel()
 
     println(s"  Post-completion CommandState: activeThread=$thread, moving=$moving, inPosition=$inPosition")
-    assert(thread == 0, s"activeThread should be 0 after completion, got: $thread")
+    assert(thread == -1, s"activeThread should be -1 after completion, got: $thread")
     assert(!moving, "moving should be false after completion")
     assert(inPosition, "inPosition should be true after completion")
   }
@@ -893,6 +893,102 @@ class HcdIntegrationTest
     assert(inPosB, "Axis B should be inPosition")
     assert(posA == targetA.toDouble, s"Axis A position should be $targetA, was: $posA")
     assert(posB == targetB.toDouble, s"Axis B position should be $targetB, was: $posB")
+  }
+
+  // ==========================================================================
+  // Test: 8 simultaneous moves — full thread pool including the thread-0 lend
+  // (S85 selectThread policy; S86 sentinel fixes). Requires the 8-axis
+  // GalilHcdConfig-Simulator.conf (or an 8-axis controller).
+  // ==========================================================================
+
+  test("eight concurrent positionAxis should use all 8 threads (thread-0 lend) and all complete") {
+    // Only meaningful with all 8 axes active (GalilHcdConfig-Simulator.conf).
+    // The default hardware config has 2 axes — cancel rather than fail there.
+    val cfgName = Option(System.getProperty("galil.config.path"))
+      .getOrElse("GalilHcdConfig-Hardware.conf").stripSuffix(".conf")
+    val activeAxes = ConfigFactory.load(cfgName).getBooleanList("activeAxes")
+    assume(activeAxes.size == 8 && (0 until 8).forall(activeAxes.get(_)),
+      s"requires an 8-axis config (run with -Dgalil.config.path=GalilHcdConfig-Simulator.conf); $cfgName is not")
+
+    val commandService = getCommandService
+    val axes = ('A' to 'H').map(_.toString)
+
+    // Home every axis (earlier tests home only A and B).
+    axes.foreach(a => homeAxisAndWait(commandService, a))
+
+    // Slow all axes so no move completes before all 8 have allocated their
+    // threads — the lend requires 8 programs genuinely in flight at once.
+    // (Timing: 8 allocations take well under 1s against the simulator; the
+    // slowest-case move durations below are ≥2s. If this ever flakes, slow
+    // the axes further rather than shrinking the targets.)
+    axes.take(2).foreach(a => setAxisSpeed(commandService, a, 50.0f))     // A,B rotating
+    axes.drop(2).foreach(a => setAxisSpeed(commandService, a, 2000.0f))   // C-H linear
+
+    // Record every activeThread value (>= 0) each axis publishes while its
+    // command runs. -1 is the released sentinel (S86) and is not recorded.
+    val perAxis: Map[String, (StateName, csw.params.core.generics.Key[Int])] = Map(
+      "A" -> (StateName(CommandStateAxisACurrentState.eventKey.eventName.name), CommandStateAxisACurrentState.activeThreadKey),
+      "B" -> (StateName(CommandStateAxisBCurrentState.eventKey.eventName.name), CommandStateAxisBCurrentState.activeThreadKey),
+      "C" -> (StateName(CommandStateAxisCCurrentState.eventKey.eventName.name), CommandStateAxisCCurrentState.activeThreadKey),
+      "D" -> (StateName(CommandStateAxisDCurrentState.eventKey.eventName.name), CommandStateAxisDCurrentState.activeThreadKey),
+      "E" -> (StateName(CommandStateAxisECurrentState.eventKey.eventName.name), CommandStateAxisECurrentState.activeThreadKey),
+      "F" -> (StateName(CommandStateAxisFCurrentState.eventKey.eventName.name), CommandStateAxisFCurrentState.activeThreadKey),
+      "G" -> (StateName(CommandStateAxisGCurrentState.eventKey.eventName.name), CommandStateAxisGCurrentState.activeThreadKey),
+      "H" -> (StateName(CommandStateAxisHCurrentState.eventKey.eventName.name), CommandStateAxisHCurrentState.activeThreadKey)
+    )
+    val nameToAxis: Map[String, String] = perAxis.map { case (axis, (sn, _)) => sn.name -> axis }
+    val seenThreads = scala.collection.concurrent.TrieMap[String, Set[Int]]().withDefaultValue(Set.empty)
+    val sub = commandService.subscribeCurrentState(
+      perAxis.values.map(_._1).toSet,
+      cs => nameToAxis.get(cs.stateName.name).foreach { axis =>
+        val key = perAxis(axis)._2
+        if cs.exists(key) then
+          val t = cs(key).head
+          if t >= 0 then seenThreads.put(axis, seenThreads(axis) + t)
+      }
+    )
+
+    // Submit all 8 moves as fast as possible. Rotating targets within [1,399];
+    // linear targets within each axis's soft limits.
+    val targets: Map[String, Double] = Map(
+      "A" -> 300.0, "B" -> 200.0, "C" -> 4500.0, "D" -> 4500.0,
+      "E" -> 4500.0, "F" -> 4500.0, "G" -> 4500.0, "H" -> 4500.0)
+    val submits = axes.map { a =>
+      a -> commandService.submit(makeSetup("positionAxis", "axis" -> a, "target" -> targets(a).toFloat))
+    }
+    val started = submits.map { case (a, fut) => a -> Await.result(fut, 5.seconds) }
+    started.foreach { case (a, resp) =>
+      assert(resp.isInstanceOf[Started], s"positionAxis $a should start, got: $resp")
+    }
+
+    // Wait for every command to complete.
+    val results = started.map { case (a, resp) =>
+      a -> Await.result(commandService.queryFinal(resp.runId)(Timeout(commandTimeout)), commandTimeout)
+    }
+    sub.cancel()
+    results.foreach { case (a, res) =>
+      assert(res.isInstanceOf[Completed], s"positionAxis $a should complete, got: $res")
+    }
+
+    // Every axis reported exactly one thread; the union must be ALL EIGHT
+    // controller threads — i.e. thread 0 was lent (S85) and its command
+    // ran and completed on it (S86 sentinel fixes: registration visible,
+    // interrupt-able, completion attributed and notified).
+    val threadsByAxis = seenThreads.toMap
+    println(s"  Threads observed per axis: $threadsByAxis")
+    axes.foreach { a =>
+      assert(threadsByAxis.getOrElse(a, Set.empty).size == 1,
+        s"axis $a should have run on exactly one thread, saw: ${threadsByAxis.getOrElse(a, Set.empty)}")
+    }
+    val union = threadsByAxis.values.flatten.toSet
+    assert(union == (0 to 7).toSet,
+      s"8 concurrent moves should occupy threads 0-7 (thread-0 lend); observed: $union")
+
+    // Pool health after the storm-let: one more command must allocate and complete.
+    val extra = Await.result(
+      commandService.submit(makeSetup("positionAxis", "axis" -> "A", "target" -> 100.0f)), 5.seconds)
+    val extraFinal = Await.result(commandService.queryFinal(extra.runId)(Timeout(commandTimeout)), commandTimeout)
+    assert(extraFinal.isInstanceOf[Completed], s"post-lend positionAxis should complete, got: $extraFinal")
   }
 
   // ==========================================================================

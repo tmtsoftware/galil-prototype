@@ -58,7 +58,7 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
   private def makeIsActorWithAxis(axis: Axis,
     axisState: AxisStateEnum = AxisStateEnum.Idle,
     activeCommand: Option[ActiveCommand] = None,
-    activeThread: Int = 0,
+    activeThread: Int = -1, 
     commandHalted: Boolean = false
   ): ActorRef[InternalStateActor.Command] =
     val isActor = makeIsActor()
@@ -70,7 +70,7 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
             "commandHalted" -> commandHalted), testKit.system.ignoreRef)
     // Set HcdState.threadStatus so CommandWatcher sees the thread as active.
     // SM owns this field; tests must set it explicitly when simulating an active command.
-    if activeThread > 0 then
+    if activeThread >= 0 then
       isActor ! InternalStateActor.UpdateHcdState(
         Map("threadStatus" -> (1 << activeThread)), testKit.system.ignoreRef)
     Thread.sleep(30) // let IS process messages
@@ -275,14 +275,14 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
   }
 
   test("stopAxis on Tracking axis with no active thread — no interruption flag is set") {
-    // Simulate axis in Tracking state with activeThread=0 (program already finished,
+    // Simulate axis in Tracking state with activeThread=-1 (program already finished,
     // motor jogging under JG). checkAndInterrupt should skip interruption for this case.
     val isActor = makeIsActorWithAxis(Axis.D, AxisStateEnum.Tracking,
-      activeCommand = Some(ActiveCommand.Track), activeThread = 0)
+      activeCommand = Some(ActiveCommand.Track), activeThread = -1)
 
     // No watcher running — verify commandHalted is never set
     // We simulate what checkAndInterrupt would do: query state, decide no interruption needed.
-    // The axis state: Tracking with activeThread=0 → checkAndInterrupt returns true without
+    // The axis state: Tracking with no registered thread → checkAndInterrupt skips HX without
     // setting commandHalted. We just verify IS remains clean.
     Thread.sleep(50)
 
@@ -295,7 +295,7 @@ class AxisStateValidationTest extends AnyFunSuite with Matchers with BeforeAndAf
       isActor.ask[Option[AxisCmdState]](ref => InternalStateActor.GetAxisCmdState(Axis.D, ref)),
       2.seconds)
     cmdState.map(_.commandHalted) shouldBe Some(false)
-    cmdState.map(_.activeThread)  shouldBe Some(0)
+    cmdState.map(_.activeThread)  shouldBe Some(-1)
   }
 
   test("stopCompletionState: per SDD Figure 4-2 transition table") {

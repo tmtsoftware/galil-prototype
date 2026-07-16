@@ -161,6 +161,24 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     CompletionMask.stopAxis.isSatisfied(defaultState) should be(true)
   }
 
+  test("CompletionMask: a command RUNNING on thread 0 is not read as released (S86 regression)") {
+    // Thread 0 is a valid last-resort thread (S85). Under the former 0-sentinel
+    // these states satisfied the masks from the initial snapshot, dropping the
+    // one-scan confirmation gate entirely (instant spurious stopAxis completion).
+    val runningOnThread0 = AxisCmdState(activeThread = 0, inPosition = true, axisErrorMsg = "", moving = false)
+    CompletionMask.positionAxis.isSatisfied(runningOnThread0) should be(false)
+    CompletionMask.homeAxis.isSatisfied(runningOnThread0) should be(false)
+    CompletionMask.stopAxis.isSatisfied(runningOnThread0) should be(false)
+    CompletionMask.selectWheel.isSatisfied(runningOnThread0) should be(false)
+
+    // Released sentinel (-1) with the same axis conditions satisfies all masks
+    val released = runningOnThread0.copy(activeThread = -1)
+    CompletionMask.positionAxis.isSatisfied(released) should be(true)
+    CompletionMask.homeAxis.isSatisfied(released) should be(true)
+    CompletionMask.stopAxis.isSatisfied(released) should be(true)
+    CompletionMask.selectWheel.isSatisfied(released) should be(true)
+  }
+
   test("Error detection logic should respect mask expectations") {
     // positionAxis mask expects axisErrorMsg="" → error detection fires
     val posMask = CompletionMask.positionAxis
@@ -379,5 +397,5 @@ class CommandWatcherActorTest extends AnyFunSuite with Matchers with BeforeAndAf
     isActor ! InternalStateActor.GetAxisCmdState(Axis.A, stateProbe.ref)
     val finalState = stateProbe.receiveMessage().get
     finalState.activeCommand should be(None)
-    finalState.activeThread should be(0)
+    finalState.activeThread should be(-1) // -1 = released sentinel (S86); 0 is a valid thread
   }

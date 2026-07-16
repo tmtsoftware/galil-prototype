@@ -564,6 +564,17 @@ object GalilSimulatorActor {
     val label = parts(0).stripPrefix("#")
     val thread = if (parts.length > 1) parts(1).toInt else 0
 
+    // Busy-thread rejection (controller fidelity): a real DMC rejects
+    // "XQ #label,n" with "?" while thread n is still executing. Modelling this
+    // matters for 8-axis testing — without it, a double-XQ bug (e.g. a failed
+    // interrupt path re-targeting an occupied thread) would silently "work" in
+    // simulation via the timer-replacement semantics and only fail on hardware.
+    if ((state.threadStatus & (1 << thread)) != 0) {
+      println(s"[SIM] XQ #$label on thread $thread REJECTED — thread busy " +
+        s"(_NO=0x${state.threadStatus.toHexString})")
+      return (formatReply(None, isError = true), state)
+    }
+
     println(s"[SIM] XQ #$label on thread $thread")
 
     // Set thread bit active
@@ -701,15 +712,28 @@ object GalilSimulatorActor {
         val moveThreadKey = s"_axisThread[$idx]"
         newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
           val mt = moveThreadNum.toInt
-          println(s"[SIM] #Stop$axis: clearing leaked move thread $mt")
-          val clearedStatus = newState.threadStatus & ~(1 << mt)
-          newState = newState.copy(
-            threadStatus = clearedStatus,
-            embeddedVars = newState.embeddedVars
-              - moveThreadKey
-              - s"_threadAxis[$mt]"
-              + (s"ae[$idx]" -> 0.0)
-          )
+          if (mt == thread) {
+            // Interrupt→follow-on reuse: this #StopX was XQ'd on the SAME
+            // thread the halted move occupied (HX cleared the bit; handleXQ
+            // just set it again for the stop). The bit now belongs to the
+            // stop program — clearing it here would make the stop appear to
+            // finish at XQ time instead of after StopCompleteDelay. Drop only
+            // the stale move bookkeeping: _threadAxis[thread] already points
+            // at this axis for the stop, and ae[idx]=1 is the stop's own
+            // entry flag (cleared by completeThread on its success path).
+            println(s"[SIM] #Stop$axis: reusing halted move thread $mt (bit retained for stop)")
+            newState = newState.copy(embeddedVars = newState.embeddedVars - moveThreadKey)
+          } else {
+            println(s"[SIM] #Stop$axis: clearing leaked move thread $mt")
+            val clearedStatus = newState.threadStatus & ~(1 << mt)
+            newState = newState.copy(
+              threadStatus = clearedStatus,
+              embeddedVars = newState.embeddedVars
+                - moveThreadKey
+                - s"_threadAxis[$mt]"
+                + (s"ae[$idx]" -> 0.0)
+            )
+          }
         }
         scheduleThreadComplete(timer, thread, StopCompleteDelay)
 
@@ -1795,15 +1819,13 @@ object GalilSimulatorActor {
   /**
    * Schedule the completion of an embedded program on the given thread.
    *
-   * CAUTION — timer key is per-thread: startSingleTimer with the same key
-   * REPLACES a pending timer. If a second XQ lands on the same thread before
-   * the previous program's ThreadComplete fires, that completion is silently
-   * dropped (its ae[]/_threadAxis cleanup in completeThread never runs).
-   * This cannot happen from HCD-driven traffic: the HCD's thread-reservation
-   * gate (ControllerCommandActor.unobservedThreads) never re-XQs a thread
-   * before its completion has been observed, which requires the ThreadComplete
-   * to have fired. Direct/manual XQ traffic (REPL, tests bypassing the HCD)
-   * could still trigger it.
+   * Timer key is per-thread: startSingleTimer with the same key REPLACES a
+   * pending timer. This replacement can only occur via HX-then-reXQ (the
+   * interrupt-reuse path, where dropping the halted program's ThreadComplete
+   * is the CORRECT behavior — handleHX already did the ae[]/_threadAxis
+   * cleanup): handleXQ rejects an XQ on a busy thread with "?" exactly like
+   * the real controller, so a second XQ cannot silently replace a live
+   * program's completion timer from any traffic source (HCD, REPL, or tests).
    */
   private def scheduleThreadComplete(
     timer: TimerScheduler[GalilSimulatorCommand],

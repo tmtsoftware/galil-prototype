@@ -515,8 +515,8 @@ object CommandHandlerActor {
    *                stopAxis wants #StopX to do its own STx).
    *
    * Sequence:
-   *   1. Query IS CmdState for activeThread
-   *   2. If activeThread > 0: send HaltExecution to CI actor (HX kills the thread)
+   *   1. Query IS's registry for the axis's thread 
+   *   2. If a thread is registered: send HaltExecution to CI actor (HX kills the thread)
    *   3. After successful HX: mark the registry entry Halted in IS
    *      (ThreadHalted; ADR-001), so scan attribution neither completes the
    *      dead thread nor misattributes the halted program's ae[] residue to
@@ -531,8 +531,8 @@ object CommandHandlerActor {
    *      scan will ever complete it.
    *
    * Tracking special case: no embedded thread is running (PVT executes from the
-   * controller's per-axis FIFO, not an embedded program), so activeThread=0 and
-   * HX is skipped.  The motor is still physically moving, but the caller is
+   * controller's per-axis FIFO, not an embedded program), so GetAxisThread
+   * returns None and HX is skipped.  The motor is still physically moving, but the caller is
    * responsible for the actual stop; either by sending ST directly (sendST=true)
    * or by running a follow-on program like #StopX that begins with STx.
    */
@@ -551,17 +551,17 @@ object CommandHandlerActor {
     // Step 1: Query the axis's thread from IS's REGISTRY (GetAxisThread) —
     // the authoritative source — not from AxisCmdState.activeThread, which is
     // display state and diverges when a watcher timeout fires
-    // clearActiveCommand (zeroing it) while the program still runs. Trusting
+    // clearActiveCommand (resetting it) while the program still runs. Trusting
     // the display state made a post-timeout stopAxis skip the HX and the
     // Halted mark, then allocate a fresh thread while the axis's real thread
     // was still registered and reserved (S85 finding 4). activeCommand is
     // still read from CmdState (log context only).
-    val activeThread: Int = Try {
+    val activeThreadOpt: Option[Int] = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[Int]](
         ref => InternalStateActor.GetAxisThread(axis, ref)
       )(askTimeout, askScheduler)
       Await.result(future, askTimeout.duration)
-    }.toOption.flatten.getOrElse(0)
+    }.toOption.flatten
     val activeCmd: Option[ActiveCommand] = Try {
       val future = AskPattern.Askable(internalStateActor).ask[Option[AxisCmdState]](
         ref => InternalStateActor.GetAxisCmdState(axis, ref)
@@ -570,32 +570,33 @@ object CommandHandlerActor {
     }.getOrElse(None)
 
     log.info(s"checkAndInterrupt: $commandName interrupting axis $axis " +
-      s"(thread=$activeThread, cmd=$activeCmd)")
+      s"(thread=${activeThreadOpt.getOrElse("none")}, cmd=$activeCmd)")
 
     // Step 2: Halt the active thread if one is running (HX via CI actor).
     // On success, capture haltSucceeded=true so step 3 can do the ae attribution.
     var haltSucceeded = false
-    if activeThread > 0 then
-      log.info(s"checkAndInterrupt: halting axis $axis thread=$activeThread for $commandName")
-      val haltResult = Try {
-        val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.HaltExecutionResult](
-          ref => GalilCommandMessage.HaltExecution(activeThread, axis, ref)
-        )(askTimeout, askScheduler)
-        Await.result(future, askTimeout.duration)
-      }
-      haltResult match {
-        case Failure(ex) =>
-          log.warn(s"checkAndInterrupt: HaltExecution error for $axis thread=$activeThread: " +
-            s"${ex.getMessage} — proceeding")
-        case Success(result) if !result.success =>
-          log.warn(s"checkAndInterrupt: HaltExecution failed for $axis thread=$activeThread: " +
-            s"${result.error.getOrElse("unknown")} — proceeding")
-        case Success(_) =>
-          log.info(s"checkAndInterrupt: axis $axis thread $activeThread halted")
-          haltSucceeded = true
-      }
-    else
-      log.info(s"checkAndInterrupt: axis $axis activeThread=0, skipping HX (already released)")
+    activeThreadOpt match
+      case Some(activeThread) =>
+        log.info(s"checkAndInterrupt: halting axis $axis thread=$activeThread for $commandName")
+        val haltResult = Try {
+          val future = AskPattern.Askable(ciActor).ask[GalilCommandMessage.HaltExecutionResult](
+            ref => GalilCommandMessage.HaltExecution(activeThread, axis, ref)
+          )(askTimeout, askScheduler)
+          Await.result(future, askTimeout.duration)
+        }
+        haltResult match {
+          case Failure(ex) =>
+            log.warn(s"checkAndInterrupt: HaltExecution error for $axis thread=$activeThread: " +
+              s"${ex.getMessage} — proceeding")
+          case Success(result) if !result.success =>
+            log.warn(s"checkAndInterrupt: HaltExecution failed for $axis thread=$activeThread: " +
+              s"${result.error.getOrElse("unknown")} — proceeding")
+          case Success(_) =>
+            log.info(s"checkAndInterrupt: axis $axis thread $activeThread halted")
+            haltSucceeded = true
+        }
+      case None =>
+        log.info(s"checkAndInterrupt: axis $axis has no registered thread, skipping HX (already released)")
 
     // Step 3: After successful HX, mark the registry entry Halted in IS
     // (ADR-001) before the next program registers. A Halted entry is excluded
@@ -608,6 +609,8 @@ object CommandHandlerActor {
     // follow-on program launches. Skipped on HX failure (nothing was halted)
     // and on the already-released path (no activeThread; Tracking case).
     if haltSucceeded then
+      // haltSucceeded is only ever true with a defined activeThreadOpt (step 2).
+      val activeThread = activeThreadOpt.get
       val notifyResult = Try {
         val future = AskPattern.Askable(internalStateActor).ask[InternalStateActor.ThreadHaltedAck](
           ref => InternalStateActor.ThreadHalted(activeThread, axis, ref)
@@ -653,7 +656,7 @@ object CommandHandlerActor {
     // IS's registry entry and the CI actor's reservation need this explicit
     // release. Sent AFTER the commandHalted pulse (steps 5-7) so the old
     // watcher terminates on commandHalted (INTERRUPTED) before the
-    // activeThread→0 notification could reach it; mailbox order from CH to
+    // activeThread→-1 notification could reach it; mailbox order from CH to
     // IS, and IS to the watcher, preserves this. Idempotent in IS if a scan
     // completion raced the halt.
     // Step 8 (S84): skip the registry exit when the follow-on will REUSE this
@@ -663,14 +666,16 @@ object CommandHandlerActor {
     // attribution until executeProgramAndWatch re-registers it (Halted →
     // Active, same thread, same axis).
     if haltSucceeded && !reuseHaltedThread then
-      internalStateActor ! InternalStateActor.UnregisterThread(activeThread, axis)
+      activeThreadOpt.foreach(t => internalStateActor ! InternalStateActor.UnregisterThread(t, axis))
 
     log.info(s"checkAndInterrupt: interruption complete for axis $axis — " +
       s"new command $commandName may proceed")
 
-    // S84: hand the halted thread back for reuse when we retained its reservation
+    // Hand the halted thread back for reuse when we retained its reservation
     // (reuseHaltedThread); None otherwise, so callers then allocate as before.
-    if haltSucceeded && reuseHaltedThread then Some(activeThread) else None
+    // May be Some(0): the CI actor honors forceThread via Option.orElse, so a
+    // reused thread 0 does not fall through to allocateThread.
+    if haltSucceeded && reuseHaltedThread then activeThreadOpt else None
   }
 
   // ========================================

@@ -191,7 +191,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
     // SM sees thread released, not moving (from QR poll)
     isActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("activeThread" -> 0, "moving" -> false),
+      Map("activeThread" -> -1, "moving" -> false),
       testKit.system.ignoreRef)
 
   private def simulateHomeComplete(
@@ -210,7 +210,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
     // SM sees thread released, not moving (home complete)
     isActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("activeThread" -> 0, "moving" -> false),
+      Map("activeThread" -> -1, "moving" -> false),
       testKit.system.ignoreRef)
 
   // ========================================
@@ -480,7 +480,7 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
 
     // Simulate ControllerStatusActor: QR poll sees stop complete
     isActor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
-      Map("activeThread" -> 0, "moving" -> false),
+      Map("activeThread" -> -1, "moving" -> false),
       testKit.system.ignoreRef)
     Thread.sleep(300)
 
@@ -693,9 +693,9 @@ class LongRunningCommandTest extends AnyFunSuite with Matchers with BeforeAndAft
     Thread.sleep(50)
 
     // SM sees thread released, not moving (select complete)
-    // selectWheel mask: activeThread==0, axisErrorMsg=="", moving==false (no inPosition)
+    // selectWheel mask: activeThread==-1, axisErrorMsg=="", moving==false (no inPosition)
     isActor ! InternalStateActor.UpdateAxisCmdState(axis,
-      Map("activeThread" -> 0, "moving" -> false),
+      Map("activeThread" -> -1, "moving" -> false),
       testKit.system.ignoreRef)
 
   test("selectWheel should send correct Galil commands") {

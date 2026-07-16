@@ -135,7 +135,7 @@ object GalilCommandMessage {
    *   - checkAndInterrupt: sends ST after HaltExecution, then starts a new embedded program
    *   - stopAxis: does not need ST; #StopX handles motor deceleration
    *
-   * @param thread  Thread number from IS.activeThread. Use 0 to skip HX entirely.
+   * @param thread  Thread number from IS's registry (GetAxisThread).
    * @param axis    Axis identifier (used for logging context)
    * @param replyTo Actor to receive HaltExecutionResult
    */

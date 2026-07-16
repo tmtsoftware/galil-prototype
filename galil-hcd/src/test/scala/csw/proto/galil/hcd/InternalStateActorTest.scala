@@ -342,7 +342,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
   test("AxisCmdState should have correct defaults") {
     val cmd = AxisCmdState()
     
-    cmd.activeThread shouldBe 0
+    cmd.activeThread shouldBe -1
     cmd.axisErrorMsg shouldBe ""
     cmd.inPosition shouldBe false
     cmd.moving shouldBe false
@@ -386,7 +386,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     withAxisA.getAxis(Axis.A).get.mechanismType should be (MechanismType.Linear)
     // Should also have AxisCmdState
     withAxisA.getCmdState(Axis.A) should not be (None)
-    withAxisA.getCmdState(Axis.A).get.activeThread shouldBe 0
+    withAxisA.getCmdState(Axis.A).get.activeThread shouldBe -1
   }
   
   test("HcdState.updateAxis should update specific axis") {
@@ -822,7 +822,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // Send same default values (nothing actually changes)
     actor ! InternalStateActor.UpdateAxisCmdState(
       Axis.A,
-      Map("activeThread" -> 0, "moving" -> false),
+      Map("activeThread" -> -1, "moving" -> false),
       updateProbe.ref
     )
     updateProbe.receiveMessage()
@@ -1011,15 +1011,15 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // 4. StatusMonitor detects thread stopped and motor not moving
     actor ! InternalStateActor.UpdateAxisCmdState(
       Axis.D,
-      Map("activeThread" -> 0, "moving" -> false, "stopCode" -> 1),
+      Map("activeThread" -> -1, "moving" -> false, "stopCode" -> 1),
       updateProbe.ref
     )
     updateProbe.receiveMessage()
     
     // CommandWatcher should get final notification — can now evaluate completion mask:
-    //   activeThread==0, inPosition==true, axisErrorMsg=="", moving==false  → Completed!
+    //   activeThread==-1, inPosition==true, axisErrorMsg=="", moving==false  → Completed!
     val completionNotification = cmdWatcher.receiveMessage()
-    completionNotification.cmdState.activeThread shouldBe 0
+    completionNotification.cmdState.activeThread shouldBe -1
     completionNotification.cmdState.moving shouldBe false
     completionNotification.cmdState.inPosition shouldBe true  // Preserved from mirror
     completionNotification.cmdState.axisErrorMsg shouldBe ""
@@ -1164,8 +1164,8 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     actor ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
     val cmdState = probe.receiveMessage().get
     cmdState.activeCommand shouldBe None
-    // clearActiveCommand also zeroes activeThread per StateModel line 473
-    cmdState.activeThread shouldBe 0
+    // clearActiveCommand also resets activeThread to the -1 sentinel (StateModel)
+    cmdState.activeThread shouldBe -1
   }
 
   test("EnterFaulted should be idempotent (second call doesn't break invariants)") {
@@ -1419,7 +1419,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // Fresh observation: StopD's clean completion attributes normally.
     actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.D -> 0), 0, None)
     Thread.sleep(50)
-    cmdStateOf(actor, Axis.D).activeThread shouldBe 0
+    cmdStateOf(actor, Axis.D).activeThread shouldBe -1
   }
 
   test("Halted entry is excluded from attribution: no error, no completion") {
@@ -1463,7 +1463,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     Thread.sleep(50)
     val cmd = cmdStateOf(actor, Axis.A)
     cmd.axisErrorMsg shouldBe ""
-    cmd.activeThread shouldBe 0
+    cmd.activeThread shouldBe -1
     // Exactly one ReleaseThread(2), from the completion (reuse retained the
     // reservation across the halt; no release at halt time).
     cmdProbe.expectMessage(GalilCommandMessage.ReleaseThread(2))
@@ -1474,7 +1474,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // errorCode!=0 evidence + exactly one axis whose current thread was
     // observed-cleared (fresh) with ae==1 → per-axis "Embedded program
     // error", and the watcher-ordering contract: axisErrorMsg lands, THEN
-    // activeThread→0.
+    // activeThread→-1.
     val actor = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)))
     actor ! InternalStateActor.RegisterThread(3, Axis.B)
@@ -1483,7 +1483,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     Thread.sleep(50)
     val cmd = cmdStateOf(actor, Axis.B)
     cmd.axisErrorMsg shouldBe "Embedded program error: 17 Program not valid"
-    cmd.activeThread shouldBe 0              // completion still attributed after the error
+    cmd.activeThread shouldBe -1             // completion still attributed after the error
     axisStateOf(actor, Axis.B).axisState shouldBe AxisStateEnum.Error
   }
 
@@ -1595,12 +1595,12 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     actor ! InternalStateActor.RegisterThread(4, Axis.A)
     actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
     q.receiveMessage() shouldBe Some(4)                       // registry-authoritative
-    // Display-state divergence (S85 finding 4): clearActiveCommand zeroes
-    // AxisCmdState.activeThread (e.g. on a watcher timeout) while the program
+    // Display-state divergence (S85 finding 4): clearActiveCommand resets
+    // AxisCmdState.activeThread to -1 (e.g. on a watcher timeout) while the program
     // still runs — the registry answer must be unaffected.
     actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
       Map("clearActiveCommand" -> true), testKit.system.ignoreRef)
-    cmdStateOf(actor, Axis.A).activeThread shouldBe 0         // display state zeroed...
+    cmdStateOf(actor, Axis.A).activeThread shouldBe -1        // display state reset...
     actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
     q.receiveMessage() shouldBe Some(4)                       // ...registry still knows
     val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
@@ -1608,4 +1608,82 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     ack.receiveMessage(500.millis)
     actor ! InternalStateActor.GetAxisThread(Axis.A, q.ref)
     q.receiveMessage() shouldBe None                          // Halted: nothing to interrupt
+  }
+
+  // ==========================================================================
+  // Thread 0 in the registry (S86) — thread 0 is a valid last-resort thread
+  // (S85 selectThread policy); nothing in attribution may treat it specially.
+  // These pin the -1 no-thread sentinel: under the former 0-sentinel a
+  // thread-0 registration was indistinguishable from "released" in display
+  // state, and both registration and release edges were 0→0 (no watcher
+  // notification).
+  // ==========================================================================
+
+  test("thread 0: registration sets activeThread=0 and completion attributes to -1 with a notification") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.H)))
+    val cmdProbe = testKit.createTestProbe[GalilCommandMessage]()
+    actor ! InternalStateActor.SetCommandActor(cmdProbe.ref)
+
+    val watcher = testKit.createTestProbe[InternalStateActor.CmdStateChanged]()
+    actor ! InternalStateActor.SubscribeCmdState(Axis.H, watcher.ref)
+
+    actor ! InternalStateActor.RegisterThread(0, Axis.H)
+    // Registration edge must notify: -1 → 0 is a real transition (S86).
+    val reg = watcher.receiveMessage()
+    reg.cmdState.activeThread shouldBe 0
+    reg.changedFields should contain ("activeThread")
+
+    // Fresh scan observes bit 0 clear → completion attributes: 0 → -1.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.H -> 0), 0, None)
+    val rel = watcher.receiveMessage()
+    rel.cmdState.activeThread shouldBe -1
+    rel.changedFields should contain ("activeThread")
+    // Reservation released back to the CI actor.
+    cmdProbe.expectMessage(GalilCommandMessage.ReleaseThread(0))
+  }
+
+  test("thread 0: the freshness gate applies (stale scan cannot attribute a thread-0 entry)") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.H)))
+    val staleObservedAt = System.nanoTime()                 // read BEFORE registration
+    actor ! InternalStateActor.RegisterThread(0, Axis.H)
+    barrier(actor)
+    actor ! InternalStateActor.ScanObservations(0x00, staleObservedAt, Map(Axis.H -> 0), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.H).activeThread shouldBe 0       // NOT attributed — scan predates the entry
+    // A fresh scan then attributes normally.
+    actor ! InternalStateActor.ScanObservations(0x00, freshObservedAt(actor), Map(Axis.H -> 0), 0, None)
+    Thread.sleep(50)
+    cmdStateOf(actor, Axis.H).activeThread shouldBe -1
+  }
+
+  test("thread 0: error attribution works against a thread-0 entry") {
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.H)))
+    actor ! InternalStateActor.RegisterThread(0, Axis.H)
+    // Controller error with axis H the single candidate: bit 0 observed-cleared, ae==1.
+    actor ! InternalStateActor.ScanObservations(
+      0x00, freshObservedAt(actor), Map(Axis.H -> 1), 17, Some("17 Program not valid"))
+    Thread.sleep(50)
+    val cmd = cmdStateOf(actor, Axis.H)
+    cmd.axisErrorMsg shouldBe "Embedded program error: 17 Program not valid"
+    cmd.activeThread shouldBe -1             // completion still attributed after the error
+    axisStateOf(actor, Axis.H).axisState shouldBe AxisStateEnum.Error
+  }
+
+  test("thread 0: GetAxisThread returns Some(0), distinct from None (S86 interrupt regression)") {
+    // checkAndInterrupt used to collapse Some(0) and None via getOrElse(0),
+    // so a thread-0 program could never be interrupted. The Option must
+    // round-trip intact.
+    val actor = testKit.spawn(InternalStateActor(HcdState().initializeAxis(Axis.H)))
+    val q = testKit.createTestProbe[Option[Int]]()
+    actor ! InternalStateActor.GetAxisThread(Axis.H, q.ref)
+    q.receiveMessage() shouldBe None
+    actor ! InternalStateActor.RegisterThread(0, Axis.H)
+    actor ! InternalStateActor.GetAxisThread(Axis.H, q.ref)
+    q.receiveMessage() shouldBe Some(0)
+    // Halted exclusion applies to thread 0 like any other.
+    val ack = testKit.createTestProbe[InternalStateActor.ThreadHaltedAck]()
+    actor ! InternalStateActor.ThreadHalted(0, Axis.H, ack.ref)
+    ack.receiveMessage(500.millis)
+    actor ! InternalStateActor.GetAxisThread(Axis.H, q.ref)
+    q.receiveMessage() shouldBe None
   }

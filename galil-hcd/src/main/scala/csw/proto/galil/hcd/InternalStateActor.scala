@@ -162,11 +162,11 @@ object InternalStateActor:
    *      axis (and not marked halted) was observed-cleared by this same scan.
    *   2. Completion attribution: each non-halted registry entry whose
    *      thread's bit is clear and whose observation is fresh
-   *      (observedAt > registeredAt) → activeThread=0, CmdStateChanged fired,
+   *      (observedAt > registeredAt) → activeThread=-1, CmdStateChanged fired,
    *      ReleaseThread forwarded to the CI actor.
    *
    * Errors are processed BEFORE completions so a watcher sees axisErrorMsg
-   * before activeThread→0 and fails the command instead of completing it —
+   * before activeThread→-1 and fails the command instead of completing it —
    * the ordering contract that previously spanned two actors (CS pushed
    * axisErrorMsg, then sent UpdateThreadStatus last) is now local sequencing
    * in one handler.
@@ -1086,12 +1086,12 @@ class InternalStateActor(
 
     // Set activeThread on the axis CmdState immediately so the watcher's
     // initial snapshot reflects the running thread. This prevents premature
-    // completion on the stale activeThread=0 from the last QR poll.
+    // completion on the stale released-sentinel (-1) from the last QR poll.
     val oldCmdState = currentState.getCmdState(axis)
     currentState = currentState.updateCmdState(axis, Map("activeThread" -> thread))
     val newCmdState = currentState.getCmdState(axis)
 
-    // Only notify if value actually changed (it will have, from 0 to thread#)
+    // Only notify if value actually changed (it will have, from -1 to thread#)
     val changed = (oldCmdState, newCmdState) match
       case (Some(old), Some(nw)) => old.activeThread != nw.activeThread
       case _ => true
@@ -1106,7 +1106,7 @@ class InternalStateActor(
    *
    * ORDERING CONTRACT (previously spanning two actors, now local): errors are
    * reported before completions so a watcher's CmdStateChanged carries
-   * axisErrorMsg before it sees activeThread→0, failing the command instead
+   * axisErrorMsg before it sees activeThread→-1, failing the command instead
    * of completing it. reportAxisError and completeRegisteredThread both
    * notify subscribers synchronously, so statement order here IS delivery
    * order at the watcher.
@@ -1239,7 +1239,7 @@ class InternalStateActor(
 
     // ---- Completion attribution (after errors; see contract above) ----
     clearedEntries.foreach { (thread, axis) =>
-      log.info(s"Thread $thread completed → axis=$axis activeThread→0")
+      log.info(s"Thread $thread completed → axis=$axis activeThread→-1")
       completeRegisteredThread(thread, axis)
     }
 
@@ -1328,7 +1328,7 @@ class InternalStateActor(
     commandActor.foreach(_ ! GalilCommandMessage.ReleaseThread(thread))
 
     val oldCmdState = currentState.getCmdState(axis)
-    currentState = currentState.updateCmdState(axis, Map("activeThread" -> 0))
+    currentState = currentState.updateCmdState(axis, Map("activeThread" -> -1))
     val newCmdState = currentState.getCmdState(axis)
 
     val changed = (oldCmdState, newCmdState) match

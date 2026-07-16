@@ -244,6 +244,38 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert((after & 0x02) == 0, s"Thread 1 should be cleared after HX, _NO=$after")
   }
 
+  test("XQ on a busy thread should be rejected with ? (S86 controller fidelity)") {
+    val sim = spawnSimulator()
+    // Long-running move occupies thread 1
+    send(sim, "dmd[0]=50000")
+    send(sim, "speed[0]=1000")
+    send(sim, "XQ #MoveA,1")
+    val before = sendText(sim, "MG _NO").toDouble.toInt
+    assert((before & 0x02) != 0, s"Thread 1 should be active, _NO=$before")
+
+    // Second XQ on the SAME thread must be rejected like the real controller
+    val response = send(sim, "XQ #StopA,1").utf8String
+    assert(response == "?", s"XQ on busy thread should return '?', got: '$response'")
+
+    // The original program is undisturbed: still running, still on thread 1
+    val after = sendText(sim, "MG _NO").toDouble.toInt
+    assert((after & 0x02) != 0, s"Thread 1 should still be active after rejected XQ, _NO=$after")
+    assert(sendText(sim, "MG _XQ1").toDouble.toInt >= 0, "_XQ1 should still show the thread executing")
+  }
+
+  test("HX then re-XQ on the same thread should succeed (S84 reuse path)") {
+    val sim = spawnSimulator()
+    send(sim, "dmd[0]=50000")
+    send(sim, "speed[0]=1000")
+    send(sim, "XQ #MoveA,1")
+    send(sim, "HX1")
+    // The reuse path: after HX the bit is clear, so the follow-on XQ must land
+    val response = send(sim, "XQ #StopA,1").utf8String
+    assert(response == ":", s"XQ after HX on the same thread should succeed, got: '$response'")
+    val no = sendText(sim, "MG _NO").toDouble.toInt
+    assert((no & 0x02) != 0, s"Thread 1 should be active again after reuse XQ, _NO=$no")
+  }
+
   // ==========================================================================
   // 6. #Init — embedded variable initialization
   // ==========================================================================

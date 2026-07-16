@@ -26,16 +26,10 @@ class GalilHcdConfigTest extends AnyFunSuite {
     // Simulation mode
     assert(hcdConfig.simulate == true)
     
-    // Active axes - A and B active, C-H inactive
+    // Active axes - all 8 active (S86: default example is a fully populated
+    // 8-motor controller, exercising the thread-0 last-resort case)
     assert(hcdConfig.activeAxes.length == 8)
-    assert(hcdConfig.activeAxes(0) == true)  // A
-    assert(hcdConfig.activeAxes(1) == true)  // B
-    assert(hcdConfig.activeAxes(2) == false) // C
-    assert(hcdConfig.activeAxes(3) == false) // D
-    assert(hcdConfig.activeAxes(4) == false) // E
-    assert(hcdConfig.activeAxes(5) == false) // F
-    assert(hcdConfig.activeAxes(6) == false) // G
-    assert(hcdConfig.activeAxes(7) == false) // H
+    assert(hcdConfig.activeAxes.forall(_ == true))
   }
   
   test("should parse axis A configuration") {
@@ -65,15 +59,25 @@ class GalilHcdConfigTest extends AnyFunSuite {
     assert(axisB.countsPerRevolution == 3600.0)
   }
   
-  test("should only contain configurations for active axes") {
+  test("should contain configurations for all 8 active axes") {
     val config = ConfigFactory.load("GalilHcdConfig.conf")
     val hcdConfig = GalilHcdConfig.fromConfig(config)
-    
-    // Only A and B should be configured
-    assert(hcdConfig.axes.size == 2)
-    assert(hcdConfig.axes.contains("A"))
-    assert(hcdConfig.axes.contains("B"))
-    assert(!hcdConfig.axes.contains("C"))
+
+    // All 8 axes configured (S86)
+    assert(hcdConfig.axes.size == 8)
+    ('A' to 'H').foreach(c => assert(hcdConfig.axes.contains(c.toString), s"axis $c missing"))
+  }
+
+  test("axes C-H should be linear stages (S86 8-motor example)") {
+    val config = ConfigFactory.load("GalilHcdConfig.conf")
+    val hcdConfig = GalilHcdConfig.fromConfig(config)
+
+    ('C' to 'H').foreach { c =>
+      val ax = hcdConfig.axes(c.toString)
+      assert(ax.mechanismType == "linear", s"axis $c should be linear")
+      assert(ax.algorithm == "forward", s"axis $c should use forward approach")
+      assert(ax.upperLimit == 1000.0 && ax.lowerLimit == 0.0, s"axis $c limits")
+    }
   }
   
   test("should use default test config as fallback") {

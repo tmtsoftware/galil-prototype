@@ -633,28 +633,24 @@ private[hcd] object ControllerCommandActor {
           case GalilCommandMessage.HaltExecution(thread, axis, replyTo) =>
             try {
               galilIo.synchronized {
-                if thread >= 1 then
-                  val threadStatus = queryThreadStatus()
-                  val threadBit = 1 << thread
-                  if (threadStatus & threadBit) != 0 then
-                    val hxCmd = s"HX $thread"
-                    log.info(s"HaltExecution: thread $thread confirmed active (_NO=0x${threadStatus.toHexString}), sending $hxCmd")
-                    val hxResponses = galilIo.send(hxCmd)
-                    val hxError = hxResponses.find { case (_, bs) =>
-                      bs.utf8String.trim.startsWith("?")
-                    }
-                    if hxError.isDefined then
-                      log.warn(s"HaltExecution: HX $thread returned error — thread may have stopped between check and HX")
-                      replyTo ! GalilCommandMessage.HaltExecutionResult(success = false,
-                        error = Some(s"HX $thread returned error"))
-                    else
-                      log.info(s"HaltExecution: axis ${axis.char} thread $thread halted")
-                      replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
+                val threadStatus = queryThreadStatus()
+                val threadBit = 1 << thread
+                if (threadStatus & threadBit) != 0 then
+                  val hxCmd = s"HX $thread"
+                  log.info(s"HaltExecution: thread $thread confirmed active (_NO=0x${threadStatus.toHexString}), sending $hxCmd")
+                  val hxResponses = galilIo.send(hxCmd)
+                  val hxError = hxResponses.find { case (_, bs) =>
+                    bs.utf8String.trim.startsWith("?")
+                  }
+                  if hxError.isDefined then
+                    log.warn(s"HaltExecution: HX $thread returned error — thread may have stopped between check and HX")
+                    replyTo ! GalilCommandMessage.HaltExecutionResult(success = false,
+                      error = Some(s"HX $thread returned error"))
                   else
-                    log.info(s"HaltExecution: thread $thread already finished (_NO=0x${threadStatus.toHexString}), skipping HX")
+                    log.info(s"HaltExecution: axis ${axis.char} thread $thread halted")
                     replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
                 else
-                  log.info(s"HaltExecution: thread=0, nothing to halt")
+                  log.info(s"HaltExecution: thread $thread already finished (_NO=0x${threadStatus.toHexString}), skipping HX")
                   replyTo ! GalilCommandMessage.HaltExecutionResult(success = true)
               }
             } catch {

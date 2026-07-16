@@ -526,7 +526,7 @@ function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
       // CmdState bar (no longer carries Trk toggle — telemetry below is auto-shown when Tracking)
       e('div',{style:{marginTop:4,padding:'3px 7px',backgroundColor:'#1F2937',borderRadius:4,
           fontSize:10.5,color:'#9CA3AF',display:'flex',gap:8,alignItems:'center'}},
-        e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>0?'#FCD34D':'#4B5563'}},cs.activeThread||'—')),
+        e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>=0?'#FCD34D':'#4B5563'}},cs.activeThread>=0?cs.activeThread:'—')),
         e('span',{style:{color:'#374151'}},'\u2502'),
         e('span',null,'Mov: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Y':'N')),
         e('span',{style:{color:'#374151'}},'\u2502'),
@@ -1064,7 +1064,8 @@ function ConfigPanel({axis, axState, cmdSt, onCommand}) {
     //
     // Jog buttons enabled when axis is in a jog-permissible state:
     //   Idle, Lost                              — first jog from quiescent
-    //   Moving (with activeThread == 0)         — reentrant speed/direction update
+    //   Moving (with activeThread == -1)        — reentrant speed/direction update
+    //     (-1 = no thread; 0 is a valid thread)
     //                                              (engineering jog already running)
     // Stop is always enabled — fundamentally a safety command; works against
     // spontaneous motion and externally-issued JGs as well as our own jogs.
@@ -1075,7 +1076,7 @@ function ConfigPanel({axis, axState, cmdSt, onCommand}) {
       const canJog =
         axState.axisState === 'Idle'
         || axState.axisState === 'Lost'
-        || (axState.axisState === 'Moving' && (cs.activeThread || 0) === 0);
+        || (axState.axisState === 'Moving' && (cs.activeThread ?? -1) === -1);
       const speedNum = parseInt(jogSpeed, 10);
       const speedValid = !isNaN(speedNum) && speedNum > 0;
       return e('div',{style:{fontFamily:'var(--mono)',fontSize:10.5}},

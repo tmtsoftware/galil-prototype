@@ -609,7 +609,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     probeA.receiveMessage().get.activeThread should be(1)
     val probeB = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.B, probeB.ref)
-    probeB.receiveMessage().get.activeThread should be(0)
+    probeB.receiveMessage().get.activeThread should be(-1)
   }
 
   test("ControllerStatusActor should decode multiple active threads") {
@@ -639,7 +639,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     probeB.receiveMessage().get.activeThread should be(2)
   }
 
-  test("ControllerStatusActor should set activeThread to 0 when thread stops") {
+  test("ControllerStatusActor should set activeThread to -1 when thread stops") {
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
@@ -659,7 +659,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val probeA1 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA1.ref)
     probeA1.receiveMessage().get.activeThread should be(1)
-    // Now thread 1 stops — registry clears it and sets activeThread=0.
+    // Now thread 1 stops — registry clears it and sets activeThread=-1.
     // Update both the QR byte (controller's view) AND liveThreads (so _XQ
     // returns -1 for thread 1). The synthesized byte will be 0.
     liveThreads -= 1
@@ -668,7 +668,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     Thread.sleep(100)
     val probeA2 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probeA2.ref)
-    probeA2.receiveMessage().get.activeThread should be(0)
+    probeA2.receiveMessage().get.activeThread should be(-1)
   }
 
   test("ControllerStatusActor QR should update both AxisState and AxisCmdState") {
@@ -779,7 +779,7 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     // The original S53 bug: CMDERR halts thread 1, but QR threadStatus byte's
     // bit 1 remains set for many seconds because other threads keep _NO
     // sticky.  _XQ1 returns -1 immediately, so the synthesized byte's bit 1
-    // is clear and CS reports activeThread=0.
+    // is clear and CS reports activeThread=-1.
     val internalState = testKit.spawn(InternalStateActor(
       HcdState().initializeAxis(Axis.A).initializeAxis(Axis.B)
     ))
@@ -798,10 +798,10 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val dr = createExtendedDataRecord(threadStatus = 0x02.toByte)
     sm ! ControllerStatusActor.QRResponse(dr)
     Thread.sleep(100)
-    // Authoritative result: _XQ1=-1 → synthesized byte 0x00 → activeThread=0.
+    // Authoritative result: _XQ1=-1 → synthesized byte 0x00 → activeThread=-1.
     val probe = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe.ref)
-    probe.receiveMessage().get.activeThread shouldBe 0
+    probe.receiveMessage().get.activeThread shouldBe -1
   }
 
   test("_XQ<n> synthesis falls back to QR byte when query result count is wrong (fail-closed)") {
