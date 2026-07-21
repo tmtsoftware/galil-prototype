@@ -471,6 +471,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   // 5. HMI Server - Embedded HTTP/WebSocket test console (created during initialize)
   private var hmiServer: hmi.HmiServer = uninitialized
 
+  // Per-JVM CPU load monitor is a process-wide singleton (CpuLoadMonitor.startOnce);
+  // no per-component field. Basis for REQ-2-APS-0621 + live ops resource-health.
+
+  // Sampling cadence for the cpuLoad event; 1 Hz matches the model file's maxRate.
+  // Candidate for config-driving (galil.* / GalilHcdConfig) if a per-deployment rate
+  // is ever needed; a constant keeps the prototype simple for now.
+  private val CpuLoadSampleInterval: FiniteDuration = 1.second
+
   // ========================================
   // Lifecycle Handlers
   // ========================================
@@ -669,7 +677,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // Route HMI-issued faultReset directly to handleFaultReset.  Runs
         // on the class-level execution context so the HMI HTTP handler
         // returns immediately (the recovery is long-running).
-        onFaultReset            = (setup, runId) => Future { handleFaultReset(setup, runId) }
+        onFaultReset            = (setup, runId) => Future { handleFaultReset(setup, runId) },
+        cpuLoad                 = () => CpuLoadMonitor.latest
       )(ctx.system)
       hmiServer.start()
       log.info(s"HMI test console starting on port $hmiPort")
@@ -729,6 +738,18 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         "initializingReason" -> "startup"
       ),
       ctx.system.ignoreRef
+    )
+
+    // Phase 3d: Start per-JVM CPU load telemetry (cpuLoad SystemEvent, 1 Hz).
+    // Started before Phase 4 so the (up to 120 s) init sequence is itself covered, and
+    // kept running regardless of init outcome - it is pure JDK MXBean sampling with no
+    // dependency on controller state. Measurement basis for REQ-2-APS-0621.
+    CpuLoadMonitor.startOnce(
+      sourcePrefix = componentInfo.prefix,
+      publisher    = eventService.defaultPublisher,
+      scheduler    = timeServiceScheduler,
+      log          = log,
+      interval     = CpuLoadSampleInterval
     )
 
     // Phase 4: Embedded program verification + controller initialization.

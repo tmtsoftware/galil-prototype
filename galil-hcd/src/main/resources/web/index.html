@@ -715,6 +715,23 @@ function AxisVisual({axState, colors, showDemand}) {
 }
 
 
+function CpuBadge({cpu}) {
+  if (!cpu) return null;
+  const proc = cpu.processCpuLoad, sys = cpu.systemCpuLoad;
+  const pct = proc >= 0 ? proc*100 : null;
+  const sysPct = sys >= 0 ? sys*100 : null;
+  const fmt = v => v == null ? '\u2014' : v.toFixed(0) + '%';
+  // Thresholds keyed off REQ-2-APS-0621's 70% ceiling: green < 55, amber 55-70, red >= 70.
+  const col = pct == null ? '#6B7280' : pct >= 70 ? '#FCA5A5' : pct >= 55 ? '#FCD34D' : '#6EE7B7';
+  const bg  = pct != null && pct >= 70 ? '#7F1D1D' : pct != null && pct >= 55 ? '#78350F' : '#1F2937';
+  return e('span',{
+    title:`This HCD JVM CPU load vs REQ-2-APS-0621 (target <= 70%) \u2014 process ${fmt(pct)} \u00B7 system ${fmt(sysPct)} \u00B7 ${cpu.availableProcessors} logical cores`,
+    style:{display:'inline-flex',alignItems:'center',gap:4,fontSize:9.5,padding:'2px 7px',borderRadius:3,
+      backgroundColor:bg,color:col,fontFamily:'var(--mono)',fontWeight:700}},
+    e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:col,flexShrink:0}}),
+    `CPU ${fmt(pct)}`);
+}
+
 function ThreadStatusBar({threadStatus}) {
   if (!threadStatus) return null;
   return e('div',{style:{display:'flex',gap:2,alignItems:'center',fontFamily:'var(--mono)',fontSize:9.5,color:'#6B7280'}},
@@ -1594,6 +1611,8 @@ function GalilHMI() {
         state?.pollingRateHz != null && e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,
           backgroundColor:'#1F2937',color:'#6B7280',fontFamily:'var(--mono)'}},
           `${(state.pollingRateHz).toFixed(0)} Hz`),
+        // Per-JVM CPU load vs the 70% ceiling (REQ-2-APS-0621).
+        e(CpuBadge,{cpu:state?.cpuLoad}),
         // Per-TCP-connection status: Cmd (command), Sts (status), Con (console/informational)
         e('span',{style:{display:'inline-flex',alignItems:'center',gap:5,padding:'2px 7px',
           borderRadius:3,backgroundColor:'#1F2937',fontFamily:'var(--mono)',fontSize:9.5}},

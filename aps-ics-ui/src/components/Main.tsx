@@ -52,6 +52,7 @@ import type { ConfigSource } from './ConfigTab'
 import { LifecycleCommands } from './LifecycleCommands'
 import type { LifecycleName } from './LifecycleCommands'
 import { CommandEventLog } from './CommandEventLog'
+import { AssemblyCpuBadge } from './AssemblyCpuBadge'
 import type { LogEntry, LogLevel } from './CommandEventLog'
 import { DEFAULT_KEY, REGISTRY } from './registry'
 import { readAxis, readStatus } from '../models/stage'
@@ -268,8 +269,9 @@ export const Main = (): React.JSX.Element => {
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
-      <div style={{ background: '#2C2C2A', color: '#F1EFE8', padding: '12px 20px', fontSize: 16 }}>
-        APS engineering &nbsp;·&nbsp; component status, command and configuration
+      <div style={{ background: '#2C2C2A', color: '#F1EFE8', padding: '12px 20px', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>APS engineering &nbsp;·&nbsp; component status, command and configuration</span>
+        <AssemblyCpuBadge />
       </div>
       <Layout style={{ background: 'transparent' }}>
         <Layout.Sider width={240} theme='light' style={{ background: 'transparent', borderRight: '1px solid rgba(0,0,0,0.08)' }}>

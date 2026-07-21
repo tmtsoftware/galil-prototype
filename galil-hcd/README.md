@@ -77,6 +77,13 @@ default simulator config uses id 0, so it serves on 9090). The CSW prefix is set
 the container conf and is independent of `controller.id`.
 See [HMI](#hmi) for what the console provides.
 
+**CPU-load badge (REQ-2-APS-0621).** The HMI header shows this HCD JVM's live CPU usage
+(process % vs the 70% ceiling, green/amber/red), read in-process from the monitor. The HCD
+also publishes a **`cpuLoad`** SystemEvent at 1 Hz (`processCpuLoad` / `systemCpuLoad`
+fractions, `availableProcessors`, `pid`, `hostname`) via `CpuLoadMonitor` — declared in the
+HCD `publish-model.conf` / `GalilMotionKeys`. The assembly container publishes the same event
+as `APS.ICS.IcsAssemblies.cpuLoad`; `AssemblyLoadApp` sums them per host against the 70% ceiling.
+
 ### Tests
 
 Most suites need no hardware and no CSW services.

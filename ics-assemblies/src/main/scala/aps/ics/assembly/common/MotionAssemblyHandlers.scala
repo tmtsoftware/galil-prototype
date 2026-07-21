@@ -24,6 +24,7 @@ import csw.time.core.models.UTCTime
 
 import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion` as Hcd
 import csw.proto.galil.config.ConfigServiceLoader
+import csw.proto.galil.hcd.CpuLoadMonitor
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContextExecutor, Future}
@@ -216,6 +217,16 @@ abstract class MotionAssemblyHandlers(ctx: ActorContext[TopLevelActorMessage], c
     // hcdFaultedSeverity). Runnable is a SAM; runs on the component's ec.
     alarmRefreshTimer = Some(ctx.system.scheduler.scheduleWithFixedDelay(
       AlarmRefreshInterval, AlarmRefreshInterval)(() => refreshAlarm()))
+
+    // Per-JVM CPU load telemetry (REQ-2-APS-0621). Singleton across the process: the
+    // first ICS assembly to initialise starts it, and because all assemblies share one
+    // container/JVM this yields exactly ONE cpuLoad event for the whole process, published
+    // under the fixed container prefix (CpuLoadMonitor.AssemblyContainerPrefix) rather than
+    // any single component's. getProcessCpuLoad covers the entire JVM, so that one event
+    // reflects every co-located component's load. No stopOnce here - it is a JVM-lifetime
+    // daemon whose scheduler is cancelled when the container's ActorSystem terminates.
+    CpuLoadMonitor.startOnce(
+      CpuLoadMonitor.AssemblyContainerPrefix, eventService.defaultPublisher, timeServiceScheduler, log, 1.second)
 
   override def onShutdown(): Unit =
     alarmRefreshTimer.foreach(_.cancel())

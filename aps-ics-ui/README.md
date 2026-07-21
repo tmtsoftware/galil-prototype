@@ -81,6 +81,10 @@ its model + two components; `Main` needs no per-assembly changes.
 - `components/<Assembly>Status.tsx` — live `status` + `axisStatus` (and, for the
   K-Mirror, `mode` / `slewModeState` / `trackingModeState`).
 
+**Assembly CPU badge.** The header hosts `AssemblyCpuBadge`, a global
+readout that subscribes to the assembly container's `APS.ICS.IcsAssemblies.cpuLoad` event 
+and shows the JVM's process CPU vs the REQ-2-APS-0621 70% ceiling (green / amber / red, with a per-JVM tooltip).
+
 ---
 
 ## Structure
@@ -101,6 +105,7 @@ src/
     ├── <Assembly>Commands.tsx       per-assembly command panels
     ├── <Assembly>Status.tsx         per-assembly status panels
     ├── ConfigTab.tsx, CommandEventLog.tsx, LifecycleCommands.tsx
+    ├── AssemblyCpuBadge.tsx          header CPU-load badge (REQ-2-APS-0621)
     ├── statusBits.tsx, Login.tsx
 ```
 

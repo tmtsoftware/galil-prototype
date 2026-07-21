@@ -18,6 +18,11 @@ import csw.params.commands.{CommandName, Setup}
 import csw.params.core.generics.KeyType._
 import csw.params.core.models.{Choice, Units}
 import csw.prefix.models.{Prefix, Subsystem}
+import csw.event.api.scaladsl.EventSubscription
+import csw.event.client.EventServiceFactory
+import csw.params.events.{Event, EventKey, SystemEvent}
+import csw.proto.galil.GalilMotionKeys.`ICS.HCD.GalilMotion`.CpuLoadEvent
+import csw.proto.galil.hcd.CpuLoadMonitor
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContextExecutor, Future}
@@ -370,6 +375,77 @@ object AssemblyLoadApp {
   private val locationService = HttpLocationServiceFactory.makeLocalClient
   private val running         = new AtomicBoolean(true)
 
+  // ---------------------------------------------------------------------------
+  // CPU-load collector (REQ-2-APS-0621). Subscribes to the per-JVM `cpuLoad`
+  // events published by the HCD and assembly JVMs (see CpuLoadMonitor) for the
+  // selected assemblies + their HCD controllers. cpuLoad is a per-PROCESS metric,
+  // so APS load on a host is the SUM over distinct JVM pids of processCpuLoad,
+  // compared against the 0.70 ceiling. A shared assembly container publishes ONE
+  // event (whichever component won CpuLoadMonitor.startOnce), so subscribing to
+  // all candidate prefixes still yields exactly one row per JVM.
+  // ---------------------------------------------------------------------------
+  private final case class CpuSample(
+      recvMs: Long, pid: Int, host: String, source: String,
+      proc: Double, sys: Double, cores: Int)
+
+  private val cpuSamples = new ConcurrentLinkedQueue[CpuSample]()
+  @volatile private var cpuSub: Option[EventSubscription] = None
+  private val cpuStaleDropped = new AtomicLong(0L)
+  // A live cpuLoad publisher emits at 1 Hz, so a retained event older than this is a
+  // ghost: the event service keeps the last value per key indefinitely, so a JVM that
+  // has since died still replays its final cpuLoad on subscribe (its pid may even be
+  // reused by another process, which is how a dead HCD showed up as the config server).
+  private val StaleThresholdMs = 5000L
+  // cpuLoad delivery is async (Redis -> stream -> callback); a short scenario would tear
+  // the subscription down before the retained + final samples reach the callback. Settle
+  // this long before unsubscribing so even configure-home captures a snapshot.
+  private val CpuSettleMs = 2000L
+
+  private def onCpuEvent(ev: Event): Unit = ev match {
+    case se: SystemEvent if se.contains(CpuLoadEvent.processCpuLoadKey) =>
+      // Drop STALE retained events (see StaleThresholdMs): only count JVMs actually
+      // publishing right now, so dead processes' replayed final events are ignored.
+      val ageMs = System.currentTimeMillis() - se.eventTime.value.toEpochMilli
+      if (ageMs > StaleThresholdMs) { val _ = cpuStaleDropped.incrementAndGet() }
+      else {
+        def dbl(k: csw.params.core.generics.Key[Float]): Double =
+          if (se.contains(k)) se(k).head.toDouble else Double.NaN
+        val pid   = if (se.contains(CpuLoadEvent.pidKey)) se(CpuLoadEvent.pidKey).head else -1
+        val host  = if (se.contains(CpuLoadEvent.hostnameKey)) se(CpuLoadEvent.hostnameKey).head else "?"
+        val cores = if (se.contains(CpuLoadEvent.availableProcessorsKey)) se(CpuLoadEvent.availableProcessorsKey).head else 0
+        cpuSamples.add(CpuSample(System.currentTimeMillis(), pid, host, se.source.toString,
+          dbl(CpuLoadEvent.processCpuLoadKey), dbl(CpuLoadEvent.systemCpuLoadKey), cores))
+      }
+    case _ => ()
+  }
+
+  private def startCpuCollector(selected: Vector[AssemblyDef])(using log: csw.logging.api.scaladsl.Logger): Unit = {
+    Try {
+      val eventName    = CpuLoadEvent.eventKey.eventName
+      val hcdKeys      = selected.map(_.controller).distinct.map(c =>
+        EventKey(Prefix(Subsystem.APS, s"ICS.HCD.GalilMotion.$c"), eventName))
+      // The ICS assemblies run in ONE JVM (IcsAssembliesContainer) and publish a single
+      // cpuLoad event under the fixed container prefix. We do NOT subscribe to per-assembly
+      // component prefixes: they never publish cpuLoad (only the container does), and doing
+      // so would only resurface stale retained ghosts from earlier component-prefix runs.
+      val containerKey = EventKey(CpuLoadMonitor.AssemblyContainerPrefix, eventName)
+      val keys         = (hcdKeys :+ containerKey).toSet
+      val eventSvc     = new EventServiceFactory().make(locationService)
+      cpuSub = Some(eventSvc.defaultSubscriber.subscribeCallback(keys, onCpuEvent))
+      log.info(s"cpuLoad collector: subscribed to ${keys.size} keys " +
+               s"(${hcdKeys.size} HCD + 1 assembly container); only live JVMs deliver")
+    } match {
+      case Success(_)  => ()
+      case Failure(ex) => log.warn(s"cpuLoad collector not started (${ex.getMessage}); " +
+                                   "CPU section will be empty. Is the event service up?")
+    }
+  }
+
+  private def stopCpuCollector(): Unit = {
+    cpuSub.foreach(s => Try(Await.result(s.unsubscribe(), 5.seconds)))
+    cpuSub = None
+  }
+
   def main(args: Array[String]): Unit = {
     val cfg  = parseArgs(args)
     val host = InetAddress.getLocalHost.getHostName
@@ -405,6 +481,9 @@ object AssemblyLoadApp {
 
     if cfg.scenario == "list" then { shutdown(); return }
 
+    // Sample per-JVM CPU load (HCD + assembly JVMs) for the whole run.
+    startCpuCollector(selected)
+
     val hook = new Thread(() => {
       if running.getAndSet(false) then
         log.info("shutdown signal — stopping all targets")
@@ -424,6 +503,9 @@ object AssemblyLoadApp {
     finally
       running.set(false)
       Try(Runtime.getRuntime.removeShutdownHook(hook))
+      // Let async cpuLoad delivery drain into cpuSamples before unsubscribing (see CpuSettleMs).
+      if (cpuSub.isDefined) Thread.sleep(CpuSettleMs)
+      stopCpuCollector()
       report(cfg, log)
       shutdown()
   }
@@ -591,7 +673,88 @@ object AssemblyLoadApp {
       val s = rs.map(_.latencyMs).sorted.toIndexedSeq
       println(f"  $cmd%-24s ${s.head}%6d ${pct(s, 0.50)}%6d ${pct(s, 0.90)}%6d ${pct(s, 0.99)}%6d ${s.last}%6d")
     }
+    printCpuReport(cfg, log)
     println("====================================================================\n")
+  }
+
+  private def pctD(sorted: IndexedSeq[Double], p: Double): Double =
+    if (sorted.isEmpty) 0.0 else sorted(math.min(sorted.length - 1, (p * sorted.length).toInt))
+
+  private def printCpuReport(cfg: Config, log: csw.logging.api.scaladsl.Logger): Unit = {
+    val samples = cpuSamples.asScala.toVector.filter(_.proc >= 0.0) // drop warm-up negatives
+    val dropped = cpuStaleDropped.get()
+    println("\n---- CPU load  (REQ-2-APS-0621: APS CPU on any host must not exceed 70%) ----")
+    if (dropped > 0)
+      println(s"  ignored $dropped stale retained cpuLoad event(s) from dead JVMs (event-service replay)")
+    if (samples.isEmpty) {
+      println("  no cpuLoad events captured - is the event service (Redis) up and are the HCD/")
+      println("  assembly containers running with the per-JVM CpuLoadMonitor? (nothing to report)")
+    } else {
+      // Classify each JVM by its representative source. cpuLoad is per-PROCESS, so a
+      // shared container (all motion assemblies in one JVM) reports ONCE under whichever
+      // component won CpuLoadMonitor.startOnce; that row is the WHOLE process, not that
+      // one component. The honest per-JVM identity is (host, pid); the source prefix is
+      // only a Redis-key-unique label. Detect the shared case (a single non-HCD JVM) and
+      // label it as the container rather than pinning its load on one assembly. Multiple
+      // non-HCD JVMs => standalone containers, each honestly named by its own component.
+      def isHcd(src: String): Boolean = src.contains(".HCD.GalilMotion")
+      val byPid        = samples.groupBy(_.pid).toVector.sortBy(_._1)
+      val asmPids      = byPid.filterNot { case (_, ss) => isHcd(ss.head.source) }.map(_._1)
+      val sharedAsmJvm = asmPids.size == 1
+      def role(src: String): String =
+        if (isHcd(src)) src.stripPrefix("APS.")
+        else if (sharedAsmJvm) "ICS assemblies (shared JVM)"
+        else src.stripPrefix("APS.")
+
+      println("  per-JVM (one row per OS process / pid):")
+      println("    %-30s %8s %-16s %5s %4s %7s %7s %7s".format("role", "pid", "host", "cores", "n", "proc%", "pmax%", "smax%"))
+      byPid.foreach { case (pid, ss) =>
+        val procs = ss.map(_.proc)
+        val meanP = procs.sum / procs.size * 100.0
+        val maxP  = procs.max * 100.0
+        val maxS  = ss.map(_.sys).filterNot(_.isNaN).maxOption.getOrElse(Double.NaN) * 100.0
+        println("    %-30s %8d %-16s %5d %4d %7.1f %7.1f %7.1f".format(
+          role(ss.head.source), pid, ss.head.host, ss.head.cores, ss.size, meanP, maxP, maxS))
+      }
+      if (sharedAsmJvm) {
+        val winner = byPid.find { case (_, ss) => !isHcd(ss.head.source) }
+          .map(_._2.head.source).getOrElse("?")
+        println("  note: the assembly container hosts all co-located motion assemblies in ONE JVM;")
+        println(s"        its cpuLoad is published once (here by $winner, the startOnce winner) and is")
+        println("        the whole-process load, not that one component's.")
+      }
+      println("\n  per-host APS aggregate (sum of the per-JVM processCpuLoad above, 1 s bins):")
+      samples.groupBy(_.host).toVector.sortBy(_._1).foreach { case (host, hs) =>
+        val byPidSorted = hs.groupBy(_.pid).view.mapValues(_.sortBy(_.recvMs)).toMap
+        val minBin = hs.map(_.recvMs).min / 1000
+        val maxBin = hs.map(_.recvMs).max / 1000
+        val totals: IndexedSeq[Double] = (minBin to maxBin).map { binS =>
+          val binMs = binS * 1000 + 999
+          byPidSorted.values.map(ss => ss.takeWhile(_.recvMs <= binMs).lastOption.map(_.proc).getOrElse(0.0)).sum
+        }.toIndexedSeq
+        val sorted  = totals.sorted
+        val mean    = totals.sum / totals.size * 100.0
+        val p95     = pctD(sorted, 0.95) * 100.0
+        val mx      = sorted.last * 100.0
+        val jvms    = byPidSorted.size
+        val verdict = if (mx <= 70.0) "PASS" else "FAIL"
+        val sysMax  = hs.map(_.sys).filterNot(_.isNaN).maxOption.getOrElse(Double.NaN) * 100.0
+        println("    %-22s JVMs=%2d  APS proc%%: mean %5.1f  p95 %5.1f  max %5.1f   [%s vs 70%% max]".format(host, jvms, mean, p95, mx, verdict))
+        println("      whole-machine system%% max (context, includes non-APS): %5.1f".format(sysMax))
+      }
+      println("  (harness JVM, Redis and Location Service are NOT in the APS sum; see system% for whole-machine.)")
+      cfg.reportPath.foreach { path =>
+        val cpuPath = if (path.endsWith(".csv")) path.dropRight(4) + ".cpu.csv" else path + ".cpu.csv"
+        val sb = new StringBuilder("recvMs,source,pid,host,cores,processCpuLoad,systemCpuLoad\n")
+        samples.sortBy(s => (s.pid, s.recvMs)).foreach { s =>
+          sb.append(s"${s.recvMs},${s.source},${s.pid},${s.host},${s.cores},${s.proc},${s.sys}\n")
+        }
+        Try(java.nio.file.Files.writeString(java.nio.file.Paths.get(cpuPath), sb.toString)) match {
+          case Success(_)  => log.info(s"wrote CPU CSV: $cpuPath (${samples.size} samples)")
+          case Failure(ex) => log.error(s"could not write CPU CSV $cpuPath: ${ex.getMessage}")
+        }
+      }
+    }
   }
 
   private def shutdown(): Unit = {

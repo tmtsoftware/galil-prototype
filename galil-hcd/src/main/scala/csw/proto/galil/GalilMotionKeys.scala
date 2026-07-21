@@ -24,6 +24,35 @@ object GalilMotionKeys {
   object `ICS.HCD.GalilMotion` {
     val prefix: Prefix = Prefix(Subsystem.APS, "ICS.HCD.GalilMotion")
 
+    /** Per-JVM CPU load telemetry for this HCD process, sampled at 1 Hz from the JDK */
+    object CpuLoadEvent {
+      val eventKey: EventKey = EventKey(prefix, EventName("cpuLoad"))
+
+      /**
+       * Recent CPU load of THIS JVM process as a fraction [0.0, 1.0] of total machine capacity. Negative if not yet available.
+       */
+      val processCpuLoadKey: Key[Float] = FloatKey.make("processCpuLoad")
+
+      /**
+       * Recent whole-machine CPU load as a fraction [0.0, 1.0]; captures non-JVM load as an upper-bound cross-check. Negative if
+       * not available.
+       */
+      val systemCpuLoadKey: Key[Float] = FloatKey.make("systemCpuLoad")
+
+      /** Number of logical processors visible to this JVM (the normalization denominator for the load fractions). */
+      val availableProcessorsKey: Key[Int] = IntKey.make("availableProcessors")
+
+      /**
+       * OS process id of this JVM. With hostname, forms the identity used to de-duplicate co-located components when aggregating
+       * total APS load on a host.
+       */
+      val pidKey: Key[Int] = IntKey.make("pid")
+
+      /** Host on which this JVM runs. Per-JVM load fractions are summed per host. */
+      val hostnameKey: Key[String] = StringKey.make("hostname")
+
+    }
+
     /** Overall HCD status including lifecycle state and global error messages. */
     object CurrentStateCurrentState {
       val eventKey: EventKey = EventKey(prefix, EventName("CurrentState"))

@@ -310,6 +310,16 @@ while online and ~30 s while offline:
   archive) — with the (synthetic) FITS filename.
 - **`apsCommandFailureEvent`** — on a command failure.
 
+**Process CPU load** (REQ-2-APS-0621) — the combined `IcsAssembliesContainer` runs every
+assembly in ONE JVM and publishes a single **`cpuLoad`** SystemEvent for that process,
+sourced by the fixed prefix **`APS.ICS.IcsAssemblies`** (not any one assembly). Fields:
+`processCpuLoad` / `systemCpuLoad` (fractions in [0,1] from the JDK `OperatingSystemMXBean`,
+already normalised to the whole machine), `availableProcessors`, `pid`, `hostname`; at 1 Hz.
+Started once per JVM by `CpuLoadMonitor.startOnce` (in `galil-hcd`) using the fixed
+`CpuLoadMonitor.AssemblyContainerPrefix`; consumed by the `aps-ics-ui` header badge and
+`AssemblyLoadApp`'s CPU report. A per-process diagnostic, deliberately **not** declared
+per-assembly in icd-db (see Known limitations).
+
 ---
 
 ## K-Mirror tracking (SDD §8)
@@ -626,3 +636,8 @@ publish seam.
   the K-Mirror is a stand-in until the real TCS schema is published.
 - **`GalilMotionKeys` lives in `galil-hcd`.** Lifting the shared HCD ICD keys to a common
   module would let assemblies depend on the ICD without the full HCD.
+- **`cpuLoad` is not in icd-db.** The per-JVM container CPU event
+  (`APS.ICS.IcsAssemblies.cpuLoad`) is published at runtime using the HCD's `CpuLoadEvent`
+  keys but is declared in no assembly `publish-model.conf` — intentionally, while all
+  assemblies share one JVM. If they are ever split across JVMs, revisit both the source
+  labelling (`CpuLoadMonitor.AssemblyContainerPrefix`) and whether to declare it in the ICD.

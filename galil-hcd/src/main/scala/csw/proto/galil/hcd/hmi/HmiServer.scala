@@ -65,7 +65,11 @@ class HmiServer(
   // state and re-uses the shared init sequence.  GalilHcd provides this
   // callback at construction time.  The callback is responsible for kicking
   // off the recovery off-thread (it is not a blocking call).
-  onFaultReset: (Setup, Id) => Unit
+  onFaultReset: (Setup, Id) => Unit,
+  // Supplier for the latest per-JVM CPU sample, folded into each stateUpdate frame
+  // (REQ-2-APS-0621 readout). Deferred (evaluated at push time) so the HCD can pass it
+  // before the CpuLoadMonitor field is assigned. Defaults to "no sample".
+  cpuLoad: () => Option[CpuLoadMonitor.Sample] = () => None
 )(implicit system: ActorSystem[?]) {
 
   implicit val ec: ExecutionContext = system.executionContext
@@ -100,7 +104,7 @@ class HmiServer(
     internalStateActor
       .ask[HcdState](ref => InternalStateActor.GetHcdState(ref))(timeout, system.scheduler)
       .foreach { state =>
-        wsPublisher ! stateToJson(state, hcdPrefix)
+        wsPublisher ! stateToJson(state, hcdPrefix, cpuLoad())
       }
   })(ec)
 

@@ -97,7 +97,7 @@ object HmiJsonProtocol {
 
   // ── Full state snapshot → JSON ────────────────────────────────────────
 
-  def stateToJson(hcdState: HcdState, prefix: Prefix): String = {
+  def stateToJson(hcdState: HcdState, prefix: Prefix, cpu: Option[CpuLoadMonitor.Sample] = None): String = {
     val axesJson = JsObject(
       hcdState.axes.map { case (axis, state) =>
         axis.toString -> axisStateToJson(state)
@@ -143,7 +143,16 @@ object HmiJsonProtocol {
       "cmdState"           -> cmdStateJson,
       "digitalInputs"      -> JsArray(hcdState.digitalInputs.map(b => JsBoolean(b)).toIndexedSeq),
       "digitalOutputs"     -> JsArray(hcdState.digitalOutputs.map(b => JsBoolean(b)).toIndexedSeq),
-      "analogInputs"       -> JsArray(hcdState.analogInputs.map(v => JsNumber(BigDecimal(v.toDouble))).toIndexedSeq)
+      "analogInputs"       -> JsArray(hcdState.analogInputs.map(v => JsNumber(BigDecimal(v.toDouble))).toIndexedSeq),
+      // Per-JVM CPU load (REQ-2-APS-0621); JsNull until the monitor's first sample.
+      "cpuLoad"            -> (cpu match {
+        case Some(s) => Json.obj(
+          "processCpuLoad"      -> s.processCpuLoad,
+          "systemCpuLoad"       -> s.systemCpuLoad,
+          "availableProcessors" -> s.availableProcessors
+        )
+        case None => JsNull
+      })
     ).toString()
   }
 

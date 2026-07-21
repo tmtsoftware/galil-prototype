@@ -175,6 +175,43 @@ Expect **none**: `INVARIANT VIOLATION` / registry-clobber ERROR (the S82 class),
 Over a soak, also watch JVM heap/GC/thread/fd on the HCD, assembly-container,
 and sim processes.
 
+## CPU load (REQ-2-APS-0621)
+
+Separate from the concurrency load above: every run also measures the **CPU load the APS
+software imposes**, to verify REQ-2-APS-0621 (*"the CPU load … shall not exceed 70%"*). At
+start-up the app subscribes to the per-JVM **`cpuLoad`** events — one per HCD
+(`APS.ICS.HCD.GalilMotion.{1..4}`) plus the single assembly container
+(`APS.ICS.IcsAssemblies`) — collects them for the whole run, then prints a CPU section:
+
+- **Per-JVM** (one row per OS process / pid): `processCpuLoad` mean/max and `systemCpuLoad`
+  max, as percentages. The `role` column labels each JVM (`HCD.GalilMotion.N`, or
+  `ICS assemblies (shared JVM)`).
+- **Per-host aggregate**: the SUM over distinct JVM pids of `processCpuLoad`, in 1 s bins,
+  as mean / p95 / max with a **`[PASS|FAIL vs 70% max]`** verdict. This is the REQ-2-APS-0621
+  number — it sums the *raw* fractions per distinct pid, so there is no per-component
+  double-count. Whole-machine `system%` is shown as context (it includes non-APS load —
+  Redis, the harness JVM, the OS).
+
+`cpuLoad` is per-**process** (JDK `getProcessCpuLoad`, already normalised to the whole
+machine), so the unit is the JVM, not the CSW component — the assembly container is one row,
+not sixteen. Stale retained events from dead JVMs (the event service keeps the last value per
+key) are dropped by an age filter (>5 s old) and reported as `ignored N stale …`. With
+`--report`, the raw samples are also written to `<report>.cpu.csv`.
+
+Caveats: the dev Mac is not representative deployment hardware, and the harness / Redis /
+Location Service are excluded from the APS sum (not deployed APS components). For meaningful
+statistics use a longer scenario (e.g. `--scenario targets --duration 120`); `configure-home`
+is only a few seconds, so ~1 sample per JVM.
+
+**Operational note:** the CPU section reports samples collected *asynchronously* — events
+flow Redis → subscription stream → callback into a local queue, and the report reads that
+queue (not a live query). On a very short scenario (`configure-home`, ~2 s) the subscription
+can be torn down at scenario end before samples arrive; the harness settles briefly before
+teardown, but a `--duration` scenario (e.g. `--scenario targets --duration 120`) is the
+reliable way to collect samples. (Separately, the event service retains the last value per
+key, so a dead JVM replays a stale `cpuLoad` on subscribe — these are dropped by the >5 s age
+filter and reported as `ignored N stale …`.)
+
 ## Not yet covered (future extensions)
 
 - Named `selectSource` (SKY/STIMULUS) for InsertionStage and the light-source
