@@ -1,18 +1,21 @@
 /*
- * FocKMirror Commands section (SDD §4.3 "Command Section"). One row per command
- * with its own Submit button and inline parameters. Buttons are gated by
- * `commandEnabled` (mirrors the assembly validate gate); everything is disabled
- * while a command is in flight (`busy`). The submit + result logging lives in Main
- * via the `run` callback.
+ * FocKMirror Commands section (SDD §4.3 "Command Section"). Commands grouped by
+ * context (command kit): Setup (Home / Configure / Move to default position),
+ * Motion (Position K-Mirror + its Stop), Tracking (Set mode / Update PIT→PSH
+ * offset / Update PIT correction offset / Restart tracking) and Recovery (Abort
+ * error recovery). Gating is unchanged — `commandEnabled` mirrors the assembly
+ * validate gate and everything is disabled while a command is in flight (`busy`).
+ * Submit + result logging live in Main via the `run` callback.
  *
  * Phases 1-3 (MANUAL + SLEWING + TRACKING): positionKMirror (ABSOLUTE/RELATIVE,
  * degrees), setMode (selector offers all three modes; the assembly gates
  * setMode(TRACKING) on SLEW_COMPLETE), updatePitToPshOffset, updatePitCorrectionOffset
  * and restartTracking. The Tracking Control Actor runs the slew/track behaviour.
  */
-import { Button, InputNumber, Select, Space, Typography } from 'antd'
+import { InputNumber, Select, Space, Typography } from 'antd'
 import type { Setup } from '@tmtsoftware/esw-ts'
 import React, { useState } from 'react'
+import { ActionButton, Actions, CommandGroup, CommandGroups, Field, ParamCommand } from './commandKit'
 import {
   MODES_AVAILABLE,
   POSITION_METHODS,
@@ -35,48 +38,6 @@ import type {
   StatusSnapshot
 } from '../models/focKMirror'
 
-const { Text } = Typography
-
-const Row = ({
-  label,
-  danger,
-  enabled,
-  onSubmit,
-  children
-}: {
-  label: string
-  danger?: boolean
-  enabled: boolean
-  onSubmit: () => void
-  children?: React.ReactNode
-}): React.JSX.Element => (
-  <div
-    style={{
-      display: 'grid',
-      gridTemplateColumns: 'max-content 1fr auto',
-      alignItems: 'center',
-      gap: 8,
-      padding: '8px 10px',
-      border: '1px solid rgba(0,0,0,0.08)',
-      borderRadius: 8
-    }}>
-    <Text>{label}</Text>
-    <div
-      style={{
-        display: 'flex',
-        gap: 6,
-        alignItems: 'center',
-        justifyContent: 'flex-end',
-        minWidth: 0
-      }}>
-      {children}
-    </div>
-    <Button size='small' danger={danger} disabled={!enabled} onClick={onSubmit}>
-      Submit
-    </Button>
-  </div>
-)
-
 export const FocKMirrorCommands = ({
   status,
   ready,
@@ -97,122 +58,87 @@ export const FocKMirrorCommands = ({
   const on = (cmd: CmdName): boolean => commandEnabled(cmd, status, ready, busy)
 
   return (
-    <Space direction='vertical' size={6} style={{ width: '100%' }}>
-      <Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+    <Space direction='vertical' size={8} style={{ width: '100%' }}>
+      <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
         ASSEMBLY COMMANDS
-      </Text>
+      </Typography.Text>
+      <CommandGroups>
+        <CommandGroup title='Setup'>
+          <Actions>
+            <ActionButton label='Home' enabled={on('home')} onSubmit={() => run(homeCmd(), 'home')} />
+            <ActionButton label='Configure' enabled={on('configure')} onSubmit={() => run(configureCmd(), 'configure')} />
+            <ActionButton label='Move to default position' enabled={on('moveToDefaultPosition')} onSubmit={() => run(moveToDefaultCmd(), 'moveToDefaultPosition')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row
-        label='Home'
-        enabled={on('home')}
-        onSubmit={() => run(homeCmd(), 'home')}
-      />
-      <Row
-        label='Configure'
-        enabled={on('configure')}
-        onSubmit={() => run(configureCmd(), 'configure')}
-      />
-      <Row
-        label='Move to default position'
-        enabled={on('moveToDefaultPosition')}
-        onSubmit={() => run(moveToDefaultCmd(), 'moveToDefaultPosition')}
-      />
+        <CommandGroup title='Motion'>
+          <ParamCommand
+            name='Position K-Mirror'
+            enabled={on('positionKMirror')}
+            onSubmit={() =>
+              run(
+                positionKMirrorCmd(method, deg),
+                `positionKMirror [positioningMethod=${method}, positionValue=${deg}]`
+              )
+            }>
+            <Field label='Method'>
+              <Select<PositionMethod> size='small' value={method} onChange={setMethod} options={POSITION_METHODS.map((m) => ({ value: m, label: m }))} />
+            </Field>
+            <Field label='Value'>
+              <InputNumber size='small' value={deg} onChange={(v) => setDeg(Number(v ?? 0))} step={0.1} suffix='deg' />
+            </Field>
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Stop' danger enabled={on('stop')} onSubmit={() => run(stopCmd(), 'stop')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row
-        label='Set mode'
-        enabled={on('setMode')}
-        onSubmit={() => run(setModeCmd(mode), `setMode [mode=${mode}]`)}>
-        <Select<Mode>
-          size='small'
-          value={mode}
-          onChange={setMode}
-          style={{ width: 140 }}
-          options={MODES_AVAILABLE.map((m) => ({ value: m, label: m }))}
-        />
-      </Row>
+        <CommandGroup title='Tracking'>
+          <ParamCommand
+            name='Set mode'
+            enabled={on('setMode')}
+            onSubmit={() => run(setModeCmd(mode), `setMode [mode=${mode}]`)}>
+            <Field label='Mode'>
+              <Select<Mode> size='small' value={mode} onChange={setMode} options={MODES_AVAILABLE.map((m) => ({ value: m, label: m }))} />
+            </Field>
+          </ParamCommand>
+          <ParamCommand
+            name='Update PIT→PSH offset'
+            enabled={on('updatePitToPshOffset')}
+            onSubmit={() =>
+              run(
+                updatePitToPshOffsetCmd(pitOffset),
+                `updatePitToPshOffset [pitToPshRotationOffset=${pitOffset}]`
+              )
+            }>
+            <Field label='Offset'>
+              <InputNumber size='small' value={pitOffset} onChange={(v) => setPitOffset(Number(v ?? 0))} step={0.1} suffix='deg' />
+            </Field>
+          </ParamCommand>
+          <ParamCommand
+            name='Update PIT correction offset'
+            enabled={on('updatePitCorrectionOffset')}
+            onSubmit={() =>
+              run(
+                updatePitCorrectionOffsetCmd(pitCorrection),
+                `updatePitCorrectionOffset [pitCorrectionOffset=${pitCorrection}]`
+              )
+            }>
+            <Field label='Offset'>
+              <InputNumber size='small' value={pitCorrection} onChange={(v) => setPitCorrection(Number(v ?? 0))} step={0.01} suffix='deg' />
+            </Field>
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Restart tracking (drop PIT)' enabled={on('restartTracking')} onSubmit={() => run(restartTrackingCmd(), 'restartTracking')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row
-        label='Update PIT→PSH offset'
-        enabled={on('updatePitToPshOffset')}
-        onSubmit={() =>
-          run(
-            updatePitToPshOffsetCmd(pitOffset),
-            `updatePitToPshOffset [pitToPshRotationOffset=${pitOffset}]`
-          )
-        }>
-        <InputNumber
-          size='small'
-          value={pitOffset}
-          onChange={(v) => setPitOffset(Number(v ?? 0))}
-          step={0.1}
-          suffix='deg'
-          style={{ width: 108 }}
-        />
-      </Row>
-
-      <Row
-        label='Update PIT correction offset'
-        enabled={on('updatePitCorrectionOffset')}
-        onSubmit={() =>
-          run(
-            updatePitCorrectionOffsetCmd(pitCorrection),
-            `updatePitCorrectionOffset [pitCorrectionOffset=${pitCorrection}]`
-          )
-        }>
-        <InputNumber
-          size='small'
-          value={pitCorrection}
-          onChange={(v) => setPitCorrection(Number(v ?? 0))}
-          step={0.01}
-          suffix='deg'
-          style={{ width: 108 }}
-        />
-      </Row>
-
-      <Row
-        label='Restart tracking (drop PIT)'
-        enabled={on('restartTracking')}
-        onSubmit={() => run(restartTrackingCmd(), 'restartTracking')}
-      />
-
-      <Row
-        label='Position K-Mirror'
-        enabled={on('positionKMirror')}
-        onSubmit={() =>
-          run(
-            positionKMirrorCmd(method, deg),
-            `positionKMirror [positioningMethod=${method}, positionValue=${deg}]`
-          )
-        }>
-        <Select<PositionMethod>
-          size='small'
-          value={method}
-          onChange={setMethod}
-          style={{ width: 120 }}
-          options={POSITION_METHODS.map((m) => ({ value: m, label: m }))}
-        />
-        <InputNumber
-          size='small'
-          value={deg}
-          onChange={(v) => setDeg(Number(v ?? 0))}
-          step={0.1}
-          suffix='deg'
-          style={{ width: 108 }}
-        />
-      </Row>
-
-      <Row
-        label='Stop'
-        danger
-        enabled={on('stop')}
-        onSubmit={() => run(stopCmd(), 'stop')}
-      />
-      <Row
-        label='Abort error recovery'
-        danger
-        enabled={on('abortErrorRecovery')}
-        onSubmit={() => run(abortRecoveryCmd(), 'abortErrorRecovery')}
-      />
+        <CommandGroup title='Recovery' danger>
+          <Actions>
+            <ActionButton label='Abort error recovery' danger enabled={on('abortErrorRecovery')} onSubmit={() => run(abortRecoveryCmd(), 'abortErrorRecovery')} />
+          </Actions>
+        </CommandGroup>
+      </CommandGroups>
     </Space>
   )
 }

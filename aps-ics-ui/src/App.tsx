@@ -3,6 +3,7 @@ import { AuthContextProvider, LocationService, loadGlobalConfig } from '@tmtsoft
 import { BrowserRouter as Router } from 'react-router-dom'
 import { AppConfig } from './config/AppConfig'
 import { LocationServiceProvider } from './contexts/LocationServiceContext'
+import { ComponentLivenessProvider } from './contexts/ComponentLivenessContext'
 import { useQuery } from './hooks/useQuery'
 import { Main } from './components/Main'
 
@@ -20,7 +21,9 @@ export const App = (): React.JSX.Element => {
         {/* AuthContextProvider (default realm=TMT, client=tmt-frontend-app) makes
             useAuth() available to Main and runs Keycloak check-sso on load. */}
         <AuthContextProvider>
-          <Main />
+          <ComponentLivenessProvider>
+            <Main />
+          </ComponentLivenessProvider>
         </AuthContextProvider>
       </Router>
     </LocationServiceProvider>

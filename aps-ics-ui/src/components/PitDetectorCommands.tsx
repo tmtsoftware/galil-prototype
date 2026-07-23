@@ -1,10 +1,15 @@
 /*
- * PIT Detector Commands section (SDD §5.2 "Command Section"). Gated by
- * `commandEnabled`; disabled while a command is in flight. Submit + logging in Main.
+ * PIT Detector Commands section (SDD §5.2 "Command Section"). Commands grouped by
+ * context (command kit): Cooling, Detector config (configure + set default),
+ * Exposure (take mmap / take & store / store / abort) and Recovery (recover +
+ * reset camera). Gating is unchanged — `commandEnabled` mirrors the assembly
+ * validate gate; everything is disabled while a command is in flight (`busy`).
+ * Submit + result logging live in Main via `run`.
  */
-import { Button, InputNumber, Select, Space, Switch, Typography } from 'antd'
+import { InputNumber, Select, Space, Switch, Typography } from 'antd'
 import type { Setup } from '@tmtsoftware/esw-ts'
 import React, { useState } from 'react'
+import { ActionButton, Actions, CommandGroup, CommandGroups, Field, ParamCommand } from './commandKit'
 import {
   ANALOG_GAINS,
   BIT_DEPTHS,
@@ -23,45 +28,6 @@ import {
   takeExposureCmd
 } from '../models/pitDetector'
 import type { AnalogGain, BitDepth, CmdName, CmsMode, RecoverMode, ShutterMode, StatusSnapshot } from '../models/pitDetector'
-
-const { Text } = Typography
-
-const Row = ({
-  label,
-  danger,
-  enabled,
-  onSubmit,
-  children
-}: {
-  label: string
-  danger?: boolean
-  enabled: boolean
-  onSubmit: () => void
-  children?: React.ReactNode
-}): React.JSX.Element => (
-  <div
-    style={{
-      display: 'grid',
-      gridTemplateColumns: 'max-content 1fr auto',
-      alignItems: 'center',
-      gap: 8,
-      padding: '8px 10px',
-      border: '1px solid rgba(0,0,0,0.08)',
-      borderRadius: 8
-    }}>
-    <Text>{label}</Text>
-    <div style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', minWidth: 0 }}>
-      {children}
-    </div>
-    <Button size='small' danger={danger} disabled={!enabled} onClick={onSubmit}>
-      Submit
-    </Button>
-  </div>
-)
-
-const num = (v: number, set: (n: number) => void, suffix?: string, step = 1, width = 84): React.JSX.Element => (
-  <InputNumber size='small' value={v} onChange={(x) => set(Number(x ?? 0))} step={step} suffix={suffix} style={{ width }} />
-)
 
 export const PitDetectorCommands = ({
   status,
@@ -91,78 +57,102 @@ export const PitDetectorCommands = ({
   const [autoResume, setAutoResume] = useState(false)
 
   const on = (cmd: CmdName): boolean => commandEnabled(cmd, status, ready, busy)
-  const gainSelect = (
-    <Select<AnalogGain> size='small' value={gain} onChange={setGain} style={{ width: 90 }} options={ANALOG_GAINS.map((g) => ({ value: g, label: g }))} />
+
+  // Analog gain is shared across the exposure + config commands; a fresh Field each call.
+  const gainField = (): React.JSX.Element => (
+    <Field label='Gain'>
+      <Select<AnalogGain> size='small' value={gain} onChange={setGain} options={ANALOG_GAINS.map((g) => ({ value: g, label: g }))} />
+    </Field>
   )
 
   return (
-    <Space direction='vertical' size={6} style={{ width: '100%' }}>
-      <Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+    <Space direction='vertical' size={8} style={{ width: '100%' }}>
+      <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
         DETECTOR COMMANDS
-      </Text>
+      </Typography.Text>
+      <CommandGroups>
+        <CommandGroup title='Cooling'>
+          <ParamCommand
+            name='Configure cooling'
+            enabled={on('configureDetectorCooling')}
+            onSubmit={() => run(configureDetectorCoolingCmd(setPoint), `configureDetectorCooling [setPoint=${setPoint}]`)}>
+            <Field label='Set point'>
+              <InputNumber size='small' value={setPoint} onChange={(v) => setSetPoint(Number(v ?? 0))} step={1} suffix='°C' />
+            </Field>
+          </ParamCommand>
+        </CommandGroup>
 
-      <Row
-        label='Configure cooling'
-        enabled={on('configureDetectorCooling')}
-        onSubmit={() => run(configureDetectorCoolingCmd(setPoint), `configureDetectorCooling [setPoint=${setPoint}]`)}>
-        {num(setPoint, setSetPoint, '°C', 1, 92)}
-      </Row>
+        <CommandGroup title='Detector config'>
+          <ParamCommand
+            name='Configure detector'
+            enabled={on('configureDetector')}
+            onSubmit={() =>
+              run(
+                configureDetectorCmd(startRow, startCol, width, height, hBin, vBin, gain, bitDepth, shutter, cms),
+                `configureDetector [roi=${width}x${height}@(${startCol},${startRow}), bin=${hBin}x${vBin}, gain=${gain}, bit=${bitDepth}, shutter=${shutter}, cms=${cms}]`
+              )
+            }>
+            <Field label='Start row'><InputNumber size='small' value={startRow} onChange={(v) => setStartRow(Number(v ?? 0))} step={1} suffix='r' /></Field>
+            <Field label='Start col'><InputNumber size='small' value={startCol} onChange={(v) => setStartCol(Number(v ?? 0))} step={1} suffix='c' /></Field>
+            <Field label='Width'><InputNumber size='small' value={width} onChange={(v) => setWidth(Number(v ?? 0))} step={1} suffix='w' /></Field>
+            <Field label='Height'><InputNumber size='small' value={height} onChange={(v) => setHeight(Number(v ?? 0))} step={1} suffix='h' /></Field>
+            <Field label='H-bin'><InputNumber size='small' value={hBin} onChange={(v) => setHBin(Number(v ?? 0))} step={1} suffix='hB' /></Field>
+            <Field label='V-bin'><InputNumber size='small' value={vBin} onChange={(v) => setVBin(Number(v ?? 0))} step={1} suffix='vB' /></Field>
+            {gainField()}
+            <Field label='Bit depth'>
+              <Select<BitDepth> size='small' value={bitDepth} onChange={setBitDepth} options={BIT_DEPTHS.map((b) => ({ value: b, label: b }))} />
+            </Field>
+            <Field label='Shutter'>
+              <Select<ShutterMode> size='small' value={shutter} onChange={setShutter} options={SHUTTER_MODES.map((sm) => ({ value: sm, label: sm }))} />
+            </Field>
+            <Field label='CMS'>
+              <Select<CmsMode> size='small' value={cms} onChange={setCms} options={CMS_MODES.map((c) => ({ value: c, label: c }))} />
+            </Field>
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Set default configuration' enabled={on('setDefaultConfiguration')} onSubmit={() => run(setDefaultConfigurationCmd(), 'setDefaultConfiguration')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row
-        label='Configure detector'
-        enabled={on('configureDetector')}
-        onSubmit={() =>
-          run(
-            configureDetectorCmd(startRow, startCol, width, height, hBin, vBin, gain, bitDepth, shutter, cms),
-            `configureDetector [roi=${width}x${height}@(${startCol},${startRow}), bin=${hBin}x${vBin}, gain=${gain}, bit=${bitDepth}, shutter=${shutter}, cms=${cms}]`
-          )
-        }>
-        {num(startRow, setStartRow, 'r', 1, 64)}
-        {num(startCol, setStartCol, 'c', 1, 64)}
-        {num(width, setWidth, 'w', 1, 72)}
-        {num(height, setHeight, 'h', 1, 72)}
-        {num(hBin, setHBin, 'hB', 1, 60)}
-        {num(vBin, setVBin, 'vB', 1, 60)}
-        {gainSelect}
-        <Select<BitDepth> size='small' value={bitDepth} onChange={setBitDepth} style={{ width: 88 }} options={BIT_DEPTHS.map((b) => ({ value: b, label: b }))} />
-        <Select<ShutterMode> size='small' value={shutter} onChange={setShutter} style={{ width: 96 }} options={SHUTTER_MODES.map((sm) => ({ value: sm, label: sm }))} />
-        <Select<CmsMode> size='small' value={cms} onChange={setCms} style={{ width: 76 }} options={CMS_MODES.map((c) => ({ value: c, label: c }))} />
-      </Row>
+        <CommandGroup title='Exposure'>
+          <ParamCommand
+            name='Take exposure (mmap)'
+            enabled={on('takeExposure')}
+            onSubmit={() => run(takeExposureCmd(it, gain), `takeExposure [it=${it}s, gain=${gain}]`)}>
+            <Field label='Integration'><InputNumber size='small' value={it} onChange={(v) => setIt(Number(v ?? 0))} step={0.1} suffix='s' /></Field>
+            {gainField()}
+          </ParamCommand>
+          <ParamCommand
+            name='Take & store exposure'
+            enabled={on('takeAndStoreExposure')}
+            onSubmit={() => run(takeAndStoreExposureCmd(storeIt, gain), `takeAndStoreExposure [it=${storeIt}s, gain=${gain}]`)}>
+            <Field label='Integration'><InputNumber size='small' value={storeIt} onChange={(v) => setStoreIt(Number(v ?? 0))} step={0.1} suffix='s' /></Field>
+            {gainField()}
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Store exposure' enabled={on('storeExposure')} onSubmit={() => run(storeExposureCmd(), 'storeExposure')} />
+            <ActionButton label='Abort exposure' danger enabled={on('abortExposure')} onSubmit={() => run(abortExposureCmd(), 'abortExposure')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row label='Set default configuration' enabled={on('setDefaultConfiguration')} onSubmit={() => run(setDefaultConfigurationCmd(), 'setDefaultConfiguration')} />
-
-      <Row
-        label='Take exposure (mmap)'
-        enabled={on('takeExposure')}
-        onSubmit={() => run(takeExposureCmd(it, gain), `takeExposure [it=${it}s, gain=${gain}]`)}>
-        {num(it, setIt, 's', 0.1, 84)}
-        {gainSelect}
-      </Row>
-
-      <Row
-        label='Take & store exposure'
-        enabled={on('takeAndStoreExposure')}
-        onSubmit={() => run(takeAndStoreExposureCmd(storeIt, gain), `takeAndStoreExposure [it=${storeIt}s, gain=${gain}]`)}>
-        {num(storeIt, setStoreIt, 's', 0.1, 84)}
-        {gainSelect}
-      </Row>
-
-      <Row label='Store exposure' enabled={on('storeExposure')} onSubmit={() => run(storeExposureCmd(), 'storeExposure')} />
-      <Row label='Abort exposure' danger enabled={on('abortExposure')} onSubmit={() => run(abortExposureCmd(), 'abortExposure')} />
-
-      <Row
-        label='Recover'
-        danger
-        enabled={on('recover')}
-        onSubmit={() => run(recoverCmd(recMode, autoResume), `recover [mode=${recMode}, autoResume=${autoResume}]`)}>
-        <Select<RecoverMode> size='small' value={recMode} onChange={setRecMode} style={{ width: 96 }} options={RECOVER_MODES.map((m) => ({ value: m, label: m }))} />
-        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <Text style={{ fontSize: 12 }}>auto</Text>
-          <Switch size='small' checked={autoResume} onChange={setAutoResume} />
-        </span>
-      </Row>
-
-      <Row label='Reset camera' danger enabled={on('resetCamera')} onSubmit={() => run(resetCameraCmd(), 'resetCamera')} />
+        <CommandGroup title='Recovery' danger>
+          <ParamCommand
+            name='Recover'
+            danger
+            enabled={on('recover')}
+            onSubmit={() => run(recoverCmd(recMode, autoResume), `recover [mode=${recMode}, autoResume=${autoResume}]`)}>
+            <Field label='Mode'>
+              <Select<RecoverMode> size='small' value={recMode} onChange={setRecMode} options={RECOVER_MODES.map((m) => ({ value: m, label: m }))} />
+            </Field>
+            <Field label='Auto-resume'>
+              <div><Switch size='small' checked={autoResume} onChange={setAutoResume} /></div>
+            </Field>
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Reset camera' danger enabled={on('resetCamera')} onSubmit={() => run(resetCameraCmd(), 'resetCamera')} />
+          </Actions>
+        </CommandGroup>
+      </CommandGroups>
     </Space>
   )
 }

@@ -1,17 +1,19 @@
 /*
- * AptFilterWheel Status section (SDD §4.3). Pure display of the assembly's
- * PUBLISHED telemetry: the `status` event (assemblyState / hcdState /
- * commandState) and the single `axisStatus` event (axisState / position° /
- * velocity / indexed / inPosition / wheelPositionNum).
+ * AptFilterWheel Status section (SDD §4.3). Pure display of the assembly's PUBLISHED
+ * telemetry: the `status` event (assemblyState / hcdState / commandState) and
+ * the single `axisStatus` event (axisState / position° / velocity / indexed /
+ * inPosition / wheelPositionNum).
  *
- * Wheel position is the embedded-reported achieved slot; -1 (or absent) means
- * unknown — typically mid-select before the slot is confirmed. HCD label is
- * config-derived (bound HCD, not live); Lifecycle (CSW) is the supervisor state
- * polled by Main. State colouring is shared via ./statusBits.
+ * Layout (status kit): the assembly-state chips (AssemblyStateStrip), the single
+ * filter-wheel axis as an AxisMatrix (State / Position / Velocity / Indexed / In
+ * position) at a capped width, then the extra embedded-reported achieved slot
+ * (Wheel position; -1 or absent = unknown, typically mid-select) as a compact
+ * Descriptions block, and a muted MetaFooter (config-derived HCD label + CSW
+ * lifecycle). State colouring is shared via ./statusBits (through the kit).
  */
-import { Descriptions, Space, Tag, Typography } from 'antd'
+import { Space, Typography } from 'antd'
 import React from 'react'
-import { BoolTag, colorFor, fmt } from './statusBits'
+import { AssemblyStateStrip, AxisMatrix, MetaFooter } from './statusLayout'
 import { APTFW_HCD_LABEL } from '../models/aptFilterWheel'
 import type { AxisSnapshot, StatusSnapshot } from '../models/aptFilterWheel'
 import type { SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
@@ -28,72 +30,21 @@ export const AptFilterWheelStatus = ({
   axis: AxisSnapshot
   lifecycle?: SupervisorLifecycleState
 }): React.JSX.Element => (
-  <Space direction='vertical' size={8} style={{ width: '100%' }}>
-    <Typography.Text
-      type='secondary'
-      style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+  <Space direction='vertical' size={10} style={{ width: '100%' }}>
+    <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
       ASSEMBLY STATUS
     </Typography.Text>
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item label='Assembly state'>
-        <Tag color={colorFor(status.assemblyState)}>
-          {status.assemblyState ?? '—'}
-        </Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='HCD state'>
-        <Tag color={colorFor(status.hcdState)}>{status.hcdState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Command state'>
-        <Tag color={colorFor(status.commandState)}>
-          {status.commandState ?? '—'}
-        </Tag>
-      </Descriptions.Item>
-    </Descriptions>
-
-    <Descriptions title='Filter wheel axis' column={1} size='small' bordered>
-      <Descriptions.Item label='Axis state'>
-        <Tag color={colorFor(axis.axisState)}>{axis.axisState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Wheel position'>
-        {slotText(axis.wheelPositionNum)}
-      </Descriptions.Item>
-      <Descriptions.Item label='Position (deg)'>
-        {fmt(axis.position)}
-      </Descriptions.Item>
-      <Descriptions.Item label='Velocity (deg/s)'>
-        {fmt(axis.velocity)}
-      </Descriptions.Item>
-      <Descriptions.Item label='Indexed'>
-        <BoolTag b={axis.indexed} />
-      </Descriptions.Item>
-      <Descriptions.Item label='In position'>
-        <BoolTag b={axis.inPosition} />
-      </Descriptions.Item>
-    </Descriptions>
-
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item
-        label={
-          <span>
-            HCD{' '}
-            <Typography.Text type='secondary' style={{ fontSize: 11 }}>
-              (config)
-            </Typography.Text>
-          </span>
-        }>
-        {APTFW_HCD_LABEL}
-      </Descriptions.Item>
-      <Descriptions.Item
-        label={
-          <span>
-            Lifecycle{' '}
-            <Typography.Text type='secondary' style={{ fontSize: 11 }}>
-              (CSW)
-            </Typography.Text>
-          </span>
-        }>
-        {lifecycle ?? '—'}
-      </Descriptions.Item>
-    </Descriptions>
+    <AssemblyStateStrip status={status} />
+    <div style={{ maxWidth: 360 }}>
+      <AxisMatrix axes={[{ name: 'Filter wheel', unit: 'deg', axis }]}
+        extraRows={[{ label: 'Wheel position', cells: [slotText(axis.wheelPositionNum)] }]}
+      />
+    </div>
+    <MetaFooter
+      items={[
+        { label: 'HCD', value: <>{APTFW_HCD_LABEL} <Typography.Text type='secondary' style={{ fontSize: 11 }}>(config)</Typography.Text></> },
+        { label: 'Lifecycle', value: lifecycle ?? '—' }
+      ]}
+    />
   </Space>
 )

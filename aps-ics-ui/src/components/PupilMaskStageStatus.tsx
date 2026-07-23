@@ -2,42 +2,19 @@
  * PupilMaskStage Status section (SDD §4.3). Pure display of the assembly's
  * PUBLISHED telemetry: the `status` event (assemblyState / hcdState /
  * commandState) plus THREE axis-status events — `xAxisStatus` / `yAxisStatus`
- * (linear, mm) and `phiAxisStatus` (rotational, deg) — each carrying axisState /
- * position / velocity / indexed / inPosition.
+ * (linear, mm) and `phiAxisStatus` (rotational, deg).
  *
- * HCD label is config-derived (bound HCD, not live); Lifecycle (CSW) is the
- * supervisor state polled by Main. State colouring is shared via ./statusBits.
+ * Layout (status kit): the assembly-state chips in a top row, the three axes in
+ * an AxisMatrix (axes as columns) below at a capped width so the table stays
+ * comfortably sized, and a muted MetaFooter (config-derived HCD label + CSW
+ * lifecycle). State colouring is shared via ./statusBits (colorFor).
  */
-import { Descriptions, Space, Tag, Typography } from 'antd'
+import { Space, Typography } from 'antd'
 import React from 'react'
-import { BoolTag, colorFor, fmt } from './statusBits'
+import { AssemblyStateStrip, AxisMatrix, MetaFooter } from './statusLayout'
 import { PMS_HCD_LABEL } from '../models/pupilMaskStage'
 import type { AxisSnapshot, StatusSnapshot } from '../models/pupilMaskStage'
 import type { SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
-
-const AxisBlock = ({
-  title,
-  axis,
-  unit
-}: {
-  title: string
-  axis: AxisSnapshot
-  unit: string
-}): React.JSX.Element => (
-  <Descriptions title={title} column={1} size='small' bordered>
-    <Descriptions.Item label='Axis state'>
-      <Tag color={colorFor(axis.axisState)}>{axis.axisState ?? '—'}</Tag>
-    </Descriptions.Item>
-    <Descriptions.Item label={`Position (${unit})`}>{fmt(axis.position)}</Descriptions.Item>
-    <Descriptions.Item label='Velocity'>{fmt(axis.velocity)}</Descriptions.Item>
-    <Descriptions.Item label='Indexed'>
-      <BoolTag b={axis.indexed} />
-    </Descriptions.Item>
-    <Descriptions.Item label='In position'>
-      <BoolTag b={axis.inPosition} />
-    </Descriptions.Item>
-  </Descriptions>
-)
 
 export const PupilMaskStageStatus = ({
   status,
@@ -52,33 +29,25 @@ export const PupilMaskStageStatus = ({
   phiAxis: AxisSnapshot
   lifecycle?: SupervisorLifecycleState
 }): React.JSX.Element => (
-  <Space direction='vertical' size={8} style={{ width: '100%' }}>
+  <Space direction='vertical' size={10} style={{ width: '100%' }}>
     <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
       ASSEMBLY STATUS
     </Typography.Text>
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item label='Assembly state'>
-        <Tag color={colorFor(status.assemblyState)}>{status.assemblyState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='HCD state'>
-        <Tag color={colorFor(status.hcdState)}>{status.hcdState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Command state'>
-        <Tag color={colorFor(status.commandState)}>{status.commandState ?? '—'}</Tag>
-      </Descriptions.Item>
-    </Descriptions>
-
-    <AxisBlock title='X stage' axis={xAxis} unit='mm' />
-    <AxisBlock title='Y stage' axis={yAxis} unit='mm' />
-    <AxisBlock title='Phi stage (rotational)' axis={phiAxis} unit='deg' />
-
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item label={<span>HCD <Typography.Text type='secondary' style={{ fontSize: 11 }}>(config)</Typography.Text></span>}>
-        {PMS_HCD_LABEL}
-      </Descriptions.Item>
-      <Descriptions.Item label={<span>Lifecycle <Typography.Text type='secondary' style={{ fontSize: 11 }}>(CSW)</Typography.Text></span>}>
-        {lifecycle ?? '—'}
-      </Descriptions.Item>
-    </Descriptions>
+    <AssemblyStateStrip status={status} />
+    <div style={{ maxWidth: 520 }}>
+      <AxisMatrix
+        axes={[
+          { name: 'X stage', unit: 'mm', axis: xAxis },
+          { name: 'Y stage', unit: 'mm', axis: yAxis },
+          { name: 'Φ stage', unit: 'deg', axis: phiAxis }
+        ]}
+      />
+    </div>
+    <MetaFooter
+      items={[
+        { label: 'HCD', value: <>{PMS_HCD_LABEL} <Typography.Text type='secondary' style={{ fontSize: 11 }}>(config)</Typography.Text></> },
+        { label: 'Lifecycle', value: lifecycle ?? '—' }
+      ]}
+    />
   </Space>
 )

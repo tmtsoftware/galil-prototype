@@ -1,17 +1,18 @@
 /*
- * CalibrationSourceStage Commands section (SDD §4.3 "Command Section"). One row
- * per command with its own Submit button and inline parameters. Buttons are gated
- * by `commandEnabled` (mirrors the assembly validate gate); everything is disabled
- * while a command is in flight (`busy`). The submit + result logging lives in Main
- * via the `run` callback.
+ * CalibrationSourceStage Commands section (SDD §4.3 "Command Section"). Commands
+ * grouped by context (command kit): Setup, Optic & slot, Position (the move + its
+ * Stop), Light (stub), and Recovery (Abort). Buttons are gated by `commandEnabled`
+ * (mirrors the assembly validate gate); everything is disabled while a command is
+ * in flight (`busy`). The submit + result logging lives in Main via `run`.
  *
  * NOTE: setSourceIntensity and the source portion of setOpticAndSourceIntensity
  * are STUBBED in the assembly this cut (controller-3 RIO not wired) — they return
  * Completed without performing any light-source I/O.
  */
-import { Button, InputNumber, Select, Space, Typography } from 'antd'
+import { InputNumber, Select, Space, Typography } from 'antd'
 import type { Setup } from '@tmtsoftware/esw-ts'
 import React, { useState } from 'react'
+import { ActionButton, Actions, CommandGroup, CommandGroups, Field, ParamCommand } from './commandKit'
 import {
   OPTICS,
   POSITION_METHODS,
@@ -29,41 +30,6 @@ import {
   stopCmd
 } from '../models/calibrationSourceStage'
 import type { CmdName, Optic, PositionMethod, Slot, StatusSnapshot } from '../models/calibrationSourceStage'
-
-const { Text } = Typography
-
-const Row = ({
-  label,
-  danger,
-  enabled,
-  onSubmit,
-  children
-}: {
-  label: string
-  danger?: boolean
-  enabled: boolean
-  onSubmit: () => void
-  children?: React.ReactNode
-}): React.JSX.Element => (
-  <div
-    style={{
-      display: 'grid',
-      gridTemplateColumns: 'max-content 1fr auto',
-      alignItems: 'center',
-      gap: 8,
-      padding: '8px 10px',
-      border: '1px solid rgba(0,0,0,0.08)',
-      borderRadius: 8
-    }}>
-    <Text>{label}</Text>
-    <div style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end', minWidth: 0 }}>
-      {children}
-    </div>
-    <Button size='small' danger={danger} disabled={!enabled} onClick={onSubmit}>
-      Submit
-    </Button>
-  </div>
-)
 
 export const CalibrationSourceStageCommands = ({
   status,
@@ -87,92 +53,88 @@ export const CalibrationSourceStageCommands = ({
   const on = (cmd: CmdName): boolean => commandEnabled(cmd, status, ready, busy)
 
   return (
-    <Space direction='vertical' size={6} style={{ width: '100%' }}>
-      <Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+    <Space direction='vertical' size={8} style={{ width: '100%' }}>
+      <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
         ASSEMBLY COMMANDS
-      </Text>
+      </Typography.Text>
+      <CommandGroups>
+        <CommandGroup title='Setup'>
+          <Actions>
+            <ActionButton label='Home' enabled={on('home')} onSubmit={() => run(homeCmd(), 'home')} />
+            <ActionButton label='Configure' enabled={on('configure')} onSubmit={() => run(configureCmd(), 'configure')} />
+            <ActionButton label='Move to default position' enabled={on('moveToDefaultPosition')} onSubmit={() => run(moveToDefaultCmd(), 'moveToDefaultPosition')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row label='Home' enabled={on('home')} onSubmit={() => run(homeCmd(), 'home')} />
-      <Row label='Configure' enabled={on('configure')} onSubmit={() => run(configureCmd(), 'configure')} />
-      <Row
-        label='Move to default position'
-        enabled={on('moveToDefaultPosition')}
-        onSubmit={() => run(moveToDefaultCmd(), 'moveToDefaultPosition')}
-      />
+        <CommandGroup title='Optic & slot'>
+          <ParamCommand
+            name='Set optic'
+            enabled={on('setOptic')}
+            onSubmit={() => run(setOpticCmd(optic), `setOptic [optic=${optic}]`)}>
+            <Field label='Optic'>
+              <Select<Optic> size='small' value={optic} onChange={setOptic} options={OPTICS.map((o) => ({ value: o, label: o }))} />
+            </Field>
+          </ParamCommand>
+          <ParamCommand
+            name='Set slot'
+            enabled={on('setSlot')}
+            onSubmit={() => run(setSlotCmd(slot), `setSlot [slotNumber=${slot}]`)}>
+            <Field label='Slot'>
+              <Select<Slot> size='small' value={slot} onChange={setSlot} options={SLOTS.map((s) => ({ value: s, label: s }))} />
+            </Field>
+          </ParamCommand>
+        </CommandGroup>
 
-      <Row
-        label='Set optic'
-        enabled={on('setOptic')}
-        onSubmit={() => run(setOpticCmd(optic), `setOptic [optic=${optic}]`)}>
-        <Select<Optic>
-          size='small'
-          value={optic}
-          onChange={setOptic}
-          style={{ width: 180 }}
-          options={OPTICS.map((o) => ({ value: o, label: o }))}
-        />
-      </Row>
+        <CommandGroup title='Position'>
+          <ParamCommand
+            name='Set position'
+            enabled={on('setPosition')}
+            onSubmit={() => run(setPositionCmd(method, mm), `setPosition [positioningMethod=${method}, positionValue=${mm}]`)}>
+            <Field label='Method'>
+              <Select<PositionMethod> size='small' value={method} onChange={setMethod} options={POSITION_METHODS.map((m) => ({ value: m, label: m }))} />
+            </Field>
+            <Field label='Position'>
+              <InputNumber size='small' value={mm} onChange={(v) => setMm(Number(v ?? 0))} step={0.1} suffix='mm' />
+            </Field>
+          </ParamCommand>
+          <Actions>
+            <ActionButton label='Stop' danger enabled={on('stop')} onSubmit={() => run(stopCmd(), 'stop')} />
+          </Actions>
+        </CommandGroup>
 
-      <Row
-        label='Set slot'
-        enabled={on('setSlot')}
-        onSubmit={() => run(setSlotCmd(slot), `setSlot [slotNumber=${slot}]`)}>
-        <Select<Slot>
-          size='small'
-          value={slot}
-          onChange={setSlot}
-          style={{ width: 96 }}
-          options={SLOTS.map((s) => ({ value: s, label: s }))}
-        />
-      </Row>
+        <CommandGroup title='Light (stub)'>
+          <ParamCommand
+            name='Set source intensity'
+            enabled={on('setSourceIntensity')}
+            onSubmit={() => run(setSourceIntensityCmd(intensity), `setSourceIntensity [sourceIntensity=${intensity}]`)}>
+            <Field label='Intensity'>
+              <InputNumber size='small' value={intensity} onChange={(v) => setIntensity(Number(v ?? 0))} step={1} suffix='%' />
+            </Field>
+          </ParamCommand>
+          <ParamCommand
+            name='Set optic & source intensity'
+            enabled={on('setOpticAndSourceIntensity')}
+            onSubmit={() =>
+              run(
+                setOpticAndSourceIntensityCmd(opticForIntensity, comboIntensity),
+                `setOpticAndSourceIntensity [optic=${opticForIntensity}, sourceIntensity=${comboIntensity}]`
+              )
+            }>
+            <Field label='Optic'>
+              <Select<Optic> size='small' value={opticForIntensity} onChange={setOpticForIntensity} options={OPTICS.map((o) => ({ value: o, label: o }))} />
+            </Field>
+            <Field label='Intensity'>
+              <InputNumber size='small' value={comboIntensity} onChange={(v) => setComboIntensity(Number(v ?? 0))} step={1} suffix='%' />
+            </Field>
+          </ParamCommand>
+        </CommandGroup>
 
-      <Row
-        label='Set position'
-        enabled={on('setPosition')}
-        onSubmit={() => run(setPositionCmd(method, mm), `setPosition [positioningMethod=${method}, positionValue=${mm}]`)}>
-        <Select<PositionMethod>
-          size='small'
-          value={method}
-          onChange={setMethod}
-          style={{ width: 120 }}
-          options={POSITION_METHODS.map((m) => ({ value: m, label: m }))}
-        />
-        <InputNumber size='small' value={mm} onChange={(v) => setMm(Number(v ?? 0))} step={0.1} suffix='mm' style={{ width: 108 }} />
-      </Row>
-
-      <Row
-        label='Set optic & source intensity'
-        enabled={on('setOpticAndSourceIntensity')}
-        onSubmit={() =>
-          run(
-            setOpticAndSourceIntensityCmd(opticForIntensity, comboIntensity),
-            `setOpticAndSourceIntensity [optic=${opticForIntensity}, sourceIntensity=${comboIntensity}]`
-          )
-        }>
-        <Select<Optic>
-          size='small'
-          value={opticForIntensity}
-          onChange={setOpticForIntensity}
-          style={{ width: 180 }}
-          options={OPTICS.map((o) => ({ value: o, label: o }))}
-        />
-        <InputNumber size='small' value={comboIntensity} onChange={(v) => setComboIntensity(Number(v ?? 0))} step={1} suffix='%' style={{ width: 96 }} />
-      </Row>
-
-      <Row
-        label='Set source intensity'
-        enabled={on('setSourceIntensity')}
-        onSubmit={() => run(setSourceIntensityCmd(intensity), `setSourceIntensity [sourceIntensity=${intensity}]`)}>
-        <InputNumber size='small' value={intensity} onChange={(v) => setIntensity(Number(v ?? 0))} step={1} suffix='%' style={{ width: 96 }} />
-      </Row>
-
-      <Row label='Stop' danger enabled={on('stop')} onSubmit={() => run(stopCmd(), 'stop')} />
-      <Row
-        label='Abort error recovery'
-        danger
-        enabled={on('abortErrorRecovery')}
-        onSubmit={() => run(abortRecoveryCmd(), 'abortErrorRecovery')}
-      />
+        <CommandGroup title='Recovery' danger>
+          <Actions>
+            <ActionButton label='Abort error recovery' danger enabled={on('abortErrorRecovery')} onSubmit={() => run(abortRecoveryCmd(), 'abortErrorRecovery')} />
+          </Actions>
+        </CommandGroup>
+      </CommandGroups>
     </Space>
   )
 }

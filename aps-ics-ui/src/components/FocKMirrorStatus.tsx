@@ -5,14 +5,17 @@
  * single `axisStatus` event (axisState / position° / velocity / indexed /
  * inPosition).
  *
- * Phase 1 is MANUAL only, so slewModeState reads NOT_SLEWING and trackingModeState
+ * Layout (status kit): the assembly-state chips in a top row with the operating
+ * mode as an EXTRA chip, the K-Mirror axis in an AxisMatrix (deg) at a capped
+ * width, slewModeState + trackingModeState in a compact extra Descriptions block,
+ * and a muted MetaFooter (config-derived HCD label + CSW lifecycle). Phase 1 is
+ * MANUAL only, so slewModeState reads NOT_SLEWING and trackingModeState
  * NOT_TRACKING; the rows are present so the tracking-phase telemetry surfaces are
- * already wired. HCD label is config-derived (bound HCD, not live); Lifecycle (CSW)
- * is the supervisor state polled by Main. State colouring is shared via ./statusBits.
+ * already wired. State colouring is shared via ./statusBits (colorFor).
  */
-import { Descriptions, Space, Tag, Typography } from 'antd'
+import { Space, Tag, Typography } from 'antd'
 import React from 'react'
-import { BoolTag, colorFor, fmt } from './statusBits'
+import { AssemblyStateStrip, AxisMatrix, MetaFooter } from './statusLayout'
 import { KM_HCD_LABEL } from '../models/focKMirror'
 import type { AxisSnapshot, StatusSnapshot } from '../models/focKMirror'
 import type { SupervisorLifecycleState } from '@tmtsoftware/esw-ts'
@@ -29,81 +32,25 @@ export const FocKMirrorStatus = ({
   axis: AxisSnapshot
   lifecycle?: SupervisorLifecycleState
 }): React.JSX.Element => (
-  <Space direction='vertical' size={8} style={{ width: '100%' }}>
-    <Typography.Text
-      type='secondary'
-      style={{ fontSize: 12, letterSpacing: '0.04em' }}>
+  <Space direction='vertical' size={10} style={{ width: '100%' }}>
+    <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em' }}>
       ASSEMBLY STATUS
     </Typography.Text>
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item label='Assembly state'>
-        <Tag color={colorFor(status.assemblyState)}>
-          {status.assemblyState ?? '—'}
-        </Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='HCD state'>
-        <Tag color={colorFor(status.hcdState)}>{status.hcdState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Command state'>
-        <Tag color={colorFor(status.commandState)}>
-          {status.commandState ?? '—'}
-        </Tag>
-      </Descriptions.Item>
-    </Descriptions>
-
-    <Descriptions title='Operating mode' column={1} size='small' bordered>
-      <Descriptions.Item label='Mode'>
-        <Tag color={modeColor(status.mode)}>{status.mode ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Slew mode state'>
-        {status.slewModeState ?? '—'}
-      </Descriptions.Item>
-      <Descriptions.Item label='Tracking mode state'>
-        {status.trackingModeState ?? '—'}
-      </Descriptions.Item>
-    </Descriptions>
-
-    <Descriptions title='K-Mirror axis' column={1} size='small' bordered>
-      <Descriptions.Item label='Axis state'>
-        <Tag color={colorFor(axis.axisState)}>{axis.axisState ?? '—'}</Tag>
-      </Descriptions.Item>
-      <Descriptions.Item label='Position (deg)'>
-        {fmt(axis.position)}
-      </Descriptions.Item>
-      <Descriptions.Item label='Velocity (deg/s)'>
-        {fmt(axis.velocity)}
-      </Descriptions.Item>
-      <Descriptions.Item label='Indexed'>
-        <BoolTag b={axis.indexed} />
-      </Descriptions.Item>
-      <Descriptions.Item label='In position'>
-        <BoolTag b={axis.inPosition} />
-      </Descriptions.Item>
-    </Descriptions>
-
-    <Descriptions column={1} size='small' bordered>
-      <Descriptions.Item
-        label={
-          <span>
-            HCD{' '}
-            <Typography.Text type='secondary' style={{ fontSize: 11 }}>
-              (config)
-            </Typography.Text>
-          </span>
-        }>
-        {KM_HCD_LABEL}
-      </Descriptions.Item>
-      <Descriptions.Item
-        label={
-          <span>
-            Lifecycle{' '}
-            <Typography.Text type='secondary' style={{ fontSize: 11 }}>
-              (CSW)
-            </Typography.Text>
-          </span>
-        }>
-        {lifecycle ?? '—'}
-      </Descriptions.Item>
-    </Descriptions>
+    <AssemblyStateStrip status={status} />
+    <div style={{ maxWidth: 360 }}>
+      <AxisMatrix axes={[{ name: 'K-Mirror', unit: 'deg', axis }]}
+        extraRows={[
+          { label: 'Mode', cells: [<Tag key='mode' color={modeColor(status.mode)}>{status.mode ?? '—'}</Tag>] },
+          { label: 'Slew mode', cells: [status.slewModeState ?? '—'] },
+          { label: 'Tracking mode', cells: [status.trackingModeState ?? '—'] }
+        ]}
+      />
+    </div>
+    <MetaFooter
+      items={[
+        { label: 'HCD', value: <>{KM_HCD_LABEL} <Typography.Text type='secondary' style={{ fontSize: 11 }}>(config)</Typography.Text></> },
+        { label: 'Lifecycle', value: lifecycle ?? '—' }
+      ]}
+    />
   </Space>
 )

@@ -12,6 +12,9 @@ import { Tree, Typography } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import React from 'react'
 import { isRegistered } from './registry'
+import { HCD_LIST, isHcd } from './hcds'
+import { useComponentLiveness } from '../contexts/ComponentLivenessContext'
+import { LivenessDot } from './LivenessIndicator'
 import { IS_PREFIX_STR } from '../models/insertionStage'
 import { SBS_PREFIX_STR } from '../models/steeringBeamSplitter'
 import { CU_PREFIX_STR } from '../models/collimatorUnit'
@@ -89,12 +92,10 @@ const treeData: DataNode[] = [
   {
     key: 'grp-hcd',
     title: 'HCDs',
-    disabled: true,
+    selectable: false,
     children: [
-      ph('hcd-1', 'Galil HCD 1'),
-      ph('hcd-2', 'Galil HCD 2'),
-      ph('hcd-3', 'Galil HCD 3'),
-      ph('hcd-4', 'Galil HCD 4'),
+      // Live this session — the four Galil motion HCDs (each hosts its own HMI).
+      ...HCD_LIST.map((h) => ({ key: h.key, title: h.label })),
       ph('hcd-teledyne', 'Teledyne Detector HCD'),
       ph('hcd-andor', 'Andor Detector HCD')
     ]
@@ -113,20 +114,37 @@ export const ComponentSelector = ({
 }: {
   selectedKey: string
   onSelect: (key: string) => void
-}): React.JSX.Element => (
-  <div style={{ padding: '0.5rem 0.25rem' }}>
-    <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em', paddingLeft: 8 }}>
-      ICS COMPONENTS
-    </Typography.Text>
-    <Tree
-      treeData={treeData}
-      selectedKeys={[selectedKey]}
-      defaultExpandedKeys={['grp-stim', 'grp-foc']}
-      onSelect={(keys) => {
-        const k = keys[0]
-        if (typeof k === 'string' && isRegistered(k)) onSelect(k)
-      }}
-      style={{ background: 'transparent', marginTop: 4 }}
-    />
-  </div>
-)
+}): React.JSX.Element => {
+  const liveness = useComponentLiveness()
+  return (
+    <div style={{ padding: '0.5rem 0.25rem' }}>
+      <Typography.Text type='secondary' style={{ fontSize: 12, letterSpacing: '0.04em', paddingLeft: 8 }}>
+        ICS COMPONENTS
+      </Typography.Text>
+      <Tree
+        treeData={treeData}
+        selectedKeys={[selectedKey]}
+        defaultExpandedKeys={['grp-stim', 'grp-foc']}
+        titleRender={(node) => {
+          const key = String(node.key)
+          const title = node.title as React.ReactNode
+          // Only registered (selectable) components carry a liveness dot; group
+          // and placeholder nodes render their title unchanged.
+          return isRegistered(key) || isHcd(key) ? (
+            <span>
+              <LivenessDot state={liveness[key] ?? 'unknown'} />
+              {title}
+            </span>
+          ) : (
+            <span>{title}</span>
+          )
+        }}
+        onSelect={(keys) => {
+          const k = keys[0]
+          if (typeof k === 'string' && (isRegistered(k) || isHcd(k))) onSelect(k)
+        }}
+        style={{ background: 'transparent', marginTop: 4 }}
+      />
+    </div>
+  )
+}

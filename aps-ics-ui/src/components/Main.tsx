@@ -55,6 +55,11 @@ import { CommandEventLog } from './CommandEventLog'
 import { AssemblyCpuBadge } from './AssemblyCpuBadge'
 import type { LogEntry, LogLevel } from './CommandEventLog'
 import { DEFAULT_KEY, REGISTRY } from './registry'
+import { useComponentLiveness } from '../contexts/ComponentLivenessContext'
+import type { Liveness } from '../contexts/ComponentLivenessContext'
+import { LivenessTag } from './LivenessIndicator'
+import { HCDS, isHcd } from './hcds'
+import { HcdPanel } from './HcdPanel'
 import { readAxis, readStatus } from '../models/stage'
 import type { AxisSnapshot, StatusSnapshot } from '../models/stage'
 
@@ -78,6 +83,13 @@ export const Main = (): React.JSX.Element => {
 
   const [selected, setSelected] = useState<string>(DEFAULT_KEY)
   const desc = REGISTRY[selected] ?? REGISTRY[DEFAULT_KEY]
+
+  // Push-based up/down for the selected component (Location Service tracking).
+  const liveness = useComponentLiveness()
+  const live: Liveness = liveness[selected] ?? 'unknown'
+  // An HCD (not an assembly) is selected — show the HcdPanel and skip the
+  // assembly service/subscription machinery below.
+  const showHcd = isHcd(selected)
 
   const [commandService, setCommandService] = useState<CommandServiceT>()
   const [adminService, setAdminService] = useState<AdminServiceT>()
@@ -116,6 +128,7 @@ export const Main = (): React.JSX.Element => {
     if (!auth || !isAuthenticated) return
     const authData = { tokenFactory: () => auth.token() }
     let cancelled = false
+    if (isHcd(selected)) return
     setCommandService(undefined)
     CommandService(desc.componentId, authData).then((cs) => {
       if (!cancelled) setCommandService(cs)
@@ -123,7 +136,7 @@ export const Main = (): React.JSX.Element => {
     return () => {
       cancelled = true
     }
-  }, [auth, isAuthenticated, desc])
+  }, [auth, isAuthenticated, desc, selected])
 
   // Subscribe to the descriptor's status + axis events with NO maxFrequency (see
   // the RateLimiter note above). Axis events are stored per event name. Reset the
@@ -133,6 +146,7 @@ export const Main = (): React.JSX.Element => {
     const authData = { tokenFactory: () => auth.token() }
     let sub: Subscription | undefined
     let cancelled = false
+    if (isHcd(selected)) return
     setStatus({})
     setAxes({})
     setExtras({})
@@ -153,32 +167,35 @@ export const Main = (): React.JSX.Element => {
       cancelled = true
       sub?.cancel()
     }
-  }, [auth, isAuthenticated, desc])
+  }, [auth, isAuthenticated, desc, selected])
 
-  // Best-effort poll of the CSW supervisor lifecycle state for the selected
-  // component. If the admin route is unavailable (auth/role), stop quietly.
+  // Fetch the CSW SupervisorLifecycleState ON DEMAND rather than polling: once
+  // when the selected component is tracked up (and on component/admin change),
+  // and again right after a UI lifecycle command (see runLifecycle). While the
+  // component is down/unknown the finer state is meaningless, so clear it — the
+  // liveness badge carries the up/down signal. This replaced a 5 s poll that
+  // forced a gateway location-resolve every tick AND swallowed the down case
+  // (its catch merely stopped the timer, leaving lifecycle undefined), so a
+  // dead component looked identical to "admin route unavailable".
   useEffect(() => {
     if (!adminService) return
-    let cancelled = false
-    let timer: ReturnType<typeof setInterval> | undefined
-    setLifecycle(undefined)
-    const poll = (): void => {
-      adminService
-        .getComponentLifecycleState(desc.componentId)
-        .then((s) => {
-          if (!cancelled) setLifecycle(s)
-        })
-        .catch(() => {
-          if (timer) clearInterval(timer)
-        })
+    if (isHcd(selected) || live !== 'up') {
+      setLifecycle(undefined)
+      return
     }
-    poll()
-    timer = setInterval(poll, 5000)
+    let cancelled = false
+    adminService
+      .getComponentLifecycleState(desc.componentId)
+      .then((state) => {
+        if (!cancelled) setLifecycle(state)
+      })
+      .catch(() => {
+        if (!cancelled) setLifecycle(undefined)
+      })
     return () => {
       cancelled = true
-      if (timer) clearInterval(timer)
     }
-  }, [adminService, desc])
+  }, [adminService, desc, live, selected])
 
   // Read the selected component's ACTIVE config from the CSW Config Service for
   // the Configuration tab. The Config Service resolves directly via the Location
@@ -187,6 +204,7 @@ export const Main = (): React.JSX.Element => {
   useEffect(() => {
     if (!auth || !isAuthenticated) return
     let cancelled = false
+    if (isHcd(selected)) return
     setLiveConfigText(undefined)
     setConfigSource('loading')
     ConfigService(() => auth.token())
@@ -204,7 +222,7 @@ export const Main = (): React.JSX.Element => {
     return () => {
       cancelled = true
     }
-  }, [auth, isAuthenticated, desc])
+  }, [auth, isAuthenticated, desc, selected])
 
   // Submit a Setup (submit -> queryFinal for the terminal result) and log both.
   const run = useCallback(
@@ -241,6 +259,12 @@ export const Main = (): React.JSX.Element => {
         }[name]
         const done = await fn()
         appendLog('info', `${desc.label}  lifecycle ${name}  ${done}`)
+        // Reflect the resulting lifecycle state immediately (goOnline/goOffline
+        // do not move the tracked location, so no track event would fire).
+        adminService
+          .getComponentLifecycleState(desc.componentId)
+          .then(setLifecycle)
+          .catch(() => undefined)
       } catch (e) {
         appendLog('error', `${desc.label}  lifecycle ${name}  ${(e as Error).message}`)
       } finally {
@@ -253,16 +277,38 @@ export const Main = (): React.JSX.Element => {
   if (!auth) return <div>Loading…</div>
   if (!isAuthenticated) return <Login />
 
-  const ready = commandService !== undefined
+  // Offline components can't accept commands; disabling here (via the shared
+  // `ready` flag) auto-gates every command panel without touching them, and
+  // replaces a 5-minute queryFinal timeout with an immediately-disabled button.
+  const ready = commandService !== undefined && live !== 'down'
 
+  // Status band on top (full width), command section below (full width). The
+  // status panel is compact now (state chips + axis matrix), so stacking reads
+  // better than the old side-by-side, and the command groups get the full width
+  // to flow into.
   const commandingTab = (
-    <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
-      <div style={{ flex: '1 1 360px', minWidth: 320 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div>
+        {live === 'down' && (
+          <div
+            style={{
+              marginBottom: 8,
+              padding: '6px 10px',
+              background: '#fff1f0',
+              border: '1px solid #ffa39e',
+              borderRadius: 4,
+              fontSize: 12,
+              color: '#a8071a'
+            }}
+          >
+            Component offline. Showing last-known values.
+          </div>
+        )}
+        {desc.renderStatus({ status, axes, extras, lifecycle })}
+      </div>
+      <div>
         {desc.renderCommands({ status, ready, busy, run })}
         <LifecycleCommands ready={adminService !== undefined} busy={busy} run={runLifecycle} />
-      </div>
-      <div style={{ flex: '1 1 300px', minWidth: 280 }}>
-        {desc.renderStatus({ status, axes, extras, lifecycle })}
       </div>
     </div>
   )
@@ -279,27 +325,33 @@ export const Main = (): React.JSX.Element => {
         </Layout.Sider>
         <Layout.Content style={{ padding: '1rem 1.25rem' }}>
           <Typography.Title level={5} style={{ marginTop: 0 }}>
-            {desc.label}
+            {showHcd ? HCDS[selected].label : desc.label} <LivenessTag state={live} />
           </Typography.Title>
-          <Tabs
-            items={[
-              { key: 'cmd', label: 'Status & commanding', children: commandingTab },
-              {
-                key: 'cfg',
-                label: 'Configuration',
-                children: (
-                  <ConfigTab
-                    path={desc.configPath}
-                    staticView={desc.staticConfig}
-                    liveText={liveConfigText}
-                    source={configSource}
-                  />
-                )
-              }
-            ]}
-          />
-          {/* Shared across both tabs per SDD §4.3. */}
-          <CommandEventLog entries={log} />
+          {showHcd ? (
+            <HcdPanel hcdKey={selected} onSelectComponent={setSelected} />
+          ) : (
+            <>
+              <Tabs
+                items={[
+                  { key: 'cmd', label: 'Status & commanding', children: commandingTab },
+                  {
+                    key: 'cfg',
+                    label: 'Configuration',
+                    children: (
+                      <ConfigTab
+                        path={desc.configPath}
+                        staticView={desc.staticConfig}
+                        liveText={liveConfigText}
+                        source={configSource}
+                      />
+                    )
+                  }
+                ]}
+              />
+              {/* Shared across both tabs per SDD §4.3. */}
+              <CommandEventLog entries={log} />
+            </>
+          )}
         </Layout.Content>
       </Layout>
     </Layout>
