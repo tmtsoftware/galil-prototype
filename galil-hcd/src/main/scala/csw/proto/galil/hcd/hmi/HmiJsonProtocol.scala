@@ -184,6 +184,87 @@ object HmiJsonProtocol {
       "message" -> message
     ).toString()
 
+  // ── Position history (ADR-002) ────────────────────────────────────────
+
+  /**
+   * Encode a history snapshot columnar-style.
+   *
+   * Columnar rather than an array of per-sample objects because the field names would
+   * otherwise be repeated once per sample per axis -- at 3000 samples x 8 axes that is
+   * the difference between a compact payload and a few hundred KB of duplicated keys.
+   *
+   * Absent axes are `null`, never 0: `PositionHistoryBuffer` stores NaN for an axis that
+   * was not present in a scan, and JSON has no NaN.  Rendering it as 0 would draw a
+   * fictitious trace at the origin for every unconfigured axis.
+   *
+   * An axis column is emitted only if at least one of its samples is non-NaN, so a
+   * 4-axis controller does not ship four all-null columns on every backfill.
+   *
+   * `nextSeq` is the caller's cursor for the next incremental read.  `gap` is true when
+   * the requested `since` had already been evicted from the ring, so the consumer is
+   * told it lost samples rather than being handed a trace with a hidden discontinuity.
+   */
+  def positionSamplesToJson(
+    snapshot: PositionHistoryBuffer.Snapshot,
+    capacity: Int,
+    msgType: String = "positionSamples"
+  ): String = {
+    val axesJson = JsObject(
+      (0 until PositionHistoryBuffer.AxisCount).flatMap { idx =>
+        val col = snapshot.positions(idx)
+        if (col.exists(v => !v.isNaN)) {
+          val values: IndexedSeq[JsValue] =
+            col.iterator.map(v => if (v.isNaN) JsNull else JsNumber(BigDecimal(v))).toIndexedSeq
+          Some(('A' + idx).toChar.toString -> JsArray(values))
+        } else None
+      }
+    )
+
+    Json.obj(
+      "type"     -> msgType,
+      "firstSeq" -> snapshot.firstSeq,
+      "nextSeq"  -> snapshot.nextSeq,
+      "gap"      -> snapshot.gap,
+      "capacity" -> capacity,
+      "spanMs"   -> snapshot.spanMs,
+      // Sample times are UTC epoch millis, taken at the QR scan (the acquisition
+      // instant), so they align directly with the log panel's CSW timestamps.
+      "t"        -> JsArray(snapshot.times.iterator.map(t => JsNumber(BigDecimal(t))).toIndexedSeq),
+      "axes"     -> axesJson
+    ).toString()
+  }
+
+  /**
+   * Render a history snapshot as CSV: `timeMs,timeIso,<axis>...`, oldest sample first.
+   *
+   * Both a raw epoch column and an ISO column: the former for plotting tools, the latter
+   * so a human can line a row up against a log message without converting anything.
+   * Absent axes are empty cells rather than 0, for the same reason as the JSON encoder.
+   */
+  def positionHistoryCsv(snapshot: PositionHistoryBuffer.Snapshot): String = {
+    val presentAxes: Seq[Int] =
+      (0 until PositionHistoryBuffer.AxisCount).filter(idx => snapshot.positions(idx).exists(v => !v.isNaN))
+
+    val sb = new StringBuilder(64 + snapshot.size * (24 + presentAxes.size * 12))
+    sb.append("timeMs,timeIso")
+    presentAxes.foreach(idx => sb.append(',').append(('A' + idx).toChar))
+    sb.append('\n')
+
+    var i = 0
+    while (i < snapshot.size) {
+      val t = snapshot.times(i)
+      sb.append(t).append(',').append(java.time.Instant.ofEpochMilli(t).toString)
+      presentAxes.foreach { idx =>
+        sb.append(',')
+        val v = snapshot.positions(idx)(i)
+        if (!v.isNaN) sb.append(v)
+      }
+      sb.append('\n')
+      i += 1
+    }
+    sb.toString()
+  }
+
   /**
    * Build a log line JSON message for WebSocket broadcast.
    *

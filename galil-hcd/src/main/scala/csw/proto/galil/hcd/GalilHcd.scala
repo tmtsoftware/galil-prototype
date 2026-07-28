@@ -471,6 +471,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   // 5. HMI Server - Embedded HTTP/WebSocket test console (created during initialize)
   private var hmiServer: hmi.HmiServer = uninitialized
 
+  // Per-scan axis position history for the HMI engineering plot (ADR-002).  Written by
+  // ControllerStatusActor at the QR scan boundary, read by HmiServer.  Deliberately an
+  // instance owned here rather than a JVM singleton like CpuLoadMonitor: CPU load is a
+  // per-JVM measurand shared by many components, whereas this has exactly one writer and
+  // one reader per HCD, both constructed below.  A CSW Restart re-runs initialize() and
+  // therefore starts from a fresh, empty buffer.
+  private val positionHistory: PositionHistoryBuffer = new PositionHistoryBuffer()
+
   // Per-JVM CPU load monitor is a process-wide singleton (CpuLoadMonitor.startOnce);
   // no per-component field. Basis for REQ-2-APS-0621 + live ops resource-health.
 
@@ -614,7 +622,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         commandActor = controllerCommandActor,
         configuredAxes = configuredAxesSet,
         standbyPollingRateHz = standbyRate,
-        actionPollingRateHz = actionRate
+        actionPollingRateHz = actionRate,
+        positionHistory = Some(positionHistory)
       ),
       "ControllerStatusActor"
     )
@@ -678,7 +687,8 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
         // on the class-level execution context so the HMI HTTP handler
         // returns immediately (the recovery is long-running).
         onFaultReset            = (setup, runId) => Future { handleFaultReset(setup, runId) },
-        cpuLoad                 = () => CpuLoadMonitor.latest
+        cpuLoad                 = () => CpuLoadMonitor.latest,
+        positionHistory         = positionHistory
       )(ctx.system)
       hmiServer.start()
       log.info(s"HMI test console starting on port $hmiPort")

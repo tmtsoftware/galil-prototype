@@ -2,8 +2,10 @@
 
 The GalilMotion HCD implements the CSW Hardware Control Daemon interface for Galil
 DMC-400x0 and DMC-500x0 motion controllers. It manages embedded program execution,
-state monitoring, error detection, fault recovery, and CSW event publishing for axes
-configured as either linear or rotating mechanisms.
+state monitoring, error detection, fault recovery, and CSW state publishing for axes
+configured as either linear or rotating mechanisms. (State goes out as CSW `CurrentState`
+to subscribing assemblies, not as Events — see [Published State](#published-state); the
+assemblies are what publish archived, outward-facing events in engineering units.)
 
 It is built on Scala 3, Apache Pekko, and CSW 6.0, and talks to the controller over
 TCP using the `galil-io` wire protocol. The HCD also serves a single-file browser HMI
@@ -91,14 +93,16 @@ Most suites need no hardware and no CSW services.
 ```bash
 # Pure unit tests (no hardware, no CSW services)
 sbt "galil-hcd/testOnly *ConfigTest *InternalStateActorTest *ControllerStatusActorTest \
-  *CommandHandlerActorTest *CommandWatcherActorTest *LongRunningCommandTest \
-  *RotatingMechanismTest *AxisStateValidationTest *IOTest *CommandGateTest \
-  *ProgramFileManagerTest"
+  *CommandHandlerActorTest *CommandWatcherActorTest *EightAxisThreadingTest \
+  *LongRunningCommandTest *RotatingMechanismTest *AxisStateValidationTest \
+  *IOTest *CommandGateTest \
+  *ProgramFileManagerTest *CpuLoadMonitorTest *PositionHistoryBufferTest \
+  *CurrentStatePublishGateTest"
 
 # Controller/simulator-dependent (no CSW services)
 sbt "galil-simulator/run"   # in a separate terminal
 sbt "galil-hcd/testOnly *ControllerCommandActorTest"        # 16 tests
-sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 4 tests (simulator only)
+sbt "galil-hcd/testOnly *CurrentStatePublisherActorTest"    # 7 tests (simulator only)
 
 # Integration (uses FrameworkTestKit; csw-services must NOT be running)
 sbt -Dgalil.config.path=GalilHcdConfig-Simulator.conf \
@@ -122,11 +126,29 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"     # 104 tests
 | IOTest | 17 | none | DIO bit extraction, setBit/clearBit dispatch, AI polling |
 | CommandGateTest | 19 | none | Shared command-gate checks and CSW/HMI parity |
 | ProgramFileManagerTest | 14 | none | DL upload prep (REM/blank strip, 80-char compression and guard), LS-download parsing |
+| CpuLoadMonitorTest | 3 | none | Pure `sample`/`buildEvent`; per-JVM CPU fractions vs the 70% ceiling (S86) |
+| PositionHistoryBufferTest | 12 | none | Scan-boundary position ring buffer (S88): wraparound, cursor arithmetic across eviction, `gap` reporting, NaN-vs-zero for absent axes, column/time alignment, concurrent read-while-write |
+| CurrentStatePublishGateTest | 8 | none | Per-axis publication gate (S88): active/transition/idle-floor truth table, boundary at the floor, simulated 10 Hz and jittered 1 Hz scan trains |
 | ControllerCommandActorTest | 19 | hardware or simulator | Command-socket protocol |
-| CurrentStatePublisherActorTest | 4 | simulator | CurrentState publishing |
+| CurrentStatePublisherActorTest | 7 | simulator | CurrentState publishing; publication cadence (S88): `sampleTime` present and TAI, no duplicate `sampleTime` across consecutive publishes, idle axis at ~1 Hz not the action rate |
 | HcdIntegrationTest | 18 | hardware or simulator + FrameworkTestKit | End-to-end command lifecycle, incl. 8 concurrent moves occupying threads 0-7 (8-axis config) |
 | GalilSimulatorActorTest | 104 | none | Simulator behaviour, incl. busy-thread XQ rejection (S86) |
-| **Total** | **429** | | |
+| **Total** | **455** | | |
+
+**Verifying publication cadence (S88).** Rate is easy to regress silently, so it is
+asserted two ways. `CurrentStatePublishGateTest` covers the decision as a pure function
+(`CurrentStatePublisherActor.shouldPublishAxis`) with no actor, services or clock — it
+runs in the pure block above. `CurrentStatePublisherActorTest` then checks the running
+HCD, and its strongest assertion deliberately does **not** measure a rate: a timer that
+resamples `InternalStateActor` republishes the *same* `lastPollingTime`, so **duplicate
+consecutive `sampleTime` values are the signature of timer-driven publication**. Asserting
+zero duplicates proves publication is scan-aligned without depending on wall-clock timing,
+so it cannot flake — reintroduce a fixed publish timer and it fails immediately. A second
+test compares `sampleTime` against `TAITime.now()` rather than a hardcoded 37 s offset,
+which stays correct if the leap-second offset changes while still catching a UTC instant
+published by mistake (a live risk, since the HMI position buffer deliberately uses UTC
+millis). The rate bound itself is loose on purpose: it tests the order of magnitude that
+regressed, not the scheduler's precision.
 
 The HCD depends on `galil-io` for the controller wire protocol. That module has its
 own suite (`galil-io/GalilIoTest`, 45 tests) covering `writeRaw`, `send` (single and
@@ -328,6 +350,78 @@ target:
 algorithm identically to `positionAxis`. It is rejected if the axis is not configured as
 Rotating or if `countsPerRevolution` is not set. `selectWheel` does not use the approach
 algorithm; it delegates to the embedded `#SelectX` program.
+
+---
+
+## Published State
+
+The HCD publishes CSW **CurrentState** (not Events). `CurrentState` is a component-local
+pub/sub channel — `EventPublisher.publish` takes an `Event`, and `CurrentState` is not one,
+so nothing here reaches the Event Service or DMS. Assemblies subscribe via
+`subscribeCurrentState` and republish outward-facing, archived `SystemEvent`s in engineering
+units. The one exception is `cpuLoad`, which is a real SystemEvent.
+
+| Item | Cadence |
+|------|---------|
+| `CurrentState` (lifecycle, controllerId, error) | 1 Hz, unconditional |
+| `InputOutputState` | 1 Hz, on change |
+| `CurrentStateAxis[A-H]`, `CommandStateAxis[A-H]` | per QR scan, per-axis gated (below) |
+
+### Publication cadence (S88)
+
+Per-axis publication is driven by the QR scan, not a timer. `InternalStateActor` notifies
+subscribers once per axis per scan, so publishing from that signal makes each published
+sample correspond to exactly one controller read. An axis publishes when it is **active**
+(Moving/Homing/Tracking), **or** its `axisState` changed, **or** the idle floor
+(`IdleRepublishMs`, 900 ms) has elapsed.
+
+The gate matters because **the QR poll rate is global** — it rises to 10 Hz whenever *any*
+axis is active. Publishing every axis on every scan would push seven idle axes to 10 Hz
+because the eighth is moving. With the gate, a moving axis publishes at the acquisition rate
+while idle axes stay at ~1 Hz. The `axisState`-changed clause exists because a fast command
+(~100 ms) can pass through `Moving` entirely between two idle republishes; without it an
+assembly watching for `Idle → Moving → Idle` would never observe the move. `CommandStateAxis`
+is gated in lockstep with its `CurrentStateAxis` sibling so a consumer cannot pair a fresh
+position with a stale `moving`/`activeThread`.
+
+The floor is deliberately below 1000 ms: at the 1 Hz standby rate consecutive scans land
+~1000 ms apart *with jitter*, and a 1000 ms threshold would fail on roughly every other scan
+and halve the idle rate.
+
+**`sampleTime`** (TAI) carries the QR scan instant, shared by every axis read in that scan.
+Consumers should age and order axis data by `sampleTime`, not by receipt time: publication is
+decoupled from acquisition, and an idle axis is republished at ~1 Hz however fast the poller
+is running. TAI (not UTC) to match `trackAxis.validTime` and the assembly `axisMotionMetrics`
+times; the conversion happens at the publish boundary via `UTCTime(lastPollingTime).toTAI`.
+
+> The `Max Rate` column the ICD shows for a current state is **not** a declaration. icd-db
+> renders a default of "1.0 Hz \*" whenever none is specified, and `maxRate` is schema-valid
+> only on an `event` — `icd-db -i` rejects it on a `currentState`. There is no way to state
+> the real rate for these items, so do not design against that figure.
+
+**Behaviour on a stalled poll:** if polling stops while the HCD is not Uninitialized (a
+status-connection loss, say), axis publication stops rather than replaying the last known
+values. Stale data that looks live is worse than no data, and `sampleTime` now makes
+staleness detectable; the `hcdFaulted` alarm and the 1 Hz `CurrentState` cover the outage.
+
+### Position history
+
+`PositionHistoryBuffer` (ADR-002) records one sample per axis per QR scan — 3000 samples per
+axis, columnar, ~220 KB — written at the scan boundary in `ControllerStatusActor` and read by
+the HMI. It exists because **no dense position trace survives anywhere else**: the archived
+path is assembly `SystemEvent` → DMS, throttled to 1 Hz, so during a move at the 10 Hz scan
+rate roughly nine of every ten real samples never reach DMS. Motion characterisation is meant
+to ride `axisMotionMetrics` (per move), not a position stream.
+
+The HMI reads it three ways: a `positionSamples` WebSocket frame on the existing 4 Hz push
+tick carrying every sample since the previous tick (full scan-rate fidelity without raising
+the frame rate), `GET /api/history` for backfill when the plot opens, and
+`GET /api/history.csv` for export. Timestamps here are **UTC millis**, deliberately unlike
+published `sampleTime`: this buffer's job is correlation with the log panel, whose lines carry
+CSW's UTC timestamps.
+
+See `docs/adr/ADR-002-position-history-recorder.md` for the design and the rejected
+alternatives.
 
 ---
 
@@ -722,9 +816,35 @@ and mechanism type.
 controller `ID` command, not by the number of configured axes. The panel also shows 8
 analog input channels (polled at 1 Hz via `MG @AN[n]`, displayed in volts).
 
-**Other panels:** a real-time position chart, a collapsible unified log panel with runtime
-level control (INFO/DEBUG/TRACE), a thread status bar, and a SIMULATING badge in simulator
-mode.
+**Bottom panel — LOG | PLOT (S88):** one region, two tabbed views, defaulting to the plot.
+
+*PLOT* renders the HCD-side position history (see [Position history](#position-history)) as
+stacked per-axis channels: one row per selected axis, each independently autoscaled in its
+own encoder counts, all sharing one time axis. Stacked rather than overlaid because axes on
+one controller differ in scale by orders of magnitude — a stage at ~200 000 counts and a
+wheel at ~4 000 counts cannot share a Y axis without the wheel becoming a flat line. Axis
+chips select channels, `Freeze` captures the view for reading a transient while the HCD
+keeps recording, and `CSV` downloads the retained window. The panel sizes itself so every
+enabled channel is visible without scrolling. Gaps in acquisition render as breaks in the
+trace, never as interpolated line segments, and the header labels the window's actual span
+and effective rate — retention is bounded by sample count, so its duration varies with the
+polling rate.
+
+*LOG* is the unified log with runtime level control (INFO/DEBUG/TRACE). The HCD retains the
+last 1000 log frames and replays them to a connecting client, so a page reload — or the
+reload the HMI forces after an HCD Restart — no longer starts from a blank panel, and the
+`initialize()` sequence emitted before any browser can connect is now readable. The ring is
+sized to what the panel can usefully show, not as a log store: `TMT_LOG_HOME` holds the
+durable record.
+
+Also: a thread status bar, and a SIMULATING badge in simulator mode.
+
+**Front-end assets are vendored** (`resources/web/vendor/`: react, react-dom, prop-types,
+recharts), not loaded from a CDN, so the console works on a network with no internet. Load
+order matters — the recharts UMD build declares `prop-types` as an *external*, so react,
+react-dom and prop-types must all precede it. A missing library is now a missing file rather
+than a silent runtime `null`: the previous capability probe hid exactly this dependency
+error for the entire life of the position chart, on every network.
 
 **Connection status:** the header shows three dot indicators, `Cmd` (command TCP), `Sts`
 (status TCP), and `Con` (console TCP, hardware-only and informational). Green is Connected,

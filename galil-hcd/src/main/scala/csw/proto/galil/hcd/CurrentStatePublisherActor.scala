@@ -8,6 +8,7 @@ import csw.prefix.models.Prefix
 import csw.logging.api.scaladsl.Logger
 import csw.logging.client.scaladsl.LoggerFactory
 import csw.proto.galil.GalilMotionKeys
+import csw.time.core.models.{TAITime, UTCTime}
 
 import scala.concurrent.duration.*
 
@@ -41,10 +42,45 @@ object CurrentStatePublisherActor:
   private case object Publish1Hz extends Command
   
   /**
-   * Internal timer message for 10 Hz publications
+   * Idle republish floor for the per-axis publication gate.
+   *
+   * Deliberately below 1000 ms: at the 1 Hz standby polling rate consecutive scans land
+   * ~1000 ms apart WITH JITTER, so a 1000 ms threshold would fail on roughly every other
+   * scan and halve the idle publication rate to ~0.5 Hz. 900 ms guarantees every standby
+   * scan republishes, while still throttling an idle axis to ~1 Hz when the poller is at
+   * the 10 Hz action rate because some OTHER axis is moving.
    */
-  private case object Publish10Hz extends Command
-  
+  private[hcd] val IdleRepublishMs: Long = 900L
+
+  /**
+   * Axis states meaning "something is happening on this axis right now" -- a consumer
+   * wants these at full acquisition rate rather than as a 1 Hz sample.
+   */
+  private[hcd] def isAxisActive(s: AxisState): Boolean =
+    s.axisState == AxisStateEnum.Moving ||
+    s.axisState == AxisStateEnum.Homing ||
+    s.axisState == AxisStateEnum.Tracking
+
+  /**
+   * The per-axis publication rule, extracted as a pure function so it can be tested
+   * exhaustively without a running HCD, services, or a clock (the CpuLoadMonitor
+   * precedent: test the decision, not the scheduling around it).
+   *
+   * @param axisActive       axis is Moving/Homing/Tracking -- publish every scan
+   * @param axisStateChanged this scan carried an axisState transition -- never drop one,
+   *                         a ~100 ms command can pass through Moving entirely between
+   *                         two idle republishes
+   * @param elapsedMs        since this axis last published
+   * @param idleFloorMs      the idle republish floor
+   */
+  private[hcd] def shouldPublishAxis(
+    axisActive: Boolean,
+    axisStateChanged: Boolean,
+    elapsedMs: Long,
+    idleFloorMs: Long = IdleRepublishMs
+  ): Boolean =
+    axisActive || axisStateChanged || elapsedMs >= idleFloorMs
+
   /**
    * Notification from InternalStateActor that state changed
    */
@@ -97,17 +133,27 @@ class CurrentStatePublisherActor(
   private var latestState: Option[HcdState] = None
 
   // Last-published snapshots for change detection.
-  // CurrentStateAxis[A-H] is always published at rate (position/velocity stream).
   // CurrentState and InputOutputState are published only on change.
   private var lastPublishedHcdState: Option[HcdState] = None
+
+  // Per-axis publish bookkeeping for the scan-driven gate below.
+  private var lastAxisPublishMs: Map[Axis, Long] = Map.empty
   
   // Subscribe to state changes
   private val stateUpdateAdapter = ctx.messageAdapter[InternalStateActor.StateChanged](StateUpdate(_))
   internalStateActor ! InternalStateActor.Subscribe(stateUpdateAdapter, None)
   
-  // Start timers for periodic publication
+  // Start timers for periodic publication.
+  //
+  // There is no longer a 10 Hz timer.  Per-axis publication is driven by the QR scan
+  // (see the StateUpdate handler): InternalStateActor notifies subscribers once per axis
+  // per scan, so publishing from that signal makes each published sample correspond to
+  // exactly one controller read.  The previous fixed 100 ms timer resampled IS state
+  // independently of acquisition, which produced ten identical publishes per real
+  // reading at the 1 Hz standby rate and an uncorrelated beat against the scan at the
+  // 10 Hz action rate.  Neither artefact was visible to consumers, because nothing
+  // published carried the acquisition time -- which is what sampleTime now fixes.
   timers.startTimerWithFixedDelay(Publish1Hz, 1.second)
-  timers.startTimerWithFixedDelay(Publish10Hz, 100.milliseconds)
   
   logger.info("CurrentStatePublisherActor started - using generated ICD keys")
   
@@ -118,19 +164,54 @@ class CurrentStatePublisherActor(
   override def onMessage(msg: Command): Behavior[Command] = msg match
     case StateUpdate(InternalStateActor.StateChanged(newState, changedFields, changedAxes)) =>
       latestState = Some(newState)
-      
-      // Publish immediately when axisState changes so that every state transition
-      // (e.g. Idle→Homing→Idle) is captured in CSP regardless of poll timer phase.
-      // Without this, fast-completing commands (~100ms) can skip transient states
-      // because the 10Hz timer hasn't fired between the state changes.
-      // Suppressed during Uninitialized; see Publish10Hz comment below.
-      if changedFields.contains("axisState") && newState.state != HcdStateEnum.Uninitialized then
+
+      // SCAN-DRIVEN PER-AXIS PUBLICATION.
+      //
+      // InternalStateActor calls notifyStateSubscribers unconditionally at the end of
+      // handleUpdateAxisState, and ControllerStatusActor calls that once per axis per QR
+      // scan -- so this message IS the scan signal, and publishing from it makes one
+      // published sample correspond to exactly one controller read.
+      //
+      // The gate below is what makes "more events while moving, fewer while idle" true
+      // PER AXIS rather than per controller.  The QR poll rate is global: it rises to
+      // 10 Hz when ANY axis is active, so publishing every axis on every scan would push
+      // seven idle axes to 10 Hz because the eighth is moving. An idle axis is therefore
+      // republished at ~1 Hz regardless of what the poller is doing.
+      //
+      // Three reasons to publish:
+      //   1. the axis is active           -- a moving axis is exactly what a consumer
+      //                                      wants at full acquisition rate;
+      //   2. axisState changed            -- transitions must never be dropped. A fast
+      //                                      command (~100 ms) can pass through Moving
+      //                                      entirely between two idle republishes, and
+      //                                      an assembly watching for Idle->Moving->Idle
+      //                                      would never see it;
+      //   3. the idle floor elapsed       -- keeps a standing signal for late subscribers
+      //                                      and for anything ageing the data.
+      if newState.state != HcdStateEnum.Uninitialized then
+        val nowMs = System.currentTimeMillis()
+        val axisStateChanged = changedFields.contains("axisState")
+        // The acquisition instant for this scan, shared by every axis read in it.
+        // lastPollingTime is stamped once per scan by ControllerStatusActor, so it is the
+        // moment the controller was READ -- not the moment we happen to publish, which is
+        // what an event receipt time would give a consumer. Converted UTC -> TAI here at
+        // the ICD boundary because the model declares sampleTime as taiTime, matching
+        // trackAxis.validTime and the assembly axisMotionMetrics times. (CSW TAI runs
+        // +37 s ahead of UTC; UTCTime.toTAI applies the offset.)
+        val sampleTime = UTCTime(newState.lastPollingTime).toTAI
         changedAxes.foreach { axis =>
           newState.getAxis(axis).foreach { axisState =>
-            publishAxisState(axis, axisState)
+            val elapsed = nowMs - lastAxisPublishMs.getOrElse(axis, 0L)
+            if shouldPublishAxis(isAxisActive(axisState), axisStateChanged, elapsed) then
+              publishAxisState(axis, axisState, sampleTime)
+              // CommandStateAxis is derived from the same scan, so it is gated with its
+              // CurrentStateAxis sibling: publishing them on different schedules would
+              // let a consumer correlate a position with a stale moving/activeThread.
+              newState.getCmdState(axis).foreach(cs => publishCommandState(axis, cs))
+              lastAxisPublishMs = lastAxisPublishMs + (axis -> nowMs)
           }
         }
-      
+
       this
       
     case Publish1Hz =>
@@ -160,26 +241,12 @@ class CurrentStatePublisherActor(
       }
       this
 
-    case Publish10Hz =>
-      // Per-axis publications (position/velocity/axisState/command state) are
-      // suppressed during Uninitialized; values are at construction defaults
-      // (position=0, velocity=0, axisState=Lost) until the controller is read.
-      // Publishing those would create noise for subscribing assemblies and could
-      // misleadingly trigger logic that watches for axisState transitions
-      // (e.g. "axis is Lost, home it").  Resumes once Ready.
-      latestState.filter(_.state != HcdStateEnum.Uninitialized).foreach { state =>
-        // CurrentStateAxis[A-H] always published at 10 Hz; position/velocity is
-        // a continuous stream that Assemblies need at rate, not just on change.
-        publishAllAxisStates(state)
-
-        // CommandStateAxis[A-H] published unconditionally at 10Hz alongside
-        // position/velocity. Change-detection causes late-subscriber starvation:
-        // after a command completes, cmd state stabilizes and stops changing,
-        // so any subscriber that arrives after the last change never receives
-        // anything. Consistent with the unconditional position stream.
-        publishAllCommandStates(state)
-      }
-      this
+    // Publish10Hz is retired: per-axis publication is now driven by the scan signal in
+    // the StateUpdate handler above.  The Uninitialized suppression it carried moved
+    // there -- before the controller is read, axis values are construction defaults
+    // (position=0, velocity=0, axisState=Lost), and publishing those would both add
+    // noise for subscribing assemblies and misleadingly trip logic watching for
+    // axisState transitions ("axis is Lost, home it").
       
     case Shutdown =>
       logger.info("CurrentStatePublisherActor shutting down")
@@ -236,22 +303,14 @@ class CurrentStatePublisherActor(
     currentStatePublisher.publish(cs)
   
   /**
-   * Publish CurrentStateAxis[A-H] for all active axes (10 Hz)
-   */
-  private def publishAllAxisStates(hcdState: HcdState): Unit =
-    Axis.values.foreach { axis =>
-      hcdState.getAxis(axis).foreach { axisState =>
-        publishAxisState(axis, axisState)
-      }
-    }
-  
-  /**
-   * Publish CurrentStateAxis for a single axis (10 Hz)
-   * Uses keys from CurrentStateAxis[A-H]CurrentState
-   * 
+   * Publish CurrentStateAxis for a single axis.
+   *
+   * Called from the scan-driven gate in the StateUpdate handler, so the cadence is the
+   * QR poll rate for an active axis and ~1 Hz for an idle one -- not a fixed timer.
+   *
    * Note: ICD defines position/velocity as Float (encoder counts), we convert from Double
    */
-  private def publishAxisState(axis: Axis, axisState: AxisState): Unit =
+  private def publishAxisState(axis: Axis, axisState: AxisState, sampleTime: TAITime): Unit =
     // Get keys and eventKey based on axis letter
     // Note: We need to extract both eventKey and parameter keys to avoid union type issues
     val (eventKey, posKey, velKey, stateKey, inPosKey, errKey) = axis match
@@ -355,6 +414,17 @@ class CurrentStatePublisherActor(
       case Axis.G => CurrentStateAxisGCurrentState.wheelPositionKey
       case Axis.H => CurrentStateAxisHCurrentState.wheelPositionKey
 
+    // Acquisition timestamp key (ADR-002 / S88 ICD revision).
+    val sampleTimeKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.sampleTimeKey
+      case Axis.B => CurrentStateAxisBCurrentState.sampleTimeKey
+      case Axis.C => CurrentStateAxisCCurrentState.sampleTimeKey
+      case Axis.D => CurrentStateAxisDCurrentState.sampleTimeKey
+      case Axis.E => CurrentStateAxisECurrentState.sampleTimeKey
+      case Axis.F => CurrentStateAxisFCurrentState.sampleTimeKey
+      case Axis.G => CurrentStateAxisGCurrentState.sampleTimeKey
+      case Axis.H => CurrentStateAxisHCurrentState.sampleTimeKey
+
     // Map internal enum to ICD choice string
     val stateValue = axisState.axisState match
       case AxisStateEnum.Lost => "lost"
@@ -383,27 +453,23 @@ class CurrentStatePublisherActor(
         // Valid-home-reference flag; assemblies map this to their `indexed` field
         homedKey.set(axisState.homed),
         // Achieved wheel slot (1-based); -1 = unknown / not a wheel axis.
-        wheelPosKey.set(axisState.wheelPosition)
+        wheelPosKey.set(axisState.wheelPosition),
+        // Acquisition instant for this sample.  Publication is decoupled from the poll
+        // (an idle axis is republished at ~1 Hz however fast the poller is running), so a
+        // consumer that ages or orders this data by receipt time is measuring our
+        // scheduling, not the mechanism.
+        sampleTimeKey.set(sampleTime)
       )
     )
 
     currentStatePublisher.publish(cs)
   
   /**
-   * Publish CommandStateAxis[A-H] unconditionally for all active axes.
-   * Called at 10Hz alongside position/velocity stream.
-   */
-  private def publishAllCommandStates(hcdState: HcdState): Unit =
-    Axis.values.foreach { axis =>
-      hcdState.getCmdState(axis).foreach { cmdState =>
-        publishCommandState(axis, cmdState)
-      }
-    }
-
-  /**
-   * Publish CommandStateAxis for a single axis (10 Hz)
-   * Uses keys from CommandStateAxis[A-H]CurrentState
-   * Now reads directly from AxisCmdState fields.
+   * Publish CommandStateAxis for a single axis.
+   *
+   * Published in lockstep with its CurrentStateAxis sibling by the same scan-driven
+   * gate, so a consumer can never pair a fresh position with a stale moving flag.
+   * Uses keys from CommandStateAxis[A-H]CurrentState; reads AxisCmdState directly.
    */
   private def publishCommandState(axis: Axis, cmdState: AxisCmdState): Unit =
     // Get keys and eventKey based on axis letter

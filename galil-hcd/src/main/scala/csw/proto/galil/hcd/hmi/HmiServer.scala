@@ -69,7 +69,10 @@ class HmiServer(
   // Supplier for the latest per-JVM CPU sample, folded into each stateUpdate frame
   // (REQ-2-APS-0621 readout). Deferred (evaluated at push time) so the HCD can pass it
   // before the CpuLoadMonitor field is assigned. Defaults to "no sample".
-  cpuLoad: () => Option[CpuLoadMonitor.Sample] = () => None
+  cpuLoad: () => Option[CpuLoadMonitor.Sample] = () => None,
+  // Per-scan axis position history (ADR-002).  Written by ControllerStatusActor at the
+  // QR scan boundary; this server is a read-only consumer.
+  positionHistory: PositionHistoryBuffer
 )(implicit system: ActorSystem[?]) {
 
   implicit val ec: ExecutionContext = system.executionContext
@@ -96,6 +99,15 @@ class HmiServer(
   // sees at most 4 state publishes/second regardless of QR poll rate or motion state.
   private val wsUpdateInterval: FiniteDuration = 250.millis  // 4Hz
 
+  // Server-global cursor into the position history (ADR-002).  Seeded at the buffer's
+  // current head so the first tick after startup does not dump the whole retained
+  // window into the socket; clients that connect later backfill via GET /api/history.
+  //
+  // The cursor is server-global rather than per-client because the WebSocket is a single
+  // BroadcastHub -- every client sees the same frames.  Per-client cursors would mean
+  // restructuring the hub for no benefit at the scale of one or two engineering clients.
+  @volatile private var lastPushedSampleSeq: Long = positionHistory.nextSequence
+
   private val wsCancellable = system.scheduler.scheduleWithFixedDelay(
     initialDelay = wsUpdateInterval,
     delay = wsUpdateInterval
@@ -106,13 +118,74 @@ class HmiServer(
       .foreach { state =>
         wsPublisher ! stateToJson(state, hcdPrefix, cpuLoad())
       }
+
+    // Position samples ride the SAME 4Hz tick, but each frame carries every sample
+    // recorded since the previous tick -- typically one at the 1Hz standby scan rate and
+    // two or three at the 10Hz action rate.  This is what delivers full scan-rate
+    // fidelity without raising the WebSocket frame rate: raising the push rate to 10Hz
+    // would inflate the full stateUpdate snapshot too, which is a much larger payload
+    // that nothing else on the page needs faster (ADR-002 section 5).
+    val samples = positionHistory.snapshot(lastPushedSampleSeq)
+    if (samples.size > 0) {
+      lastPushedSampleSeq = samples.nextSeq
+      wsPublisher ! positionSamplesToJson(samples, positionHistory.capacity)
+    }
   })(ec)
 
   // Register HmiLogAppender broadcast; the appender is instantiated by the CSW
   // framework before HmiServer exists, so wiring is done here at start time.
   // All HCD log messages (including [GALIL:prefix] controller console lines) will
   // be pushed to connected WebSocket clients as "logLine" JSON messages.
-  private def broadcastLogLine(json: String): Unit = wsPublisher ! json
+  //
+  // Log lines are ALSO retained in a bounded ring so a client that connects (or
+  // reconnects, or is hard-reloaded) gets recent history rather than starting blank.
+  //
+  // Why this matters more than it looks: the HMI's reconnect path deliberately calls
+  // window.location.reload() to clear stale React state after an HCD Restart, and the
+  // page is hand-edited often enough that hard reloads are routine.  Without retention,
+  // every one of those discards the entire log -- including the init sequence emitted
+  // during GalilHcd.initialize(), which happens before any browser can be connected and
+  // was therefore never visible to the HMI at all.  That is usually the most interesting
+  // part of a restart.
+  //
+  // The frames are stored already-encoded: they are broadcast verbatim, so re-encoding
+  // on replay could only introduce a difference between what a live client saw and what
+  // a reconnecting one sees.
+  //
+  // Sized to what the HMI panel can usefully display rather than to what the JVM could
+  // hold.  This buffer exists to survive a reload, not to be a log archive -- the CSW
+  // log files under TMT_LOG_HOME are the durable record, and anything this ring drops is
+  // still there.  Keep it equal to the client's LOG_RETAIN in resources/web/index.html:
+  // retaining more than the panel keeps just means shipping frames that are discarded
+  // on arrival.
+  private val LogRingCapacity = 1000
+
+  private val logRing = new Array[String](LogRingCapacity)
+  private var logRingWrite = 0
+  private var logRingSize  = 0
+  private val logRingLock  = new AnyRef
+
+  private def broadcastLogLine(json: String): Unit = {
+    logRingLock.synchronized {
+      logRing(logRingWrite) = json
+      logRingWrite = (logRingWrite + 1) % LogRingCapacity
+      if (logRingSize < LogRingCapacity) logRingSize += 1
+    }
+    wsPublisher ! json
+  }
+
+  /** Retained log frames, oldest first.  Copied under the lock so a caller can never
+   *  observe the ring mid-rotation. */
+  private def logRingSnapshot(): IndexedSeq[String] = logRingLock.synchronized {
+    val out   = new Array[String](logRingSize)
+    val start = (logRingWrite - logRingSize + LogRingCapacity) % LogRingCapacity
+    var i = 0
+    while (i < logRingSize) {
+      out(i) = logRing((start + i) % LogRingCapacity)
+      i += 1
+    }
+    out.toIndexedSeq
+  }
 
   // ── HTTP Routes ─────────────────────────────────────────────────────
 
@@ -173,6 +246,46 @@ class HmiServer(
       }
     },
 
+    // REST: position history backfill (ADR-002).
+    //
+    // The plot panel calls this once on open to render immediately with whatever the
+    // HCD has retained, then follows the positionSamples WebSocket frames.  It is also
+    // the recovery path after a `gap` frame or a missed reconnect.
+    //
+    // `since` is a sample sequence number, not a timestamp: sequence numbers are exact
+    // and monotonic, whereas a time-based cursor would need tie-breaking whenever two
+    // scans landed in the same millisecond.  Omit it (or pass 0) for the whole window.
+    path("api" / "history") {
+      get {
+        parameterMap { params =>
+          val since = params.get("since").flatMap(s => scala.util.Try(s.toLong).toOption).getOrElse(0L)
+          val snap  = positionHistory.snapshot(since)
+          complete(HttpEntity(ContentTypes.`application/json`,
+            positionSamplesToJson(snap, positionHistory.capacity, msgType = "positionHistory")))
+        }
+      }
+    },
+
+    // REST: position history as CSV, for STB hardware sessions.
+    //
+    // Useful precisely because this data does not survive anywhere else: the archived
+    // path (assembly SystemEvent -> DMS) is throttled to 1Hz, so a downloaded window is
+    // the only dense record of a move that will exist after the buffer wraps.
+    path("api" / "history.csv") {
+      get {
+        parameterMap { params =>
+          val since = params.get("since").flatMap(s => scala.util.Try(s.toLong).toOption).getOrElse(0L)
+          val snap  = positionHistory.snapshot(since)
+          val name  = s"galil-position-${hcdPrefix.toString.replace('.', '-')}.csv"
+          respondWithHeader(
+            headers.`Content-Disposition`(headers.ContentDispositionTypes.attachment, Map("filename" -> name))
+          ) {
+            complete(HttpEntity(ContentTypes.`text/csv(UTF-8)`, positionHistoryCsv(snap)))
+          }
+        }
+      }
+    },
+
     // REST: initiate lifecycle Shutdown of the HCD component.
     // Resolves this component's own supervisor via the location service
     // and sends SupervisorContainerCommonMessages.Shutdown. The supervisor
@@ -221,11 +334,25 @@ class HmiServer(
       }
     },
 
-    // Static files: serve React SPA from resources/web/
+    // Static files: serve the React SPA from resources/web/.
+    //
+    // no-cache/no-store on the page itself.  The HMI is a single hand-edited HTML file
+    // that changes on essentially every build, and a stale or partially-cached copy
+    // presents as a JavaScript syntax error at a line number that matches no version on
+    // disk -- which looks exactly like a code fault and survives an HCD restart, since
+    // the stale bytes live in the browser.  Revalidating a ~100 KB local page costs
+    // nothing next to that diagnosis.
+    //
+    // The vendored libraries below are deliberately NOT covered: they are versioned,
+    // change only when we re-vendor, and are the bulk of the transfer.
     pathEndOrSingleSlash {
-      getFromResource("web/index.html", ContentTypes.`text/html(UTF-8)`)
+      respondWithHeader(headers.`Cache-Control`(
+        headers.CacheDirectives.`no-cache`, headers.CacheDirectives.`no-store`
+      )) {
+        getFromResource("web/index.html", ContentTypes.`text/html(UTF-8)`)
+      }
     },
-    // Serve other static assets (JS, CSS, etc.)
+    // Serve other static assets (vendored JS, etc.)
     getFromResourceDirectory("web")
   )
 
@@ -234,9 +361,24 @@ class HmiServer(
   // Incoming messages from the client are ignored (commands go via REST).
   // Outgoing: broadcast state updates as TextMessage frames.
   private def wsFlow: Flow[Message, Message, Any] = {
+    // Replay the retained log frames to this client before joining the live broadcast.
+    //
+    // Source.fromIterator takes a FACTORY and calls it once per materialization, which is
+    // what makes the snapshot per-connection.  This matters because `routes` is a val, so
+    // wsFlow itself is evaluated exactly once at construction -- a Source built eagerly
+    // here would hand every future client the same (empty, server-startup) snapshot.
+    //
+    // concat rather than merge: history must arrive before live frames, in order.  The
+    // cost is that frames published while the finite backfill drains are not seen by this
+    // client; draining a few thousand pre-encoded strings takes microseconds, and the
+    // alternative (interleaving) would reorder the log, which is worse.
+    val backfill = Source
+      .fromIterator(() => logRingSnapshot().iterator)
+      .map(json => TextMessage.Strict(json): Message)
+
     Flow.fromSinkAndSource(
       Sink.ignore,
-      wsSource.map(json => TextMessage.Strict(json): Message)
+      backfill.concat(wsSource.map(json => TextMessage.Strict(json): Message))
     )
   }
 

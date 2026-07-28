@@ -174,13 +174,20 @@ object ControllerStatusActor:
     commandActor: ActorRef[GalilCommandMessage],
     configuredAxes: Set[Axis],
     standbyPollingRateHz: Double = 1.0,
-    actionPollingRateHz: Double = 10.0
+    actionPollingRateHz: Double = 10.0,
+    // Per-scan position recorder for the HMI engineering plot (ADR-002).  Write-only
+    // from CS's perspective: CS never reads it back, and it can influence neither
+    // attribution nor thread lifecycle, so it does not compromise CS's pure-observer
+    // role under ADR-001.  Optional so tests and any future non-HMI deployment can
+    // omit it entirely.
+    positionHistory: Option[PositionHistoryBuffer] = None
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
         val statusIo: GalilIo = GalilIoTcp(galilConfig.host, galilConfig.port)
         new ControllerStatusActor(context, timers, statusIo, galilConfig, internalState,
-          loggerFactory, standbyPollingRateHz, actionPollingRateHz, commandActor, configuredAxes)
+          loggerFactory, standbyPollingRateHz, actionPollingRateHz, commandActor, configuredAxes,
+          positionHistory = positionHistory)
       }
     }
 
@@ -229,7 +236,12 @@ class ControllerStatusActor(
   // Initial value of embeddedArraysReady.  Production leaves this false (the
   // safe default; see the var below); the test factory defaults it true so
   // unit tests model a controller whose #Init has already dimensioned ae[].
-  initialEmbeddedArraysReady: Boolean = false
+  initialEmbeddedArraysReady: Boolean = false,
+  // Per-scan position recorder for the HMI engineering plot (ADR-002).  Write-only
+  // from this actor's perspective and consulted nowhere in the attribution path, so
+  // it does not compromise CS's pure-observer role under ADR-001.  Defaults to None
+  // so the test factory and any non-HMI deployment simply record nothing.
+  positionHistory: Option[PositionHistoryBuffer] = None
 ) extends AbstractBehavior[ControllerStatusActor.Command](context):
 
   import ControllerStatusActor._
@@ -248,6 +260,13 @@ class ControllerStatusActor(
   private var pollingRateHz: Double = standbyPollingRateHz  // Start at standby
   private var lastPollTime: Option[Long] = None
   private var errorCount: Int = 0
+
+  // Reusable per-scan row for the ADR-002 position recorder, indexed by Axis.index.
+  // A field rather than a per-scan allocation because this is written on the QR scan
+  // thread; PositionHistoryBuffer.record copies the values out, so reuse is safe.
+  // Sized to the maximum axis count so a controller's configured axis set can change
+  // without touching this.
+  private val positionScratch: Array[Double] = Array.fill(PositionHistoryBuffer.AxisCount)(Double.NaN)
 
   // True once #Init has dimensioned the controller's embedded arrays (ae[] et
   // al.).  Gates the per-scan ae[] read so it is never issued against a
@@ -644,7 +663,11 @@ class ControllerStatusActor(
    */
   private def handleQRResponse(dataRecord: DataRecord): Behavior[Command] =
     try
-      lastPollTime = Some(System.currentTimeMillis())
+      // One wall-clock stamp for the whole scan.  Shared by lastPollTime and by the
+      // ADR-002 position sample so the plot's time base is exactly the poll time the
+      // HMI already reports, rather than a second, slightly later clock read.
+      val scanTimeMs = System.currentTimeMillis()
+      lastPollTime = Some(scanTimeMs)
       errorCount = 0  // Reset error count on success
 
       log.debug(s"Received QR data, sample: ${dataRecord.generalState.sampleNumber}")
@@ -725,12 +748,24 @@ class ControllerStatusActor(
 
       // Step 5: HCD-level + per-axis updates from QR. Before ScanObservations
       // so the watcher's inPosition/moving picture is fresh at attribution.
-      updateHcdState(dataRecord.generalState, activeAxisChars)
+      updateHcdState(dataRecord.generalState, activeAxisChars, scanTimeMs)
+      // Reset the ADR-002 scratch row to "absent" before the loop; axes not present in
+      // this scan stay NaN, which the encoders render as null/empty rather than 0.
+      java.util.Arrays.fill(positionScratch, Double.NaN)
       activeAxisChars
         .zip(dataRecord.axisStatuses)
         .foreach { case (axisChar, axisStatus) =>
-          updateAxisState(axisChar, axisStatus)
+          // updateAxisState returns the position it pushed to IS (stepper vs servo
+          // branch) so the recorder cannot drift into a second definition of what
+          // "position" means for an axis.
+          val pos = updateAxisState(axisChar, axisStatus)
+          val idx = Axis.fromChar(axisChar).index
+          if (idx >= 0 && idx < positionScratch.length) positionScratch(idx) = pos
         }
+      // One sample per scan for all axes under the single scan timestamp (ADR-002).
+      // O(8), allocation free, brief lock -- this is the QR scan thread.  positionScratch
+      // is reused every scan; record() copies the values out.
+      positionHistory.foreach(_.record(scanTimeMs, positionScratch))
 
       // Step 6: ship the complete observation set to IS in one message.
       // We send the SYNTHESIZED byte (built from per-thread _XQ<n> queries
@@ -1142,7 +1177,15 @@ class ControllerStatusActor(
    * (built in handleQRResponse); attribution happens in IS (ADR-001). This
    * method only publishes the bulk per-scan status updates.
    */
-  private def updateHcdState(generalState: GeneralState, activeAxisChars: Seq[Char]): Unit =
+  private def updateHcdState(
+    generalState: GeneralState,
+    activeAxisChars: Seq[Char],
+    // The scan's own timestamp, captured once in handleQRResponse.  Passed in rather
+    // than read again here so lastPollingTime is genuinely the instant this data was
+    // acquired -- it is now published as CurrentStateAxis.sampleTime, so a second
+    // clock read would put a small, invisible skew between the value and its label.
+    scanTimeMs: Long
+  ): Unit =
     val threadStatusByte = generalState.threadStatus & 0xFF
 
     // inputs/outputs: 10 bytes in QR DataRecord.
@@ -1162,7 +1205,7 @@ class ControllerStatusActor(
       "digitalInputs"        -> bytesToBits(generalState.inputs,  16),
       "digitalOutputs"       -> bytesToBits(generalState.outputs, 16),
       "threadStatus"         -> threadStatusByte,
-      "lastPollingTime"      -> Instant.ofEpochMilli(System.currentTimeMillis()),
+      "lastPollingTime"      -> Instant.ofEpochMilli(scanTimeMs),
       "currentPollingRateHz" -> pollingRateHz
     )
 
@@ -1172,8 +1215,12 @@ class ControllerStatusActor(
    * Update axis state from GalilAxisStatus.
    * Sends operational state (position, velocity, switches) to AxisState
    * and command-relevant state (moving, stopCode) to AxisCmdState.
+   *
+   * Returns the position value it published, in encoder counts -- the stepper/servo
+   * branch below is the single definition of "position" for an axis, and the ADR-002
+   * history recorder consumes this return rather than recomputing it.
    */
-  private def updateAxisState(axisChar: Char, axisStatus: GalilAxisStatus): Unit =
+  private def updateAxisState(axisChar: Char, axisStatus: GalilAxisStatus): Double =
     // Map axis character to Axis enum
     val axis = Axis.fromChar(axisChar)
     
@@ -1220,7 +1267,10 @@ class ControllerStatusActor(
     )
 
     internalState ! InternalStateActor.UpdateAxisCmdState(axis, cmdUpdates, context.system.ignoreRef)
-  
+
+    // Yield the published position for the ADR-002 history recorder (see scaladoc).
+    position
+
   /**
    * Parsed status data from Galil QR DataRecord axis status WORD (2 bytes).
    * Per DMC-41x3 User Manual, Data Record section:

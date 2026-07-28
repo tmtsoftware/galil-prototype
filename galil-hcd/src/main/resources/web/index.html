@@ -18,19 +18,37 @@
 <body>
 <div id="root"><p style="color:#6B7280;padding:20px;font-family:monospace">Loading GalilMotion HMI...</p></div>
 
-<!-- React 18 from CDN -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<!-- Recharts is optional — chart panel gracefully hidden if CDN unavailable -->
-<script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<!-- Vendored UMD builds, served by the HCD from resources/web/vendor/ (ADR-002).
+     Previously loaded from unpkg.com.  Vendored because this console must run on
+     observatory networks with no internet, and because a CDN dependency turns a
+     wiring error into silence: prop-types was missing for the entire life of the
+     position chart and the only symptom was that the chart never appeared.
+
+     LOAD ORDER IS LOAD-BEARING.  The recharts 2.x UMD build declares prop-types as
+     an EXTERNAL, not a bundled dependency -- its factory tail is
+     `t.Recharts = e(t.React, t.PropTypes, t.ReactDOM)`.  With no global PropTypes
+     the factory throws inside Animate.js and the Recharts global is never assigned.
+     react, react-dom and prop-types must all precede Recharts.
+
+     Versions: react 18.3.1, react-dom 18.3.1, prop-types 15.8.1, recharts 2.12.7. -->
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/prop-types.min.js"></script>
+<script src="vendor/Recharts.js"></script>
 
 <script>
 'use strict';
 const { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } = React;
-// Recharts may not load (CDN unavailable, air-gapped network, etc.)
-const hasRecharts = typeof Recharts !== 'undefined';
-const RC = hasRecharts ? Recharts : {};
-const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = RC;
+// Recharts is now vendored and served by the HCD, so its absence is a deployment
+// fault, not an environment condition.  The old `hasRecharts` probe silently
+// disabled the chart when the library failed to load; it hid a missing prop-types
+// dependency indefinitely.  Fail loudly instead -- a blank panel with a reason beats
+// a panel that quietly does not exist.
+const rechartsError = (typeof Recharts === 'undefined')
+  ? 'Recharts failed to load from vendor/Recharts.js (check load order: react, react-dom, prop-types must precede it)'
+  : null;
+const RC = rechartsError ? {} : Recharts;
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = RC;
 const e = React.createElement;
 
 // ── Configuration ──
@@ -47,11 +65,80 @@ const STATE_COLORS = {
 const API_BASE = window.location.origin;
 const WS_URL = `ws://${window.location.host}/ws/state`;
 
+// ── Position history accumulation (ADR-002) ──
+//
+// The HCD records one sample per QR scan into a ring buffer and ships everything
+// recorded since the previous push on the EXISTING 4Hz WebSocket tick.  The client
+// therefore sees full scan-rate fidelity -- 1Hz at standby, 10Hz during motion --
+// without the socket running at 10Hz.  Do not "simplify" this by sampling `state`
+// on a browser timer: that is what the previous chart did, and it can only ever
+// produce a decimated, jittered copy of data the HCD already holds at full rate.
+//
+// Columns stay index-aligned with the shared time array.  An axis absent from a
+// scan is null, never 0, so an unconfigured axis does not draw a line at the origin.
+const HISTORY_CAP_FALLBACK = 3000;
+
+// Mirrors HmiServer.LogRingCapacity, which the HCD replays to a connecting client.
+// Sized to what this panel can usefully show: the log list re-renders on every arriving
+// line, so retention beyond a panel-sized window buys sluggishness rather than insight.
+// The durable record is the CSW log files under TMT_LOG_HOME; this buffer only has to
+// survive a page reload. Keep the two constants equal.
+const LOG_RETAIN = 1000;
+
+function emptyHistory() {
+  return {t: [], axes: {}, nextSeq: 0, gap: false, capacity: 0};
+}
+
+function appendPositionSamples(buf, msg) {
+  const t = msg.t || [];
+  if (!t.length) return false;
+  const first = msg.firstSeq, next = msg.nextSeq;
+  if (buf.t.length) {
+    if (next <= buf.nextSeq) return false;        // wholly covered already
+    if (first > buf.nextSeq) buf.gap = true;      // samples lost between frames
+  }
+  // Trim any overlap instead of duplicating samples onto the trace.
+  const skip = buf.t.length ? Math.max(0, Math.min(t.length, buf.nextSeq - first)) : 0;
+  const before = buf.t.length;
+  for (let i = skip; i < t.length; i++) buf.t.push(t[i]);
+
+  const incoming = msg.axes || {};
+  const keys = new Set(Object.keys(buf.axes).concat(Object.keys(incoming)));
+  keys.forEach(k => {
+    let col = buf.axes[k];
+    // An axis seen for the first time is back-filled with nulls so every column
+    // stays the same length as `t` and index i always means the same instant.
+    if (!col) { col = new Array(before).fill(null); buf.axes[k] = col; }
+    const srcCol = incoming[k];
+    for (let i = skip; i < t.length; i++) col.push(srcCol ? srcCol[i] : null);
+  });
+
+  buf.nextSeq = next;
+  if (msg.gap) buf.gap = true;
+  if (msg.capacity) buf.capacity = msg.capacity;
+
+  // Mirror the server's retention so the client cannot grow without bound.
+  const cap = buf.capacity || HISTORY_CAP_FALLBACK;
+  const over = buf.t.length - cap;
+  if (over > 0) {
+    buf.t.splice(0, over);
+    Object.keys(buf.axes).forEach(k => buf.axes[k].splice(0, over));
+  }
+  return true;
+}
+
 // ── WebSocket hook ──
 function useHmiConnection() {
   const [state, setState] = useState(null);
   const [connected, setConnected] = useState(false);
   const [logLines, setLogLines] = useState([]);
+  // Position history lives in a ref: frames arriving while the plot tab is closed cost
+  // nothing but an array push.  `posTick` is bumped only while the plot is mounted, so
+  // the 4Hz sample frames do not force a whole-app re-render the rest of the time.
+  const posRef = useRef(emptyHistory());
+  const [posTick, setPosTick] = useState(0);
+  const posLiveRef = useRef(false);
+  const setPlotLive = useCallback((on) => { posLiveRef.current = on; }, []);
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
   // Tracks whether we've ever observed a WS close.  Used to distinguish the
@@ -167,10 +254,16 @@ function useHmiConnection() {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'stateUpdate') {
             setState(msg);
+          } else if (msg.type === 'positionSamples') {
+            if (appendPositionSamples(posRef.current, msg) && posLiveRef.current) {
+              setPosTick(n => n + 1);
+            }
           } else if (msg.type === 'logLine') {
             setLogLines(prev => {
               const next = [...prev, msg];
-              return next.length > 500 ? next.slice(-500) : next;
+              // Matches HmiServer.LogRingCapacity, so a reconnecting client keeps
+              // exactly what the HCD was willing to replay to it.
+              return next.length > LOG_RETAIN ? next.slice(-LOG_RETAIN) : next;
             });
           }
         } catch(e) { console.warn('Bad WS frame', e); }
@@ -201,6 +294,14 @@ function useHmiConnection() {
     fetch(`${API_BASE}/api/status`)
       .then(r => r.json()).then(setState)
       .catch(e => console.warn('Initial status fetch failed', e));
+    // Backfill the retained position window before the first WebSocket frame, so the
+    // plot has history the moment it is opened rather than starting from empty.  This
+    // is the whole point of the HCD-side buffer: the browser cannot reconstruct what
+    // happened before the page loaded, and the reconnect path reloads the page.
+    fetch(`${API_BASE}/api/history`)
+      .then(r => r.json())
+      .then(h => { if (appendPositionSamples(posRef.current, h)) setPosTick(n => n + 1); })
+      .catch(e => console.warn('Position history backfill failed', e));
     connect();
     return () => {
       clearTimeout(reconnectRef.current);
@@ -225,7 +326,7 @@ function useHmiConnection() {
     return p;
   }, []);
 
-  return { state, connected, submitCommand, logLines };
+  return { state, connected, submitCommand, logLines, posRef, posTick, setPlotLive };
 }
 
 // ── Components ──
@@ -1189,7 +1290,213 @@ function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelec
 }
 
 
-function HcdLogPanel({lines, panelHeight, bayExpanded}) {
+// Tab selector shared by the two bottom-panel views.  The plot deliberately occupies
+// the same real estate as the log rather than adding a third band: both are things you
+// consult while watching a mechanism, and screen height is the scarce resource on this
+// page.  Rendered by both panels in the same header position so switching does not
+// shift the layout.
+function PanelTabs({tab, onTab}) {
+  const mk = (id, label) => e('span', {
+    key: id,
+    onClick: () => onTab(id),
+    style: {cursor:'pointer', userSelect:'none', fontSize:9.5, fontWeight:700,
+      letterSpacing:1.2, padding:'1px 6px', borderRadius:3,
+      color: tab === id ? '#F9FAFB' : '#4B5563',
+      backgroundColor: tab === id ? '#1F2937' : 'transparent'}
+  }, label);
+  return e('div', {style:{display:'flex', alignItems:'center', gap:2}},
+    mk('log', 'HCD LOG'), mk('plot', 'PLOT'));
+}
+
+// One stacked channel: label strip plus an independently autoscaled chart sharing the
+// caller's X domain.  Stacked rather than overlaid because the axes on one controller
+// differ in scale by orders of magnitude -- a stage at ~200 000 counts and a wheel at
+// ~4 000 counts cannot share a Y axis without the wheel becoming a flat line at the
+// bottom.  Each channel keeps its own absolute counts; only the time axis is shared.
+function PlotChannel({axis, times, col, tEnd, xDomain, height}) {
+  const color = CHART_COLORS[axis] || '#9CA3AF';
+  const data = [];
+  let lo = Infinity, hi = -Infinity, n = 0;
+  for (let i = 0; i < times.length; i++) {
+    const v = (col && col[i] != null) ? col[i] : null;
+    data.push({x: (times[i] - tEnd) / 1000, v});
+    if (v != null) { n++; if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  // A dead-flat trace autoscales to a zero-height domain and Recharts draws it on the
+  // frame edge; pad so a stationary axis reads as a line through the middle.
+  const pad = (hi - lo) < 1e-9 ? Math.max(1, Math.abs(hi) * 1e-6) : (hi - lo) * 0.08;
+  const domain = n ? [lo - pad, hi + pad] : [0, 1];
+  const fmt = (v) => Math.abs(v) >= 1e5 ? v.toExponential(2) : v.toFixed(Math.abs(v) < 10 ? 2 : 0);
+
+  return e('div', {style:{display:'flex', alignItems:'stretch', gap:6, marginBottom:2}},
+    e('div', {style:{width:78, flexShrink:0, display:'flex', flexDirection:'column',
+        justifyContent:'center', paddingLeft:2}},
+      e('div', {style:{display:'flex', alignItems:'center', gap:5}},
+        e('span', {style:{width:7, height:7, borderRadius:2, backgroundColor:color, flexShrink:0}}),
+        e('span', {style:{color:'#D1D5DB', fontSize:11, fontWeight:700}}, axis)),
+      e('div', {style:{color:'#4B5563', fontSize:8.5, marginTop:2}},
+        n ? `${fmt(lo)} … ${fmt(hi)}` : 'no data'),
+      e('div', {style:{color:'#374151', fontSize:8, marginTop:1}}, 'counts')),
+    e('div', {style:{flex:1, minWidth:0, height}},
+      e(ResponsiveContainer, {width:'100%', height:'100%'},
+        e(LineChart, {data, margin:{top:6, right:8, left:2, bottom:2}},
+          e(CartesianGrid, {strokeDasharray:'3 3', stroke:'#1F293788'}),
+          e(XAxis, {dataKey:'x', type:'number', domain:xDomain,
+            tick:{fontSize:8.5, fill:'#374151'}, axisLine:{stroke:'#1F2937'},
+            tickLine:false, tickFormatter:(v)=>`${v.toFixed(0)}s`, height:14}),
+          e(YAxis, {domain, tick:{fontSize:8.5, fill:'#4B5563'}, axisLine:{stroke:'#1F2937'},
+            tickLine:false, width:62, tickFormatter:fmt}),
+          e(Tooltip, {
+            contentStyle:{backgroundColor:'#1F2937', border:'1px solid #374151',
+              fontSize:10, fontFamily:'monospace'},
+            labelFormatter:(v)=>`t ${Number(v).toFixed(2)} s`,
+            formatter:(v)=>[v == null ? '—' : v, axis]}),
+          // connectNulls false: a gap in acquisition must read as a gap, not as a
+          // straight line interpolated across data we never had.
+          e(Line, {type:'linear', dataKey:'v', stroke:color, dot:false, strokeWidth:1.4,
+            isAnimationActive:false, connectNulls:false})))));
+}
+
+// Position plot over the HCD-side per-scan history (ADR-002).
+// View state (axis selection, freeze) is owned by GalilHMI and passed in, NOT held
+// locally: this panel unmounts whenever the bottom row switches to the log, and local
+// state would die with it -- so every trip to the log and back would silently reset the
+// axis selection and drop a freeze the operator had deliberately taken.
+function PlotPanel({buf, panelHeight, bayExpanded, tab, onTab, setPlotLive,
+                    selected, setSelected, frozenSnap, setFrozenSnap}) {
+  const frozen = !!frozenSnap;
+
+  // Tell the connection hook to start bumping its render tick while this panel is
+  // mounted, and to stop when it is not.
+  useEffect(() => { setPlotLive(true); return () => setPlotLive(false); }, [setPlotLive]);
+
+  // The frozen view is a deep-enough copy taken at click time, not a flag: the live
+  // buffer keeps being appended to and trimmed underneath us, so holding a reference
+  // would let the "frozen" trace shift as the ring wrapped.
+  const toggleFreeze = useCallback(() => {
+    setFrozenSnap(prev => {
+      if (prev) return null;
+      const axes = {};
+      Object.keys(buf.axes).forEach(k => { axes[k] = buf.axes[k].slice(); });
+      return {t: buf.t.slice(), axes, gap: buf.gap};
+    });
+  }, [buf, setFrozenSnap]);
+
+  if (rechartsError) {
+    return e('div', {style:{flex:1, minWidth:0, height: bayExpanded ? panelHeight : 500,
+        backgroundColor:'#111827', border:'1px solid #7F1D1D', borderRadius:8,
+        padding:'8px 12px', fontFamily:'var(--mono)', fontSize:11}},
+      e(PanelTabs, {tab, onTab}),
+      e('div', {style:{color:'#FCA5A5', marginTop:10, fontSize:10.5}}, rechartsError));
+  }
+
+  const view = frozenSnap || buf;
+  const times = view.t;
+  const available = Object.keys(view.axes).sort();
+  const shown = available.filter(a => selected === null || selected.includes(a));
+
+  const tEnd = times.length ? times[times.length - 1] : 0;
+  const xMin = times.length ? (times[0] - tEnd) / 1000 : -1;
+  const xDomain = [xMin, 0];
+  const spanMs = times.length > 1 ? times[times.length - 1] - times[0] : 0;
+  // Effective rate over the retained window.  Worth showing because the HCD's polling
+  // is adaptive (1Hz standby / 10Hz action), so the window's DURATION varies with what
+  // the mechanism has been doing -- the buffer is bounded by sample count, not time.
+  const rateHz = spanMs > 0 ? ((times.length - 1) * 1000 / spanMs) : 0;
+
+  // Height policy: every ENABLED channel must be visible without scrolling -- seeing
+  // all axes at once is the entire reason for stacking them -- and the channels share
+  // whatever height there is rather than each taking a fixed slice.  So the panel is
+  // sized from its content, not the other way round:
+  //
+  //   1. start from a budget (the log panel's default height, or the ConfigBay's
+  //      measured height when the bay is expanded, so the bottom row stays aligned);
+  //   2. divide it among the enabled channels, clamped to a readable band;
+  //   3. set the panel height to exactly what those channels need.
+  //
+  // Consequences, both intentional: with all 8 axes enabled the panel grows slightly
+  // past the base height rather than clipping the last channel, and with only one or
+  // two enabled it shrinks to fit instead of leaving dead space below the traces.
+  const CH_MIN = 56, CH_MAX = 190, CH_GAP = 2;
+  const CHROME = 58;    // header row + footer line + vertical padding
+  const BASE_H = 500;   // matches HcdLogPanel's default so tab switching barely shifts
+  const nCh = shown.length;
+  const budget = Math.max(BASE_H, bayExpanded ? panelHeight : 0) - CHROME;
+  const chH = nCh ? Math.max(CH_MIN, Math.min(CH_MAX, Math.floor(budget / nCh) - CH_GAP)) : 0;
+  const contentH = nCh ? CHROME + nCh * (chH + CH_GAP) : 200;
+  const outerH = Math.max(contentH, bayExpanded ? panelHeight : 0, 200);
+
+  const chip = (a) => {
+    const on = shown.includes(a);
+    return e('span', {key:a,
+      onClick: () => setSelected(prev => {
+        const base = prev === null ? available.slice() : prev.slice();
+        const i = base.indexOf(a);
+        if (i >= 0) base.splice(i, 1); else base.push(a);
+        return base;
+      }),
+      style:{cursor:'pointer', userSelect:'none', fontSize:9.5, fontWeight:700,
+        padding:'1px 7px', borderRadius:3, marginRight:3,
+        border:`1px solid ${on ? (CHART_COLORS[a]||'#4B5563') : '#1F2937'}`,
+        color: on ? (CHART_COLORS[a]||'#9CA3AF') : '#4B5563',
+        backgroundColor: on ? '#1F2937' : 'transparent'}}, a);
+  };
+
+  return e('div', {style:{display:'flex', flexDirection:'column', flex:1, minWidth:0,
+      height: outerH, backgroundColor:'#111827', border:'1px solid #1F2937',
+      borderRadius:8, padding:'8px 12px', fontFamily:'var(--mono)', fontSize:11}},
+
+    // Header: tabs on the left (same position as the log panel), controls on the right.
+    e('div', {style:{display:'flex', justifyContent:'space-between', alignItems:'center',
+        marginBottom:4, flexShrink:0}},
+      e('div', {style:{display:'flex', alignItems:'center', gap:8}},
+        e(PanelTabs, {tab, onTab}),
+        e('span', {style:{fontSize:9, padding:'1px 5px', borderRadius:3,
+            backgroundColor:'#1F2937', color:'#4B5563'}},
+          times.length
+            ? `${(spanMs/1000).toFixed(1)}s · ${times.length} samples · ${rateHz.toFixed(1)} Hz`
+            : 'no samples yet'),
+        view.gap && e('span', {
+            title:'Samples were lost between frames or evicted from the HCD ring buffer before this client read them. The trace is discontinuous.',
+            style:{fontSize:9, padding:'1px 5px', borderRadius:3,
+              backgroundColor:'#78350F', color:'#FCD34D', fontWeight:700}}, 'GAP')),
+      e('div', {style:{display:'flex', alignItems:'center', gap:6}},
+        e('span', {style:{color:'#374151', fontSize:9.5}}, '│'),
+        ...available.map(chip),
+        e('span', {style:{color:'#374151', fontSize:9.5}}, '│'),
+        e('button', {
+            onClick: toggleFreeze,
+            title:'Freeze the view for reading a transient. The HCD keeps recording; unfreezing jumps back to live.',
+            style:{fontSize:9.5, padding:'2px 8px', borderRadius:10, fontWeight:700,
+              cursor:'pointer', fontFamily:'var(--mono)',
+              border:`1px solid ${frozen ? '#92400E' : '#374151'}`,
+              backgroundColor: frozen ? '#78350F' : '#1F2937',
+              color: frozen ? '#FCD34D' : '#6B7280'}},
+          frozen ? 'Frozen ✓' : 'Freeze'),
+        e('a', {href:`${API_BASE}/api/history.csv`, download:true,
+            title:'Download the HCD\'s full retained window as CSV.',
+            style:{fontSize:9.5, padding:'2px 8px', borderRadius:10, fontWeight:700,
+              fontFamily:'var(--mono)', textDecoration:'none',
+              border:'1px solid #374151', backgroundColor:'#1F2937', color:'#6B7280'}},
+          'CSV'))),
+
+    // Stacked channels.
+    e('div', {style:{flex:1, minHeight:0, overflowY:'auto'}},
+      // Sized to fit by the height policy above, so this should never actually scroll;
+      // overflowY stays as a safety net rather than a layout mechanism.
+      shown.length === 0
+        ? e('div', {style:{color:'#4B5563', fontSize:10.5, padding:8}},
+            available.length ? 'No axes selected.' : 'Waiting for the first scan samples…')
+        : shown.map(a => e(PlotChannel, {key:a, axis:a, times, col:view.axes[a],
+            tEnd, xDomain, height:chH}))),
+
+    e('div', {style:{flexShrink:0, marginTop:2, color:'#374151', fontSize:8.5}},
+      frozen
+        ? 'Frozen — the HCD is still recording; unfreeze to rejoin the live trace.'
+        : 'Live · positions sampled once per QR scan (adaptive 1 Hz standby / 10 Hz action)'));
+}
+
+function HcdLogPanel({lines, panelHeight, bayExpanded, tab, onTab}) {
   const containerRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [minLevel, setMinLevel] = useState('INFO');
@@ -1253,14 +1560,16 @@ function HcdLogPanel({lines, panelHeight, bayExpanded}) {
     // Header row — always visible; click label area to toggle
     e('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',
         marginBottom: minimized ? 0 : 4, flexShrink:0}},
-      // Left: label + line count badge — click to minimize/expand
-      e('div', {style:{display:'flex',alignItems:'center',gap:6,cursor:'pointer'},
-          onClick: () => setMinimized(v => !v)},
-        e('span', {style:{color:'#6B7280',fontSize:9.5,fontWeight:700,letterSpacing:1.2}}, 'HCD LOG'),
+      // Left: view tabs + line count badge.  Minimize is now on the chevron alone --
+      // the label became a tab target, so a whole-group click would swallow tab clicks.
+      e('div', {style:{display:'flex',alignItems:'center',gap:6}},
+        e(PanelTabs, {tab, onTab}),
         e('span', {style:{fontSize:9,padding:'1px 5px',borderRadius:3,
             backgroundColor:'#1F2937',color:'#4B5563'}},
           `${visible.length} lines`),
-        e('span', {style:{fontSize:9,color:'#374151', userSelect:'none'}},
+        e('span', {style:{fontSize:9,color:'#374151', userSelect:'none', cursor:'pointer'},
+            title: minimized ? 'Expand log' : 'Minimize log',
+            onClick: () => setMinimized(v => !v)},
           minimized ? '▲' : '▼')
       ),
       // Right: controls — always visible so log level can be changed while minimized
@@ -1308,21 +1617,6 @@ function HcdLogPanel({lines, panelHeight, bayExpanded}) {
       })
     )
   );
-}
-
-function PositionChart({history,activeAxes}) {
-  if (!hasRecharts || history.length < 3) return null;
-  return e('div',{style:{backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px'}},
-    e('div',{style:{color:'#6B7280',fontSize:9.5,fontWeight:700,marginBottom:4,letterSpacing:1.2,fontFamily:'var(--mono)'}},'POSITION HISTORY'),
-    e(ResponsiveContainer,{width:'100%',height:150},
-      e(LineChart,{data:history,margin:{top:2,right:6,left:6,bottom:0}},
-        e(CartesianGrid,{strokeDasharray:'3 3',stroke:'#1F293788'}),
-        e(XAxis,{dataKey:'t',tick:{fontSize:9,fill:'#374151'},axisLine:{stroke:'#1F2937'},tickLine:false}),
-        e(YAxis,{tick:{fontSize:9,fill:'#4B5563'},axisLine:{stroke:'#1F2937'},tickLine:false,width:48}),
-        e(Tooltip,{contentStyle:{backgroundColor:'#1F2937',border:'1px solid #374151',fontSize:10,fontFamily:'monospace'}}),
-        e(Legend,{wrapperStyle:{fontSize:10,fontFamily:'monospace'}}),
-        ...activeAxes.map(a =>
-          e(Line,{key:a,type:'monotone',dataKey:a,stroke:CHART_COLORS[a],dot:false,strokeWidth:1.5,isAnimationActive:false})))));
 }
 
 // Lifecycle modal — used for both Shutdown and Restart confirmations.
@@ -1453,8 +1747,16 @@ function ErrorBanner({hcdState,controllerErrorMsg,initializingReason,onCommand})
 
 // ── Main App ──
 function GalilHMI() {
-  const {state, connected, submitCommand, logLines} = useHmiConnection();
-  const [history, setHistory] = useState([]);
+  const {state, connected, submitCommand, logLines, posRef, posTick, setPlotLive} = useHmiConnection();
+  // Which view occupies the bottom-left panel: the position plot or the HCD log.
+  // Defaults to the plot -- it is the view you want up while driving a mechanism, and
+  // the log is one click away.
+  const [bottomTab, setBottomTab] = useState('plot');
+  // Plot view state lives here rather than in PlotPanel so it survives the panel being
+  // unmounted on every switch to the log tab.  null selection = every axis with data;
+  // null snapshot = live.
+  const [plotAxes, setPlotAxes] = useState(null);
+  const [plotFrozenSnap, setPlotFrozenSnap] = useState(null);
   const [compact, setCompact] = useState(false);
   // Lifecycle (Shutdown / Restart) modal state.  `kind` is 'shutdown' or 'restart'
   // when the modal is open, null when closed.  busy/error apply to the in-flight
@@ -1476,7 +1778,6 @@ function GalilHMI() {
   // pass into HcdLogPanel as a definite cap on its column-direction size.
   const bayRef = useRef(null);
   const [panelHeight, setPanelHeight] = useState(300);
-  const tickRef = useRef(0);
 
   // Open the modal in the requested mode, clearing any prior error from a
   // previous open.  Wrapped in useCallback because it's used as a button
@@ -1526,20 +1827,6 @@ function GalilHMI() {
   const allAxes = state?.axes ? Object.keys(state.axes).sort() : [];
   const isActive = (a) => activeAxes.includes(a);
 
-  // Record position history at 2Hz
-  useEffect(() => {
-    const iv = setInterval(() => {
-      if (!state || !state.axes) return;
-      tickRef.current++;
-      setHistory(prev => {
-        const entry = {t: tickRef.current};
-        activeAxes.forEach(a => { entry[a] = state.axes[a]?.position || 0; });
-        const next = [...prev, entry];
-        return next.length > 120 ? next.slice(-120) : next;
-      });
-    }, 500);
-    return () => clearInterval(iv);
-  }, [state, activeAxes.join(',')]);
 
   const handleCommand = useCallback((commandName, params) => {
     return submitCommand(commandName, params);
@@ -1669,9 +1956,6 @@ function GalilHMI() {
       ...allAxes.map(a =>
         e(AxisCard,{key:a, axis:a, axState:state?.axes?.[a], cmdSt:state?.cmdState?.[a], onCommand:handleCommand, active:isActive(a), compact}))),
 
-    // Position chart (fixed height)
-    e('div',{style:{marginBottom:10,flexShrink:0}}, e(PositionChart,{history,activeAxes})),
-
     // I/O panel — collapsed by default, full width
     e(IOPanel,{state, onCommand:handleCommand}),
 
@@ -1679,7 +1963,17 @@ function GalilHMI() {
     // ConfigBay sizes to its natural content; its height is measured into
     // panelHeight and passed to HcdLogPanel so the two stay aligned.
     e('div',{style:{display:'flex',alignItems:'stretch',flexShrink:0,minHeight:300}},
-      e(HcdLogPanel,{lines:logLines, panelHeight, bayExpanded:configExpanded}),
+      bottomTab === 'plot'
+        // No `key` keyed on posTick here: that would remount the panel on every sample
+        // frame and wipe freeze state and axis selection.  PlotPanel is not memoized, so
+        // the posTick state change re-renders this component and the panel along with it,
+        // reading the latest contents of the (stable) posRef buffer.
+        ? e(PlotPanel,{buf:posRef.current, panelHeight, bayExpanded:configExpanded,
+            tab:bottomTab, onTab:setBottomTab, setPlotLive,
+            selected:plotAxes, setSelected:setPlotAxes,
+            frozenSnap:plotFrozenSnap, setFrozenSnap:setPlotFrozenSnap})
+        : e(HcdLogPanel,{lines:logLines, panelHeight, bayExpanded:configExpanded,
+            tab:bottomTab, onTab:setBottomTab}),
       e(ConfigBay,{state, activeAxes, expanded:configExpanded,
         onToggle:toggleConfigExpanded,
         selectedAxis:selectedConfigAxis,

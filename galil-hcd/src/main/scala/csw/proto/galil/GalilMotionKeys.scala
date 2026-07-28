@@ -103,6 +103,9 @@ object GalilMotionKeys {
       /** Error message for axis A, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
+
     }
 
     /** Status update for axis B including position, velocity, operational state, and error details. */
@@ -139,6 +142,9 @@ object GalilMotionKeys {
 
       /** Error message for axis B, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
+
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
 
     }
 
@@ -177,6 +183,9 @@ object GalilMotionKeys {
       /** Error message for axis C, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
+
     }
 
     /** Status update for axis D including position, velocity, operational state, and error details. */
@@ -213,6 +222,9 @@ object GalilMotionKeys {
 
       /** Error message for axis D, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
+
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
 
     }
 
@@ -251,6 +263,9 @@ object GalilMotionKeys {
       /** Error message for axis E, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
+
     }
 
     /** Status update for axis F including position, velocity, operational state, and error details. */
@@ -287,6 +302,9 @@ object GalilMotionKeys {
 
       /** Error message for axis F, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
+
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
 
     }
 
@@ -325,6 +343,9 @@ object GalilMotionKeys {
       /** Error message for axis G, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
 
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
+
     }
 
     /** Status update for axis H including position, velocity, operational state, and error details. */
@@ -361,6 +382,9 @@ object GalilMotionKeys {
 
       /** Error message for axis H, if any. */
       val axisErrorMsgKey: Key[String] = StringKey.make("axisErrorMsg")
+
+      /** Absolute TAI time at which the axis data was read. */
+      val sampleTimeKey: Key[TAITime] = TAITimeKey.make("sampleTime")
 
     }
 
