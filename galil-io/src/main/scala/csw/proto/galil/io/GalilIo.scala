@@ -370,6 +370,44 @@ object GalilIo {
     if (current.nonEmpty) chunks += current.toString
     chunks.toSeq
   }
+
+  /**
+   * Split the operands of a compound `MG` read across as many command lines as the
+   * controller's line buffer requires, returning ready-to-send strings ("MG a,b,c").
+   * Operand order is preserved across chunks, so a caller that concatenates the reply
+   * tokens receives them in request order.
+   *
+   * Distinct from chunkCompound: that packs independent sub-commands joined with ';'
+   * (each answered by its own ':'), whereas this packs the comma-separated arguments of
+   * a SINGLE MG, whose reply is one line of space-separated values.
+   *
+   * A compound MG over eight axes is not automatically within the limit. At nine
+   * characters per operand `MG whlpos[0],...,whlpos[7]` is 82 characters, so `send`
+   * rejected it before writing and the achieved wheel-slot readback never happened on
+   * any 8-axis configuration; the same arithmetic applies to `MG _PVx,_BTx` over eight
+   * tracking axes. Callers must chunk rather than assume.
+   *
+   * An operand too long to share a line is returned as its own chunk, which `send` then
+   * rejects — surfacing which operand is at fault rather than truncating the read.
+   *
+   * Empty input → empty output (no round trip).
+   */
+  def chunkMgOperands(operands: Seq[String]): Seq[String] = {
+    val prefix  = "MG "
+    val chunks  = scala.collection.mutable.ListBuffer[String]()
+    val current = new StringBuilder
+    operands.foreach { op =>
+      val addedLen = if (current.isEmpty) op.length else 1 + op.length
+      if (current.nonEmpty && prefix.length + current.length + addedLen > maxCommandLineLength) {
+        chunks += prefix + current.toString
+        current.clear()
+      }
+      if (current.nonEmpty) current.append(',')
+      current.append(op)
+    }
+    if (current.nonEmpty) chunks += prefix + current.toString
+    chunks.toSeq
+  }
 }
 
 /**

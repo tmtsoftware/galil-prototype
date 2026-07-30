@@ -704,6 +704,11 @@ object GalilSimulatorActor {
           println(s"[SIM] #Stop$axis: drained PVT FIFO (was tracking)")
         }
 
+        // An in-flight #SelectX is being abandoned by this stop: drop its achieved-slot
+        // marker, or the next unrelated move that reaches its target on this axis would
+        // publish the abandoned select's slot into whlpos[idx] (same reason as handleMO).
+        newState = newState.copy(embeddedVars = newState.embeddedVars - s"_selectSlot[$idx]")
+
         // Clear the thread that was driving motion on this axis (if any).
         // Without this, the move thread leaks forever since advanceMotion
         // will never reach the target to clear it naturally.
@@ -975,6 +980,10 @@ object GalilSimulatorActor {
     var newState = state.copy(axes = state.axes + (axis -> ax))
     // Clear any move thread driving this axis
     val idx = axis - 'A'
+    // An in-flight #SelectX is being abandoned: drop its achieved-slot marker, or the next
+    // unrelated move that reaches its target on this axis would publish the abandoned
+    // select's slot into whlpos[idx] and the HCD would read the wheel as in position.
+    newState = newState.copy(embeddedVars = newState.embeddedVars - s"_selectSlot[$idx]")
     val moveThreadKey = s"_axisThread[$idx]"
     newState.embeddedVars.get(moveThreadKey).foreach { moveThreadNum =>
       val mt = moveThreadNum.toInt
@@ -1031,6 +1040,8 @@ object GalilSimulatorActor {
         // Clear the thread that was driving motion on this axis (only relevant
         // for PA/JG motion; PVT has no embedded thread)
         val idx = axis - 'A'
+        // Abandon any in-flight #SelectX marker for the same reason as in handleMO.
+        newVars = newVars - s"_selectSlot[$idx]"
         val moveThreadKey = s"_axisThread[$idx]"
         newVars.get(moveThreadKey).foreach { moveThreadNum =>
           val mt = moveThreadNum.toInt

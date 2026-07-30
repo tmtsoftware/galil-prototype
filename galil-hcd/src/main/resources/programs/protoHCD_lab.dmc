@@ -161,7 +161,6 @@ EN
 REM MG "axisErr error codes:  "; JS #print("ae")
  MG "axis error codes: ",ae[0]{F1.0}, ae[1]
  MG "HCD STATUS positions: ", _TDA, _TDB
- MG "HCD STATUS version: ",version{F8.0}
 EN
 REM Call all Setup Routines in parallel
 REM Call this on thread 0, spawn the others

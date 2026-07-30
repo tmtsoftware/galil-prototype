@@ -563,3 +563,70 @@ class GalilIoTest extends AnyFunSuite with Matchers:
   test("endMarker constant is \\r\\n:") {
     GalilIo.endMarker shouldBe "\r\n:"
   }
+
+  // ========================================
+  // GalilIo.chunkMgOperands (S90) — packing the arguments of one compound MG
+  // ========================================
+
+  test("chunkMgOperands: empty input → empty output (no round trip)") {
+    GalilIo.chunkMgOperands(Nil) shouldBe Nil
+  }
+
+  test("chunkMgOperands: operands that fit stay in one command") {
+    GalilIo.chunkMgOperands(Seq("ae[0]", "ae[1]")) shouldBe Seq("MG ae[0],ae[1]")
+  }
+
+  test("chunkMgOperands: the whlpos[] regression — 8 axes must be split, 7 must not") {
+    // The bug this helper exists for: `MG whlpos[0],...,whlpos[7]` is 82 characters,
+    // which GalilIo.send refuses to write, so the achieved wheel-slot read silently
+    // never happened on any 8-axis configuration (the HMI showed a permanent "unknown
+    // slot" and selectWheel's inPosition never went true).  Seven axes fit at 72, which
+    // is why the 5- and 6-axis APS configs and the 7-axis STB config never showed it.
+    val eight = (0 to 7).map(i => s"whlpos[$i]")
+    ("MG " + eight.mkString(",")).length shouldBe 82           // confirms the bug condition
+    82 should be > GalilIo.maxCommandLineLength
+
+    val chunks = GalilIo.chunkMgOperands(eight)
+    chunks should have size 2
+    chunks.map(_.length) shouldBe Seq(72, 12)
+    chunks.foreach(_.length should be <= GalilIo.maxCommandLineLength)
+
+    val seven = (0 to 6).map(i => s"whlpos[$i]")
+    GalilIo.chunkMgOperands(seven) should have size 1
+  }
+
+  test("chunkMgOperands: the _PV/_BT read splits at 8 tracking axes") {
+    // Same arithmetic as whlpos[]: 16 four-character operands is an 82-char line.
+    val operands = ('A' to 'H').flatMap(c => Seq(s"_PV$c", s"_BT$c"))
+    ("MG " + operands.mkString(",")).length shouldBe 82
+    val chunks = GalilIo.chunkMgOperands(operands)
+    chunks should have size 2
+    chunks.foreach(_.length should be <= GalilIo.maxCommandLineLength)
+  }
+
+  test("chunkMgOperands: operand order is preserved across chunks") {
+    // The caller zips the concatenated reply tokens against the request list, so a
+    // reordering here would silently attribute one axis's slot to another.
+    val operands = (0 to 7).map(i => s"whlpos[$i]")
+    val recombined = GalilIo.chunkMgOperands(operands).flatMap(_.stripPrefix("MG ").split(','))
+    recombined shouldBe operands
+  }
+
+  test("chunkMgOperands: every chunk is a well-formed MG and fits the line buffer") {
+    val operands = (0 to 20).map(i => s"someLongArrayName[$i]")
+    val chunks = GalilIo.chunkMgOperands(operands)
+    chunks.foreach { c =>
+      c should startWith("MG ")
+      c.length should be <= GalilIo.maxCommandLineLength
+    }
+    chunks.flatMap(_.stripPrefix("MG ").split(',')) shouldBe operands
+  }
+
+  test("chunkMgOperands: an operand too long to fit is passed through, not truncated") {
+    // Documented behavior: it becomes its own chunk, which send then rejects, so the
+    // caller sees which operand is at fault rather than reading truncated values.
+    val overlong = "x" * 100
+    val chunks = GalilIo.chunkMgOperands(Seq(overlong))
+    chunks should have size 1
+    chunks.head shouldBe "MG " + overlong
+  }

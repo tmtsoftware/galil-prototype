@@ -1413,4 +1413,186 @@ class GalilSimulatorActorTest extends AnyFunSuite with BeforeAndAfterAll {
     assert(dr.axisStatuses(1).auxiliaryPosition == 500,
       s"Axis B PVT should reach 500, got: ${dr.axisStatuses(1).auxiliaryPosition}")
   }
+
+  // ==========================================================================
+  // 13. #Select — discrete-position wheels and the whlpos[] achieved-slot handshake
+  //
+  // This is the path the wheel assemblies' in-position logic depends on: the HCD
+  // compares the achieved slot (whlpos[idx], polled at the standby rate) against the
+  // commanded slot, so the simulator must invalidate whlpos while the wheel moves and
+  // publish it only on arrival.
+  // ==========================================================================
+
+  test("whlpos[] defaults to -1 (slot unknown) for all eight axes after #Init") {
+    val sim = spawnSimulator()
+    send(sim, "XQ #Init,0")
+    Thread.sleep(150)
+
+    (0 until 8).foreach { i =>
+      val v = sendText(sim, s"MG whlpos[$i]").toDouble
+      assert(v == -1.0, s"whlpos[$i] should default to -1 (unknown), got $v")
+    }
+  }
+
+  test("XQ #SelectA invalidates whlpos while the wheel is moving") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "whlpos[0]=1")          // wheel starts at a known slot
+    send(sim, "dmd[0]=3")             // select slot 3
+    send(sim, "speed[0]=2000")
+    send(sim, "XQ #SelectA,1")
+
+    // Checked immediately: the wheel is between slots, so the achieved slot is unknown.
+    val whl = sendText(sim, "MG whlpos[0]").toDouble
+    assert(whl == -1.0, s"whlpos[0] should be invalidated during the select, got $whl")
+
+    val status = sendQR(sim).axisStatuses(0).status
+    assert((status & (1 << 15)) != 0, s"axis should be moving, status=0x${hex(status)}")
+  }
+
+  test("#SelectA computes the slot target as (slot - 1) * cpr / 8 and publishes it on arrival") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "dmd[0]=3")             // slot 3 → (3-1) * 3600/8 = 900 counts
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #SelectA,1")
+
+    Thread.sleep(600)
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 900,
+      s"slot 3 of a 3600-count wheel is 900 counts, got: ${dr.axisStatuses(0).auxiliaryPosition}")
+
+    // The achieved slot is published only now, on arrival.
+    val whl = sendText(sim, "MG whlpos[0]").toDouble
+    assert(whl == 3.0, s"whlpos[0] should be the achieved slot 3, got $whl")
+
+    // Thread released and the axis error element cleared by the success path.
+    val noVal = sendText(sim, "MG _NO").toDouble.toInt
+    assert(noVal == 0, s"select thread should be released, _NO=$noVal")
+    assert(sendText(sim, "MG ae[0]").toDouble == 0.0, "ae[0] should be cleared on success")
+  }
+
+  test("#SelectA slot 1 is the home angle (zero counts)") {
+    val sim = spawnSimulator()
+    send(sim, "DPA=900")              // start away from slot 1
+    send(sim, "cpr[0]=3600")
+    send(sim, "dmd[0]=1")
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #SelectA,1")
+
+    Thread.sleep(600)
+
+    assert(sendQR(sim).axisStatuses(0).auxiliaryPosition == 0,
+      "slot 1 is the home angle, i.e. zero counts")
+    assert(sendText(sim, "MG whlpos[0]").toDouble == 1.0, "whlpos[0] should be 1")
+  }
+
+  test("#SelectA falls back to the demand as a raw count target when cpr is unset") {
+    val sim = spawnSimulator()
+    send(sim, "dmd[0]=250")           // no cpr[0] set
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #SelectA,1")
+
+    Thread.sleep(600)
+
+    assert(sendQR(sim).axisStatuses(0).auxiliaryPosition == 250,
+      "with cpr unset the demand is used directly as a count target")
+    assert(sendText(sim, "MG whlpos[0]").toDouble == 250.0,
+      "the published slot mirrors the demand on the fallback path")
+  }
+
+  test("a plain #Move leaves whlpos untouched — only a select publishes an achieved slot") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "whlpos[0]=4")          // wheel known to be at slot 4
+    send(sim, "dmd[0]=1500")
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #MoveA,1")
+
+    Thread.sleep(600)
+
+    assert(sendQR(sim).axisStatuses(0).auxiliaryPosition == 1500, "the move should reach 1500")
+    assert(sendText(sim, "MG whlpos[0]").toDouble == 4.0,
+      "a non-select move must not republish or invalidate the achieved slot")
+  }
+
+  test("an interrupted select leaves the slot unknown, and a later move cannot publish it") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "dmd[0]=5")             // slot 5 → 1800 counts, far enough to interrupt
+    send(sim, "speed[0]=2000")
+    send(sim, "XQ #SelectA,1")
+    Thread.sleep(100)                 // in flight
+
+    send(sim, "XQ #StopA,2")          // abandon the select
+    Thread.sleep(300)
+
+    assert(sendText(sim, "MG whlpos[0]").toDouble == -1.0,
+      "an abandoned select must leave the achieved slot unknown")
+
+    // A later, unrelated move that reaches its target must NOT inherit the abandoned
+    // select's slot: before the marker was cleared on abandon, this published slot 5.
+    send(sim, "dmd[0]=100")
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #MoveA,3")
+    Thread.sleep(600)
+
+    assert(sendQR(sim).axisStatuses(0).auxiliaryPosition == 100, "the later move should reach 100")
+    assert(sendText(sim, "MG whlpos[0]").toDouble == -1.0,
+      "the abandoned select's slot must not be published by a subsequent move")
+  }
+
+  test("ST during a select also leaves the slot unknown") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "dmd[0]=5")
+    send(sim, "speed[0]=2000")
+    send(sim, "XQ #SelectA,1")
+    Thread.sleep(100)
+
+    send(sim, "STA")
+    Thread.sleep(200)
+
+    send(sim, "dmd[0]=100")
+    send(sim, "speed[0]=20000")
+    send(sim, "XQ #MoveA,2")
+    Thread.sleep(600)
+
+    assert(sendText(sim, "MG whlpos[0]").toDouble == -1.0,
+      "an ST-abandoned select must not publish its slot on a later move")
+  }
+
+  test("selects on two axes publish their own slots independently") {
+    val sim = spawnSimulator()
+    send(sim, "cpr[0]=3600")
+    send(sim, "cpr[1]=800")
+    send(sim, "dmd[0]=2")             // A: slot 2 → 450 counts
+    send(sim, "dmd[1]=5")             // B: slot 5 → 400 counts
+    send(sim, "speed[0]=20000")
+    send(sim, "speed[1]=20000")
+    send(sim, "XQ #SelectA,1")
+    send(sim, "XQ #SelectB,2")
+
+    Thread.sleep(700)
+
+    val dr = sendQR(sim)
+    assert(dr.axisStatuses(0).auxiliaryPosition == 450,
+      s"axis A slot 2 of 3600 is 450, got ${dr.axisStatuses(0).auxiliaryPosition}")
+    assert(dr.axisStatuses(1).auxiliaryPosition == 400,
+      s"axis B slot 5 of 800 is 400, got ${dr.axisStatuses(1).auxiliaryPosition}")
+    assert(sendText(sim, "MG whlpos[0]").toDouble == 2.0, "axis A should report slot 2")
+    assert(sendText(sim, "MG whlpos[1]").toDouble == 5.0, "axis B should report slot 5")
+  }
+
+  test("compound MG whlpos[0],whlpos[1] returns both slots space-separated (the HCD poll form)") {
+    val sim = spawnSimulator()
+    send(sim, "whlpos[0]=3")
+    send(sim, "whlpos[1]=7")
+
+    val parts = sendText(sim, "MG whlpos[0],whlpos[1]").split("\\s+").filter(_.nonEmpty)
+    assert(parts.length == 2, s"expected two values, got: ${parts.mkString(",")}")
+    assert(parts(0).toDouble == 3.0 && parts(1).toDouble == 7.0,
+      s"expected 3 and 7, got: ${parts.mkString(",")}")
+  }
 }

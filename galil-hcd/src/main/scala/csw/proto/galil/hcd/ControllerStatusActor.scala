@@ -304,6 +304,10 @@ class ControllerStatusActor(
   private val MaxConsecutiveFormatErrors = 3
   private var qrFormatErrorCount: Int = 0
 
+  // Kinds of optional-telemetry read (whlpos[], _PV/_BT) whose failure has already been
+  // reported at WARN this session; see reportOptionalReadFailure.
+  private val optionalReadFailuresReported = scala.collection.mutable.Set.empty[String]
+
   // Whether IS's thread registry is non-empty, per ThreadRegistryActivity
   // (ADR-001 Amendment A). Feeds ONLY the polling-rate policy. CS keeps no
   // per-thread bookkeeping: the scan queries all 8 threads unconditionally,
@@ -803,11 +807,49 @@ class ControllerStatusActor(
         Behaviors.same
 
   /**
+   * Issue a compound `MG` read and return the reply tokens in request order.
+   *
+   * The operand list is split across as many round trips as the controller's
+   * 80-character command-line buffer requires (GalilIo.chunkMgOperands). This is not a
+   * theoretical guard: GalilIo.send rejects an over-length line before writing it, and
+   * `MG whlpos[0],...,whlpos[7]` is 82 characters, so on every 8-axis configuration the
+   * achieved wheel-slot read threw, was swallowed as optional telemetry, and
+   * wheelPosition stayed at -1 for the life of the HCD. Anything that scales with the
+   * axis or thread count goes through here rather than building its own line.
+   *
+   * Tokens from the chunks are concatenated in request order, so each caller's
+   * expected-token-count check still validates the read as a whole.
+   *
+   * Exceptions propagate: the caller decides whether a failed read means connection
+   * loss (ae[], _XQ) or is optional telemetry (whlpos[], _PV/_BT).
+   */
+  private def mgReadTokens(operands: Seq[String]): Seq[String] =
+    GalilIo.chunkMgOperands(operands).flatMap { cmd =>
+      statusIo.send(cmd).map(_._2.utf8String).mkString.trim.split("\\s+").filter(_.nonEmpty).toSeq
+    }
+
+  /**
+   * Report a failed optional-telemetry read: the first occurrence of each kind at WARN,
+   * repeats at DEBUG.
+   *
+   * These reads are deliberately non-fatal, but "non-fatal" had meant invisible: the
+   * over-length whlpos[] line failed identically on every poll for two commits at DEBUG
+   * while the HMI showed a plausible "unknown slot". A non-I/O failure here is a defect
+   * in what we asked for, not a controller condition, so it is said out loud once.
+   */
+  private def reportOptionalReadFailure(what: String, detail: String): Unit =
+    if optionalReadFailuresReported.add(what) then
+      log.warn(s"$what read failed and will be retried each cycle (reported once): $detail")
+    else
+      log.debug(s"$what read failed (ignored): $detail")
+
+  /**
    * Read MG ae[i] for each configured axis and return a Map[Axis, Int].
    *
-   * Issued as a single compound `MG ae[0],ae[1],...` round-trip on the status
-   * connection. Returns Map.empty on any parse or I/O failure; the simulator
-   * does not implement ae[] storage, and we do not want to fault on its absence.
+   * Issued as a compound `MG ae[0],ae[1],...` round-trip on the status connection
+   * (chunked by mgReadTokens if the axis set makes the line too long). Returns Map.empty
+   * on any parse or I/O failure; the simulator does not implement ae[] storage, and we do
+   * not want to fault on its absence.
    *
    * IOExceptions propagate to handlePollController via handleQRResponse's catch
    * block (we let the QR loss handler deal with connection failures uniformly).
@@ -821,20 +863,17 @@ class ControllerStatusActor(
     if !embeddedArraysReady || configuredAxes.isEmpty then Map.empty
     else
       val sortedAxes = configuredAxes.toSeq.sortBy(_.index)
-      val mgCmd = "MG " + sortedAxes.map(a => s"ae[${a.index}]").mkString(",")
       try
-        val responses = statusIo.send(mgCmd)
-        val text      = responses.map(_._2.utf8String).mkString
-        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
+        val tokens = mgReadTokens(sortedAxes.map(a => s"ae[${a.index}]"))
         if tokens.length != sortedAxes.length then
-          log.debug(s"ae[] read returned ${tokens.length} tokens, expected ${sortedAxes.length}; ignoring (text='${text.trim}')")
+          log.debug(s"ae[] read returned ${tokens.length} tokens, expected ${sortedAxes.length}; ignoring (text='${tokens.mkString(" ")}')")
           Map.empty
         else
           val parsed = sortedAxes.zip(tokens).flatMap { (axis, tok) =>
             Try(tok.toDouble.toInt).toOption.map(v => axis -> v)
           }.toMap
           if parsed.size != sortedAxes.length then
-            log.debug(s"ae[] read produced unparseable tokens; ignoring (text='${text.trim}')")
+            log.debug(s"ae[] read produced unparseable tokens; ignoring (text='${tokens.mkString(" ")}')")
             Map.empty
           else
             parsed
@@ -864,18 +903,19 @@ class ControllerStatusActor(
    * optional telemetry: this NEVER rethrows, so a program that predates whlpos[] (or
    * any transient hiccup) yields Map.empty and leaves wheelPosition unchanged, never
    * disturbing the analog/QR connection-health machinery that already runs this tick.
+   *
+   * The operand list goes through mgReadTokens because `whlpos[i]` is nine characters:
+   * eight axes make an 82-character line, which GalilIo.send refuses to write. Chunking
+   * is what makes this read work at all on an 8-axis controller.
    */
   private def readWhlposValues(): Map[Axis, Int] =
     if !pollingEnabled || !embeddedArraysReady || configuredAxes.isEmpty then Map.empty
     else
       val sortedAxes = configuredAxes.toSeq.sortBy(_.index)
-      val mgCmd = "MG " + sortedAxes.map(a => s"whlpos[${a.index}]").mkString(",")
       try
-        val responses = statusIo.send(mgCmd)
-        val text      = responses.map(_._2.utf8String).mkString
-        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
+        val tokens = mgReadTokens(sortedAxes.map(a => s"whlpos[${a.index}]"))
         if tokens.length != sortedAxes.length then
-          log.debug(s"whlpos[] read returned ${tokens.length} tokens, expected ${sortedAxes.length}; ignoring (text='${text.trim}')")
+          log.debug(s"whlpos[] read returned ${tokens.length} tokens, expected ${sortedAxes.length}; ignoring (text='${tokens.mkString(" ")}')")
           Map.empty
         else
           sortedAxes.zip(tokens).flatMap { (axis, tok) =>
@@ -884,7 +924,7 @@ class ControllerStatusActor(
       catch
         case ex: Exception =>
           // Optional telemetry — never escalate (a program without whlpos[] lands here).
-          log.debug(s"whlpos[] read failed (ignored): ${ex.getMessage}")
+          reportOptionalReadFailure("whlpos[]", ex.getMessage)
           Map.empty
 
   /**
@@ -910,20 +950,17 @@ class ControllerStatusActor(
     if threads.isEmpty then Map.empty
     else
       val sortedThreads = threads.toSeq.sorted
-      val mgCmd = "MG " + sortedThreads.map(t => s"_XQ$t").mkString(",")
       try
-        val responses = statusIo.send(mgCmd)
-        val text      = responses.map(_._2.utf8String).mkString
-        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
+        val tokens = mgReadTokens(sortedThreads.map(t => s"_XQ$t"))
         if tokens.length != sortedThreads.length then
-          log.debug(s"_XQ read returned ${tokens.length} tokens, expected ${sortedThreads.length}; ignoring (text='${text.trim}')")
+          log.debug(s"_XQ read returned ${tokens.length} tokens, expected ${sortedThreads.length}; ignoring (text='${tokens.mkString(" ")}')")
           Map.empty
         else
           val parsed = sortedThreads.zip(tokens).flatMap { (thread, tok) =>
             Try(tok.toDouble.toInt).toOption.map(v => thread -> v)
           }.toMap
           if parsed.size != sortedThreads.length then
-            log.debug(s"_XQ read produced unparseable tokens; ignoring (text='${text.trim}')")
+            log.debug(s"_XQ read produced unparseable tokens; ignoring (text='${tokens.mkString(" ")}')")
             Map.empty
           else
             parsed
@@ -963,15 +1000,14 @@ class ControllerStatusActor(
     if axes.isEmpty then Map.empty
     else
       val sortedAxes = axes.toSeq.sortBy(_.index)
-      // Interleave _PV<x>,_BT<x> so token order matches axis order with stride 2.
-      val mgCmd = "MG " + sortedAxes.flatMap(a => Seq(s"_PV${a.char}", s"_BT${a.char}")).mkString(",")
       try
-        val responses = statusIo.send(mgCmd)
-        val text      = responses.map(_._2.utf8String).mkString
-        val tokens    = text.trim.split("\\s+").filter(_.nonEmpty)
-        val expected  = sortedAxes.length * 2
+        // Interleave _PV<x>,_BT<x> so token order matches axis order with stride 2.
+        // Chunked for the same reason as whlpos[]: two 4-character operands per axis is
+        // an 82-character line at eight tracking axes, which send refuses to write.
+        val tokens = mgReadTokens(sortedAxes.flatMap(a => Seq(s"_PV${a.char}", s"_BT${a.char}")))
+        val expected = sortedAxes.length * 2
         if tokens.length != expected then
-          log.debug(s"_PV/_BT read returned ${tokens.length} tokens, expected $expected; ignoring (text='${text.trim}')")
+          log.debug(s"_PV/_BT read returned ${tokens.length} tokens, expected $expected; ignoring (text='${tokens.mkString(" ")}')")
           Map.empty
         else
           val parsed = sortedAxes.zipWithIndex.flatMap { (axis, i) =>
@@ -981,7 +1017,7 @@ class ControllerStatusActor(
             yield axis -> (pv, bt)
           }.toMap
           if parsed.size != sortedAxes.length then
-            log.debug(s"_PV/_BT read produced unparseable tokens; ignoring (text='${text.trim}')")
+            log.debug(s"_PV/_BT read produced unparseable tokens; ignoring (text='${tokens.mkString(" ")}')")
             Map.empty
           else
             parsed
@@ -991,7 +1027,7 @@ class ControllerStatusActor(
         case ex: java.io.IOException =>
           throw new java.io.IOException(s"_PV/_BT read failed (status connection): ${ex.getMessage}", ex)
         case ex: Exception =>
-          log.debug(s"_PV/_BT read failed (non-IO, ignored): ${ex.getMessage}")
+          reportOptionalReadFailure("_PV/_BT", ex.getMessage)
           Map.empty
 
   /**

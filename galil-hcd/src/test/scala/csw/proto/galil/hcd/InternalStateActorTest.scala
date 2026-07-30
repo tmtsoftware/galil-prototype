@@ -408,13 +408,13 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     val updated = initial.update(Map(
       "state" -> HcdStateEnum.Faulted,
       "controllerErrorMsg" -> "Test error",
-      "version" -> 12345,
+      "controllerId" -> 3,
       "debug" -> true
     ))
     
     updated.state should be (HcdStateEnum.Faulted)
     updated.controllerErrorMsg should be ("Test error")
-    updated.version should be (12345)
+    updated.controllerId should be (3)
     updated.debug should be (true)
   }
 
@@ -550,7 +550,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     
     // Update HCD state
     actor ! InternalStateActor.UpdateHcdState(
-      Map("version" -> 99999, "debug" -> true),
+      Map("controllerId" -> 2, "debug" -> true),
       probe.ref
     )
     
@@ -563,7 +563,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     actor ! InternalStateActor.GetHcdState(queryProbe.ref)
     
     val state = queryProbe.receiveMessage()
-    state.version should be (99999)
+    state.controllerId should be (2)
     state.debug should be (true)
   }
   
@@ -642,15 +642,15 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // Update state
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateHcdState(
-      Map("version" -> 123),
+      Map("controllerId" -> 7),
       updateProbe.ref
     )
     updateProbe.receiveMessage()  // Wait for update to complete
     
     // Should receive notification
     val notification = subscriberProbe.receiveMessage()
-    notification.changedFields should contain ("version")
-    notification.hcdState.version should be (123)
+    notification.changedFields should contain ("controllerId")
+    notification.hcdState.controllerId should be (7)
   }
   
   test("InternalStateActor should notify subscribers on axis state changes") {
@@ -729,7 +729,7 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     // Update state
     val updateProbe = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
     actor ! InternalStateActor.UpdateHcdState(
-      Map("version" -> 456),
+      Map("controllerId" -> 4),
       updateProbe.ref
     )
     updateProbe.receiveMessage()

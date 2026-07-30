@@ -256,7 +256,7 @@ case class AxisState(
   indexOffset: Option[Double] = None,
   indexSpeed: Option[Double] = None,
   motionDelay: Option[Double] = None,
-  countsPerRevolution: Option[Double] = None,  // rotating axes only; read from embedded cpd[]
+  countsPerRevolution: Option[Double] = None,  // rotating axes only; from config, pushed to cpr[]
   axisName: Option[String] = None,             // human-readable mechanism name from config
   // Achieved wheel slot (1-based), reported by the controller's wheel-select logic
   // (sensor-decoded, gated on the detent for pupil-mask wheels). -1 = unknown: no
@@ -486,6 +486,59 @@ case class AxisState(
     else
       updated
 
+object AxisState:
+
+  /**
+   * Every AxisState field seeded from the configuration file at initialization.
+   *
+   * Kept as an explicit set so that `seedFromConfig` can be checked against it in a unit
+   * test: adding a configured field to AxisConfig without seeding it here fails silently
+   * (the field stays None and the HMI renders a default), which is how `indexOffset` went
+   * unseeded until S89 even though it was being written to the controller's hoff[] all along.
+   */
+  val SeededKeys: Set[String] = Set(
+    "inPositionThreshold", "mechanismType", "algorithm", "upperLimit", "lowerLimit",
+    "maxSpeed", "acceleration", "deceleration", "motionDelay", "indexOffset",
+    "indexSpeed", "countsPerRevolution", "axisName"
+  )
+
+  /**
+   * Build the InternalStateActor seed for one axis from its configuration.
+   *
+   * The configuration file is the authority for these values (SDD 4.5): they are seeded into
+   * internal state here and pushed to the controller's embedded variables by
+   * `writeMotionConfig()`, with `configAxis` acting as a runtime override. Extracted from
+   * `GalilHcd.initialize` so that the mapping is unit-testable on its own.
+   */
+  def seedFromConfig(axisConfig: AxisConfig): Map[String, Any] = Map(
+    "inPositionThreshold" -> axisConfig.inPositionThreshold,
+    "mechanismType" -> (axisConfig.mechanismType match {
+      case "rotating" => MechanismType.Rotating
+      case "linear"   => MechanismType.Linear
+      case _          => MechanismType.Linear
+    }),
+    "algorithm" -> (axisConfig.algorithm match {
+      case "shortest" => RotatingAlgorithm.Shortest
+      case "forward"  => RotatingAlgorithm.Forward
+      case "reverse"  => RotatingAlgorithm.Reverse
+      case _          => RotatingAlgorithm.Forward
+    }),
+    "upperLimit"   -> axisConfig.upperLimit,
+    "lowerLimit"   -> axisConfig.lowerLimit,
+    "maxSpeed"     -> axisConfig.maxSpeed,
+    "acceleration" -> axisConfig.acceleration,
+    "deceleration" -> axisConfig.deceleration,
+    "motionDelay"  -> axisConfig.motionDelay,
+    // indexOffset is written to the controller's hoff[] by writeMotionConfig(); it must be
+    // seeded here too, or internal state and the HMI report 0.0 for a configured axis.
+    "indexOffset"  -> axisConfig.indexOffset,
+    "indexSpeed"   -> axisConfig.indexSpeed,
+    // countsPerRevolution is config-authoritative for rotating axes; writeMotionConfig()
+    // pushes it to cpr[] on the controller, warning and skipping if it is 0.0.
+    "countsPerRevolution" -> axisConfig.countsPerRevolution,
+    "axisName" -> axisConfig.axisName.getOrElse("")
+  )
+
 // ========================================
 // Per-Axis Tracking Session State
 // ========================================
@@ -603,7 +656,6 @@ case class AxisCmdState(
  * @param state Current HCD state
  * @param controllerId Controller instance id (from controller.id config; 0..N)
  * @param controllerErrorMsg Controller error message
- * @param version Embedded version number
  * @param controllerAxisCount Axis count reported by the controller ID command (4 or 8); -1 if unknown.
  *   Parsed from the firmware model string (DMC-500x0 gives x axes). Determines the number of
  *   DI/DO channels intrinsic to the controller model (DMC-50040: 8 DI, 8 DO; DMC-50080: 16 DI,
@@ -632,7 +684,6 @@ case class HcdState(
   // to render a descriptive banner while the HCD is Uninitialized. Internal only,
   // not published over CSW.
   initializingReason: String = "",
-  version: Int = 0,
   controllerAxisCount: Int = -1,
   activeAxes: Array[Boolean] = Array.fill(8)(false),
   digitalInputs: Array[Boolean] = Array.fill(16)(false),
@@ -686,7 +737,6 @@ case class HcdState(
       case ("controllerId", v: Int) => updated = updated.copy(controllerId = v)
       case ("controllerErrorMsg", v: String) => updated = updated.copy(controllerErrorMsg = v)
       case ("initializingReason", v: String) => updated = updated.copy(initializingReason = v)
-      case ("version", v: Int) => updated = updated.copy(version = v)
       case ("controllerAxisCount", v: Int) => updated = updated.copy(controllerAxisCount = v)
       case ("activeAxes", v: Array[Boolean @unchecked]) => updated = updated.copy(activeAxes = v)
       case ("digitalInputs", v: Array[Boolean @unchecked]) => updated = updated.copy(digitalInputs = v)

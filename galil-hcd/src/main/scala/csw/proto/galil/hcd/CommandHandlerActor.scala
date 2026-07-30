@@ -46,6 +46,20 @@ object CommandHandlerActor {
     maybeObsId: Option[ObsId]
   ) extends Command
 
+  /**
+   * A watched long-running command exceeded its timeout.
+   *
+   * Sent by the CommandWatcherActor, which has already reported Error to the CRM; this
+   * message asks the CommandHandler to tidy up the hardware, because the watcher holds no
+   * controller handle and giving it one would put a second orchestrator of halts alongside
+   * this actor (ADR-001 keeps that in one place).
+   *
+   * @param thread the controller thread the timed-out command was running on.  The handler
+   *   halts only if this is still the thread registered to the axis: if a later command has
+   *   taken the axis over, its motion must not be disturbed.
+   */
+  case class CommandTimedOut(axis: Axis, thread: Int, commandName: String, runId: Id) extends Command
+
   // Internal message for receiving InternalState update responses
   private case class StateUpdateResult(response: InternalStateActor.UpdateResponse) extends Command
 
@@ -182,6 +196,11 @@ object CommandHandlerActor {
             }
           }
 
+          Behaviors.same
+
+        case CommandTimedOut(axis, thread, commandName, runId) =>
+          handleCommandTimedOut(axis, thread, commandName, runId,
+            controllerInterfaceActor, internalStateActor, log, askTimeout, askScheduler, ctx)
           Behaviors.same
 
         case StateUpdateResult(response) =>
@@ -503,9 +522,11 @@ object CommandHandlerActor {
   /**
    * Interrupt the currently active command on this axis before starting a new one.
    *
-   * Called by positionAxis, offsetAxis, selectWheel, and stopAxis when the axis is
-   * in Moving, Homing, or Tracking state; SDD 4.8.1 permits these commands to
-   * preempt an active move.
+   * Called by positionAxis, offsetAxis, selectWheel, positionWheel and stopAxis.  What the
+   * call sites actually gate on is narrower than what the axis state machine permits: the
+   * motion commands interrupt only from Moving, and stopAxis from Moving or Homing.  A
+   * command that is not valid from the axis's current state never reaches here — it fails
+   * validation (AxisStateEnum.validateCommand, re-checked by guardAxisState).
    *
    * @param sendST  If true, sends ST after HX to leave the motor stationary for
    *                the next embedded program.  Pass false when the next program
@@ -790,8 +811,9 @@ object CommandHandlerActor {
    *   Shortest; take the shorter of the two arcs
    *
    * The result may differ from the raw target by a whole number of revolutions
-   * (countsPerRev = 360 * cpd). The IS demand and the embedded dmd[] variable are set
-   * to the adjusted value so that the motion profile and inPosition calculations are correct.
+   * (countsPerRevolution, from the configuration file and pushed to the controller's cpr[]).
+   * The IS demand and the embedded dmd[] variable are set to the adjusted value so that the
+   * motion profile and inPosition calculations are correct.
    *
    * @param rawTarget      Raw count demand supplied by the Assembly
    * @param currentPos     Current encoder position (from IS AxisState.position)
@@ -953,7 +975,7 @@ object CommandHandlerActor {
         internalStateActor ! InternalStateActor.RegisterThread(thread, axis)
         spawnWatcher(axis, commandName, runId, mask, internalStateActor, crm, log, ctx,
           loggerFactory = loggerFactory, timeout = timeout, completionAxisState = completionAxisState,
-          onSuccessAxisUpdates = onSuccessAxisUpdates)
+          onSuccessAxisUpdates = onSuccessAxisUpdates, activeThread = thread)
     }
   }
 
@@ -1837,10 +1859,12 @@ object CommandHandlerActor {
     val cprOpt = axisState.countsPerRevolution
 
     // For rotating axes without a known countsPerRevolution we cannot do the conversion.
-    // This means the axis is mid-init; the embedded `cpd[]` read hasn't completed.
+    // Either the axis is mid-init (the config seed has not been applied yet) or the
+    // configuration omits countsPerRevolution for a rotating axis, which writeMotionConfig()
+    // also warns about.
     if isRotating && cprOpt.isEmpty then
       val msg = s"trackAxis $axis: rotating axis has no countsPerRevolution " +
-                s"(motion config not yet read from controller)"
+                s"(motion config not yet applied, or absent from the axis configuration)"
       log.error(msg)
       crm.updateCommand(Error(runId, msg))
       return
@@ -2143,6 +2167,93 @@ object CommandHandlerActor {
   }
 
   // ========================================
+  // Command timeout cleanup
+  // ========================================
+
+  /**
+   * Tidy up after a long-running command timed out.
+   *
+   * A timeout means the HCD never saw the command's completion attributed, so the embedded
+   * program must be presumed still running: on real hardware the cases that reach here are a
+   * program blocked on an input or looping without ever setting ae[] (a program stuck in MC
+   * raises #MCTIME, which surfaces as an axis error and fails the command long before the
+   * timeout), a mechanism slower than its configured motion profile, or a stalled status poll.
+   * In all of them the tidy action is the same: halt the thread, stop the motor, and give the
+   * axis back to the operator in a well-defined state.
+   *
+   * The halt is delegated to checkAndInterrupt so there is exactly one implementation of the
+   * halt sequence (confirm the thread, HX, mark the registry entry Halted, ST, pulse
+   * commandHalted, release the reservation).  Releasing the reservation matters: before this
+   * existed, a timeout left the thread reserved in the CI actor forever.
+   *
+   * The axis is NOT left in Error.  A timeout is a failure of the command, not evidence of an
+   * axis or controller fault, so the axis takes the same post-stop state a stopAxis would:
+   * Idle when a valid home reference exists, Lost when it does not (stopCompletionState).
+   * The command itself has already been reported as Error by the watcher.
+   *
+   * Does nothing but log if the axis's registered thread is no longer the timed-out one: a
+   * later command owns the axis and its motion must not be disturbed.  Safe against races
+   * because this actor is single-threaded — no new command can be processed between the
+   * registry query and the halt.
+   */
+  private def handleCommandTimedOut(
+    axis: Axis,
+    thread: Int,
+    commandName: String,
+    runId: Id,
+    ciActor: ActorRef[GalilCommandMessage],
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    log: csw.logging.api.scaladsl.Logger,
+    askTimeout: Timeout,
+    askScheduler: org.apache.pekko.actor.typed.Scheduler,
+    ctx: org.apache.pekko.actor.typed.scaladsl.ActorContext[Command]
+  ): Unit = {
+    val registered = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[Int]](
+        ref => InternalStateActor.GetAxisThread(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }.getOrElse(None)
+
+    if !registered.contains(thread) then
+      log.warn(s"$commandName $axis timed out on thread $thread, but the axis now has " +
+        s"${registered.map(t => s"thread $t").getOrElse("no registered thread")} — " +
+        s"leaving the axis alone (a later command owns it, or the thread was already released)")
+      return
+
+    log.warn(s"$commandName $axis timed out on thread $thread — halting the thread and " +
+      s"stopping the motor")
+
+    // sendST = true: nothing follows this halt to stop the motor, unlike an interruption
+    // where the follow-on program may begin with its own STx.
+    // reuseHaltedThread = false: no follow-on command, so the reservation must be released.
+    checkAndInterrupt(s"$commandName timeout", axis, ciActor, internalStateActor, log,
+      askTimeout, askScheduler, ctx, sendST = true, reuseHaltedThread = false)
+
+    // Post-stop axis state, chosen exactly as stopAxis chooses it.
+    val axisStateOpt = Try {
+      val future = AskPattern.Askable(internalStateActor).ask[Option[AxisState]](
+        ref => InternalStateActor.GetAxisState(axis, ref)
+      )(askTimeout, askScheduler)
+      Await.result(future, askTimeout.duration)
+    }.getOrElse(None)
+    val homed  = axisStateOpt.exists(_.homed)
+    val target = axisStateOpt.map(_.axisState.stopCompletionState(homed)).getOrElse(AxisStateEnum.Idle)
+
+    // trackingSession is cleared in the same update: the invariant is
+    // `axisState == Tracking <=> trackingSession.isDefined`, and target is never Tracking.
+    internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+      Map("axisState" -> target, "trackingSession" -> None),
+      ctx.system.ignoreRef)
+    internalStateActor ! InternalStateActor.UpdateAxisCmdState(axis,
+      Map("clearActiveCommand" -> true),
+      ctx.system.ignoreRef)
+
+    log.info(s"$commandName $axis timeout cleanup complete: thread $thread released, " +
+      s"axis → $target (homed=$homed)")
+  }
+
+  // ========================================
   // CommandWatcher spawn helper
   // ========================================
 
@@ -2162,7 +2273,8 @@ object CommandHandlerActor {
     loggerFactory: LoggerFactory,
     timeout: FiniteDuration = defaultMotionTimeout,
     completionAxisState: AxisStateEnum = AxisStateEnum.Idle,
-    onSuccessAxisUpdates: Map[String, Any] = Map.empty
+    onSuccessAxisUpdates: Map[String, Any] = Map.empty,
+    activeThread: Int = -1
   ): Unit = {
     val config = CommandWatcherActor.WatchConfig(
       runId = runId,
@@ -2174,7 +2286,10 @@ object CommandHandlerActor {
       commandResponseManager = crm,
       loggerFactory = loggerFactory,
       completionAxisState = completionAxisState,
-      onSuccessAxisUpdates = onSuccessAxisUpdates
+      onSuccessAxisUpdates = onSuccessAxisUpdates,
+      activeThread = activeThread,
+      // So the watcher can hand a timeout back for hardware cleanup (CommandTimedOut).
+      commandHandler = Some(ctx.self)
     )
     val watcherName = s"watcher-${commandName}-${axis}-${runId.id.take(8)}"
     ctx.spawn(CommandWatcherActor(config), watcherName)

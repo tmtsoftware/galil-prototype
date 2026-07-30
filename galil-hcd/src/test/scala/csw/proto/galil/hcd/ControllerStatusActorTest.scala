@@ -191,6 +191,44 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
       override def close(): Unit = ()
     }
   
+  /**
+   * GalilIo stub for the whlpos[] readback tests.  Answers `MG whlpos[i],...` from
+   * `whlposValues` (default -1 = slot unknown) and `MG @AN...` with the usual 2.5V,
+   * recording every command line that actually reaches the wire in `issued`.
+   *
+   * `write` is only reached after GalilIo.send's 80-character line check, so an
+   * over-length read never appears in `issued` — which is exactly what the test asserts.
+   */
+  private def stubIoWithWhlpos(
+    whlposValues: scala.collection.mutable.Map[Int, Int],
+    issued:       scala.collection.mutable.ListBuffer[String]
+  ): csw.proto.galil.io.GalilIo =
+    new csw.proto.galil.io.GalilIo {
+      import org.apache.pekko.util.ByteString
+      private var pendingResponse: ByteString = ByteString(":")
+      override protected def write(sendBuf: Array[Byte]): Unit = {
+        val cmd = new String(sendBuf).trim
+        issued += cmd
+        if (cmd.startsWith("MG whlpos[")) {
+          val args = cmd.drop(3).split(',').map(_.trim)
+          val values = args.map { arg =>
+            val idx = arg.dropWhile(_ != '[').drop(1).takeWhile(_ != ']')
+            scala.util.Try(idx.toInt).toOption match
+              case Some(n) => f"${whlposValues.getOrElse(n, -1).toDouble}%.4f"
+              case None    => "-1.0000"
+          }
+          pendingResponse = ByteString(values.mkString(" ") + "\r\n:")
+        } else if (cmd.startsWith("MG @AN")) {
+          pendingResponse = ByteString(Seq.fill(8)("2.5000").mkString(" ") + "\r\n:")
+        } else {
+          pendingResponse = ByteString(":")
+        }
+      }
+      override protected def read(): ByteString = pendingResponse
+      override def drainAndShowBuffer(timeoutMs: Int = 200): String = ""
+      override def close(): Unit = ()
+    }
+
   override def afterAll(): Unit =
     testKit.shutdownTestKit()
   
@@ -1116,4 +1154,108 @@ class ControllerStatusActorTest extends AnyFunSuite with Matchers with BeforeAnd
     val probe2 = testKit.createTestProbe[Option[AxisCmdState]]()
     internalState ! InternalStateActor.GetAxisCmdState(Axis.A, probe2.ref)
     probe2.receiveMessage().get.axisErrorMsg shouldBe "Position error exceeded limit"
+  }
+
+
+  // ========================================
+  // whlpos[] readback and the 80-char command-line buffer (S90)
+  // ========================================
+
+  test("whlpos[] readback reaches InternalStateActor with all 8 axes configured") {
+    // `MG whlpos[0],...,whlpos[7]` is 82 characters, over the controller's 80-character
+    // line buffer, which GalilIo.send enforces BEFORE writing.  Unchunked, the read threw
+    // on every poll and was swallowed as optional telemetry, so wheelPosition stayed at
+    // its -1 default for the life of the HCD: the engineering HMI showed "unknown" for the
+    // achieved slot and selectWheel's inPosition (wheelPosition == commandedWheelPosition)
+    // never went true.  Seven axes fit at 72 characters, which is why only the 8-axis
+    // configurations showed it.
+    val allAxes = Set(Axis.A, Axis.B, Axis.C, Axis.D, Axis.E, Axis.F, Axis.G, Axis.H)
+    val internalState = testKit.spawn(InternalStateActor(
+      allAxes.foldLeft(HcdState())((s, a) => s.initializeAxis(a))
+    ))
+    // B has achieved slot 3, H slot 5; every other axis reports the -1 "unknown" default.
+    val whlpos = scala.collection.mutable.Map(Axis.B.index -> 3, Axis.H.index -> 5)
+    val issued = scala.collection.mutable.ListBuffer[String]()
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithWhlpos(whlpos, issued),
+        internalState, loggerFactory, standbyPollingRateHz = 1.0, actionPollingRateHz = 1.0,
+        configuredAxes = allAxes, embeddedArraysReady = true)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+
+    // Drive one analog-input tick; the whlpos[] read rides on it.
+    sm ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(200)
+
+    def wheelPositionOf(axis: Axis): Int =
+      val probe = testKit.createTestProbe[Option[AxisState]]()
+      internalState ! InternalStateActor.GetAxisState(axis, probe.ref)
+      probe.receiveMessage().get.wheelPosition
+
+    wheelPositionOf(Axis.B) shouldBe 3
+    wheelPositionOf(Axis.H) shouldBe 5
+    // -1 is a real reading ("no confirmed slot"), applied like any other.
+    wheelPositionOf(Axis.A) shouldBe -1
+
+    // The read reached the wire as more than one command, and every line fits the buffer.
+    val whlposCmds = issued.filter(_.startsWith("MG whlpos")).toList
+    whlposCmds.size shouldBe 2
+    whlposCmds.foreach(_.length should be <= csw.proto.galil.io.GalilIo.maxCommandLineLength)
+    // No operand was dropped in the split.
+    whlposCmds.flatMap(_.stripPrefix("MG ").split(',')) shouldBe (0 to 7).map(i => s"whlpos[$i]").toList
+  }
+
+  test("whlpos[] readback is a single command at 7 configured axes") {
+    // The configurations in the field today (5-6 axes on APS-1..4, 7 on the STB) stay on
+    // one line; this pins the boundary so a future operand rename that pushes 7 axes over
+    // 80 characters fails here rather than in the lab.
+    val sevenAxes = Set(Axis.A, Axis.B, Axis.C, Axis.D, Axis.E, Axis.F, Axis.G)
+    val internalState = testKit.spawn(InternalStateActor(
+      sevenAxes.foldLeft(HcdState())((s, a) => s.initializeAxis(a))
+    ))
+    val whlpos = scala.collection.mutable.Map(Axis.C.index -> 2)
+    val issued = scala.collection.mutable.ListBuffer[String]()
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithWhlpos(whlpos, issued),
+        internalState, loggerFactory, standbyPollingRateHz = 1.0, actionPollingRateHz = 1.0,
+        configuredAxes = sevenAxes, embeddedArraysReady = true)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    sm ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(200)
+
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.C, probe.ref)
+    probe.receiveMessage().get.wheelPosition shouldBe 2
+    issued.count(_.startsWith("MG whlpos")) shouldBe 1
+  }
+
+  test("whlpos[] reads are suppressed until the embedded arrays are dimensioned") {
+    // Same gate as ae[]: an MG against an array #Init has not created latches
+    // controller error 57.
+    val axes = Set(Axis.A, Axis.B)
+    val internalState = testKit.spawn(InternalStateActor(
+      axes.foldLeft(HcdState())((s, a) => s.initializeAxis(a))
+    ))
+    val issued = scala.collection.mutable.ListBuffer[String]()
+    val sm = testKit.spawn(
+      ControllerStatusActor.withIo(stubIoWithWhlpos(scala.collection.mutable.Map(Axis.A.index -> 1), issued),
+        internalState, loggerFactory, standbyPollingRateHz = 1.0, actionPollingRateHz = 1.0,
+        configuredAxes = axes, embeddedArraysReady = false)
+    )
+    internalState ! InternalStateActor.SetStatusActor(sm)
+    Thread.sleep(20)
+    sm ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(150)
+    issued.count(_.startsWith("MG whlpos")) shouldBe 0
+
+    sm ! ControllerStatusActor.SetEmbeddedArraysReady(ready = true)
+    sm ! ControllerStatusActor.PollAnalogInputs
+    Thread.sleep(150)
+    issued.count(_.startsWith("MG whlpos")) shouldBe 1
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    internalState ! InternalStateActor.GetAxisState(Axis.A, probe.ref)
+    probe.receiveMessage().get.wheelPosition shouldBe 1
   }

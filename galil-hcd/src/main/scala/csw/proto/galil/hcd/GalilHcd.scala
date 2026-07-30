@@ -429,9 +429,14 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
       hcdConfig
     } catch {
       case ex: Exception =>
-        log.error(s"Failed to load configuration (cs=$csPath, fallback=$name): ${ex.getMessage}", ex = ex)
-        log.warn("Using default test configuration")
-        GalilHcdConfig.defaultTestConfig
+        // Do NOT substitute a default configuration here.  The built-in default selects
+        // simulation mode with axes A+B on localhost, so falling back to it would bring the
+        // HCD up looking healthy while talking to nothing; an HCD that cannot read its own
+        // configuration has to fail visibly.  The caller (initialize, Phase 1) turns this
+        // into a Faulted HCD carrying the reason.
+        val msg = s"Failed to load configuration (cs=$csPath, fallback=$name): ${ex.getMessage}"
+        log.error(msg, ex = ex)
+        throw new RuntimeException(msg, ex)
     }
   }
   
@@ -538,7 +543,26 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     SignalShutdownDriver.registerOnce(cswCtx, ctx.system)
     
     // Phase 1: Load controller and axis-specific parameters from CSW Configuration Service
-    hcdConfig = loadConfiguration()
+    //
+    // A configuration we cannot read ends initialization, but it must not end the component:
+    // we come up Faulted with the reason visible rather than proceeding on a substituted
+    // default that would silently select simulation mode (see loadConfiguration).  Note this
+    // is the one initialization failure faultReset cannot recover — none of the
+    // controller-facing actors exist yet, and the HMI port is itself derived from the
+    // configuration, so there is no HMI to recover from either.  Recovery is: fix the
+    // Configuration Service entry or the bundled resource, then send the CSW Restart
+    // lifecycle command, which re-runs initialize().
+    //
+    // This has its own try because initialize()'s main try/catch (below) starts after the
+    // controller-facing actors have been created, and those creations depend on the config.
+    try
+      hcdConfig = loadConfiguration()
+    catch {
+      case ex: Exception =>
+        val reason = s"Configuration load failed: ${ex.getMessage}"
+        internalStateActor ! InternalStateActor.EnterFaulted(reason)
+        return
+    }
     
     // Phase 2: Connect to controller and verify identity
     // Create ControllerCommandActor; opens command TCP connection.
@@ -701,38 +725,13 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // This ensures thresholds, mechanism types, etc. are set before any commands arrive
     for ((axisChar, axisConfig) <- hcdConfig.axes) {
       val axis = Axis.fromChar(axisChar.head)
+      // The config -> IS mapping lives in AxisState.seedFromConfig so that it can be
+      // unit-tested against AxisState.SeededKeys; an omission here is otherwise silent.
+      // These values are authoritative: writeMotionConfig() pushes them to the controller's
+      // embedded variables after #SetupX, making the config file the single source of truth.
+      // Assemblies override at runtime via configAxis.
       internalStateActor ! InternalStateActor.UpdateAxisState(axis,
-        Map(
-          "inPositionThreshold" -> axisConfig.inPositionThreshold,
-          "mechanismType" -> (axisConfig.mechanismType match {
-            case "rotating" => MechanismType.Rotating
-            case "linear"   => MechanismType.Linear
-            case _          => MechanismType.Linear
-          }),
-          "algorithm" -> (axisConfig.algorithm match {
-            case "shortest" => RotatingAlgorithm.Shortest
-            case "forward"  => RotatingAlgorithm.Forward
-            case "reverse"  => RotatingAlgorithm.Reverse
-            case _          => RotatingAlgorithm.Forward
-          }),
-          "upperLimit"  -> axisConfig.upperLimit,
-          "lowerLimit"  -> axisConfig.lowerLimit,
-          // Seed IS with motion parameters from config.
-          // These are authoritative; writeMotionConfig() pushes them to the
-          // controller's embedded variables after #SetupX, making the config
-          // file the single source of truth. Assembly overrides via configAxis.
-          "maxSpeed"    -> axisConfig.maxSpeed,
-          "acceleration"-> axisConfig.acceleration,
-          "deceleration"-> axisConfig.deceleration,
-          "motionDelay" -> axisConfig.motionDelay,
-          "indexSpeed"  -> axisConfig.indexSpeed,
-          // countsPerRevolution is config-file-authoritative for rotating axes.
-          // writeMotionConfig() pushes this to cpr[] on the controller,
-          // supplanting whatever #SetupX initialised. If 0.0 on a rotating
-          // axis, writeMotionConfig() will log a warning and skip it.
-          "countsPerRevolution" -> axisConfig.countsPerRevolution,
-          "axisName" -> axisConfig.axisName.getOrElse("")
-        ),
+        AxisState.seedFromConfig(axisConfig),
         ctx.system.ignoreRef
       )
       log.info(s"Axis $axisChar config applied: threshold=${axisConfig.inPositionThreshold}, " +
@@ -2677,9 +2676,39 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
   override def onLocationTrackingEvent(trackingEvent: TrackingEvent): Unit =
     log.debug(s"onLocationTrackingEvent called: $trackingEvent")
 
-  override def onDiagnosticMode(startTime: UTCTime, hint: String): Unit = {}
+  /**
+   * Diagnostic mode raises this component's log level to DEBUG.
+   *
+   * The HCD has no separate verbose-logging mode of its own: everything an engineer would
+   * want in diagnostic mode is already logged at DEBUG (per-scan detail, thread allocation,
+   * computed timeouts), so the useful action is simply to let those records through.  The
+   * level is set on the live component prefix through LogAdminUtil, the same runtime path
+   * initialize() and the HMI use, because the static component-log-levels HOCON block does
+   * not reliably reach a prefix this deeply nested.
+   *
+   * `hint` is accepted and logged but not interpreted; there is one diagnostic level.  The
+   * `startTime` scheduling contract is not honoured: the change takes effect immediately,
+   * since a delayed increase in log verbosity has no operational value here.
+   *
+   * The internal `debug` flag mirrors the level so that internal state (and the HMI, which
+   * renders it) reports what is actually in force.
+   */
+  override def onDiagnosticMode(startTime: UTCTime, hint: String): Unit = {
+    log.info(s"onDiagnosticMode(hint=$hint): raising component log level to DEBUG")
+    LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.DEBUG)
+    hmi.HmiLogAppender.minSeverity = Level.DEBUG.name
+    internalStateActor ! InternalStateActor.UpdateHcdState(
+      Map("debug" -> true), ctx.system.ignoreRef)
+  }
 
-  override def onOperationsMode(): Unit = {}
+  /** Restores the normal INFO log level set at initialization; inverse of onDiagnosticMode. */
+  override def onOperationsMode(): Unit = {
+    log.info("onOperationsMode: restoring component log level to INFO")
+    LogAdminUtil.setComponentLogLevel(componentInfo.prefix, Level.INFO)
+    hmi.HmiLogAppender.minSeverity = Level.INFO.name
+    internalStateActor ! InternalStateActor.UpdateHcdState(
+      Map("debug" -> false), ctx.system.ignoreRef)
+  }
 }
 
 object GalilHcdApp {

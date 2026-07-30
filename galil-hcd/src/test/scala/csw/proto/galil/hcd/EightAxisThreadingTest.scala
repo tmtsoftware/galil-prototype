@@ -350,3 +350,77 @@ class EightAxisThreadingTest extends AnyFunSuite with Matchers with BeforeAndAft
     r3.thread shouldBe 0
     r3.error shouldBe None
   }
+
+  // ========================================
+  // Command-timeout cleanup (S89)
+  // ========================================
+
+  /** Current AxisState for assertions. */
+  private def axisStateOf(isActor: ActorRef[InternalStateActor.Command], axis: Axis): AxisState =
+    val probe = testKit.createTestProbe[Option[AxisState]]()
+    isActor ! InternalStateActor.GetAxisState(axis, probe.ref)
+    probe.receiveMessage().get
+
+  /** The thread IS currently has registered for an axis, if any. */
+  private def registeredThread(isActor: ActorRef[InternalStateActor.Command], axis: Axis): Option[Int] =
+    val probe = testKit.createTestProbe[Option[Int]]()
+    isActor ! InternalStateActor.GetAxisThread(axis, probe.ref)
+    probe.receiveMessage()
+
+  test("a timed-out command halts its thread, stops the motor, releases the reservation and settles the axis") {
+    val (handler, isActor, _) = createTestActors(Seq(Axis.A))
+    setAxisIdle(isActor, Axis.A)
+    Thread.sleep(100)
+
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("positionAxis", "A", Some(50000.0)), Id(), None)
+    Thread.sleep(300)
+
+    val thread = registeredThread(isActor, Axis.A).getOrElse(
+      fail("no thread registered for axis A after positionAxis"))
+    PoolCIActor.pool._2 should contain(thread)
+    axisStateOf(isActor, Axis.A).axisState shouldBe AxisStateEnum.Moving
+
+    // The watcher would normally send this after its timeout fires.
+    handler ! CommandHandlerActor.CommandTimedOut(Axis.A, thread, "positionAxis", Id())
+    Thread.sleep(400)
+
+    // Thread halted and the motor explicitly stopped: nothing follows a timeout
+    // that would stop it, unlike an interruption whose follow-on program may.
+    PoolCIActor.commands should contain(s"HX $thread")
+    PoolCIActor.commands should contain("ST A")
+
+    // Reservation released — before S89 a timeout leaked it for the life of the HCD.
+    PoolCIActor.pool._2 should not contain thread
+    registeredThread(isActor, Axis.A) shouldBe None
+    cmdStateOf(isActor, Axis.A).activeThread shouldBe -1
+
+    // A timeout is a failure of the command, not evidence of an axis fault, so the
+    // axis takes the same post-stop state a stopAxis would: Moving → Idle.
+    axisStateOf(isActor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+  }
+
+  test("a stale timeout for a thread the axis no longer owns leaves the axis untouched") {
+    val (handler, isActor, _) = createTestActors(Seq(Axis.A))
+    setAxisIdle(isActor, Axis.A)
+    Thread.sleep(100)
+
+    handler ! CommandHandlerActor.HandleCommand(
+      makeSetup("positionAxis", "A", Some(50000.0)), Id(), None)
+    Thread.sleep(300)
+
+    val thread = registeredThread(isActor, Axis.A).getOrElse(
+      fail("no thread registered for axis A after positionAxis"))
+    val commandsBefore = PoolCIActor.commands
+
+    // A timeout arriving for a DIFFERENT thread means a later command has taken the
+    // axis over (or the thread was already released): its motion must not be disturbed.
+    val staleThread = if thread == 7 then 6 else thread + 1
+    handler ! CommandHandlerActor.CommandTimedOut(Axis.A, staleThread, "positionAxis", Id())
+    Thread.sleep(300)
+
+    PoolCIActor.commands shouldBe commandsBefore          // no HX, no ST
+    registeredThread(isActor, Axis.A) shouldBe Some(thread)
+    cmdStateOf(isActor, Axis.A).activeThread shouldBe thread
+    axisStateOf(isActor, Axis.A).axisState shouldBe AxisStateEnum.Moving
+  }

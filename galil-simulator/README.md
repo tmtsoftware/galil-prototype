@@ -1,7 +1,7 @@
 # Galil Simulator
 
 Simulates a Galil DMC-500x0 motion controller, enabling the full HCD integration
-test suite (`HcdIntegrationTest` — 17 tests) to run without hardware. The simulator
+test suite (`HcdIntegrationTest` — 18 tests) to run without hardware. The simulator
 also supports standalone Assembly and Sequencer development against a simulated HCD,
 and interactive testing via the REPL client.
 
@@ -20,15 +20,19 @@ instead, the HCD's `simulate = true` mode skips `identifyController()` entirely 
 the HCD treats the simulator as an 8-axis controller by configuration.
 
 The TCP front-end accepts multiple simultaneous connections (`Pekko Streams TCP`
-server with `connections.runForeach`), so the HCD's three-connection architecture
-(command / status / console) works against the simulator just as it does against
-real hardware.
+server with `connections.runForeach`) sharing one `SimState`, so the HCD's command and
+status handles both work against the simulator and see one consistent controller. The
+**console handle is not supported**: the simulator emits no unsolicited `MG` output and
+does not implement `CF`/`CW`, which return `?`. The HCD does not open its console handle
+in simulation mode, so the console path is exercised only against real hardware.
 
 Thread management mirrors real hardware: `XQ #Label,N` sets bit N in the `_NO`
-thread status bitmask, and the bit clears when the simulated program completes.
-Per-thread state is queryable via `MG _XQ<n>` (returns the executing line number,
-or `-1` if the thread has stopped) — the same authoritative source the HCD uses
-to detect command completion in the presence of CMDERR-aborted threads.
+thread status bitmask, the bit clears when the simulated program completes, and an `XQ`
+against a thread whose bit is already set is rejected with `?`. Per-thread state is
+queryable via `MG _XQ<n>`, which is the authoritative source the HCD uses to detect
+command completion. Note the fidelity limit: the simulator reports **whether** a thread
+is running (`1.0`) or stopped (`-1.0`), not which line it is executing, so it cannot
+reproduce the hardware behaviour of a CMDERR-aborted thread reporting a stale line.
 
 ## Components
 
@@ -95,7 +99,9 @@ The `MG` command handles:
 - `_TDA` / `_TPA` — axis position
 - `TIME`, `_TM` — controller time
 - `@AN[n]` — analog inputs (returns `2.5000` baseline for all 8 channels)
-- Scalar and array variables by name
+- `_LD<axis>` — limit-switch configuration
+- `_PV<axis>` / `_BT<axis>` — PVT free FIFO slots and executed segment count
+- Scalar and array variables by name (including `ae[]` and `whlpos[]`)
 
 **Variable inspection:**
 
@@ -140,6 +146,62 @@ The `#StopX` handler is critical: it sets `moving=false` on the axis *and* clear
 the move thread that was driving it. Without this, the move thread leaks permanently
 because `advanceMotion` will never reach the target to clear it naturally. The `ST`
 and `MO` commands perform the same cleanup.
+
+### Wheel Select and the `whlpos[]` Handshake
+
+`#SelectX` positions a discrete-position mechanism and models the achieved-slot
+handshake the HCD's slot-based in-position logic depends on. The target is
+`(dmd[idx] - 1) * cpr[idx] / 8` — eight equally-spaced slots with slot 1 at the home
+angle — falling back to `dmd[idx]` as a raw count target when `cpr[idx]` is unset.
+
+Critically, the timing mirrors the embedded program rather than the command: `whlpos[idx]`
+is **invalidated to -1 at XQ** (the wheel is between slots) and the achieved slot is
+published only when the axis arrives, so `wheelPosition == commandedWheelPosition` in the
+HCD goes true on arrival and not at receipt. Abandoning a select — `#StopX`, `ST` or `MO` —
+leaves the slot unknown and discards the pending marker, so a later unrelated move that
+reaches its target cannot publish the abandoned select's slot.
+
+Program completion timing is deliberate rather than realistic. A simulated embedded
+program completes after `ProgramCompleteDelay` (250 ms), which is longer than one
+action-rate status scan, so every program is observed at least once in the running state;
+an earlier, shorter value made every simulated program complete between two scans, which
+is a corner case rather than the normal regime. `#StopX` is the exception and completes at
+`StopCompleteDelay` (30 ms), because on real hardware a stop on an idle axis genuinely does
+finish inside one scan — reproducing that is what makes the HCD's thread-reservation
+behaviour testable without hardware.
+
+## Fidelity Limits
+
+What the simulator does **not** model. These bound what a green simulated test proves:
+
+- **No unsolicited `MG` output**, and no `CF`/`CW` — the console handle and the embedded log
+  stream are exercised only against hardware (see Overview).
+- **`_XQ<n>` reports running/stopped, not a line number**, so a CMDERR-aborted thread
+  reporting a stale line cannot be reproduced.
+- **No automatic error subroutines** (`#POSERR`, `#LIMSWI`, `#MCTIME`, `#CMDERR`), no
+  following-error or limit-switch conditions, and no controller error latching. Limit inputs
+  read clear unless a test sets them directly; fault paths that originate in the controller
+  must be verified on hardware.
+- **No acceleration profile** — motion is velocity-limited, so `accel[]`/`decel[]` are stored
+  and queryable but do not shape the trajectory. Timeout arithmetic that depends on ramp
+  time is therefore not validated by simulated runs.
+- **Homing is not a seek** — `#HomeX` sets the reference position directly rather than
+  finding an index pulse.
+- **No fault injection, no time scaling, no randomness** — behaviour is deterministic for a
+  given command sequence.
+- **`XQ #Setup,0`, the label the HCD actually sends, configures nothing.** Label dispatch
+  matches on the `Setup` prefix and derives the axis from the label's last character, so the
+  omnibus `#Setup` program resolves to axis `'p'`: it is accepted and completes normally, but
+  no per-axis configuration is applied. `#HomeAll` has the same shape.
+- **Program transfer is permissive** — the 80-character DMC line limit is not enforced and
+  the controller's deferred second acknowledgement on `DL` is not reproduced, so
+  program-transfer edge cases are hardware-only.
+- **Servo axes read position 0** — the DataRecord's `motorPosition` field is hardcoded to 0
+  and real position is carried in `auxiliaryPosition`, which the HCD reads only for stepper
+  axes. Every simulated axis defaults to stepper, so this is invisible until an axis is
+  configured as a servo.
+- **Application-specific embedded behaviour is out of scope** — multi-stage homing, brakes,
+  pins and external encoders are supplied per subsystem.
 
 ## Running the Simulator
 
@@ -196,7 +258,7 @@ spawns a fresh actor and communicates through the `Command` message protocol.
 sbt "galil-simulator/testOnly *GalilSimulatorActorTest"
 ```
 
-73 tests in ~8s covering:
+114 tests covering:
 
 | Category | Tests | What's verified |
 |----------|------:|-----------------|
@@ -204,7 +266,7 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"
 | Embedded variables | 3 | Set/get, multi-variable independence, unset defaults |
 | MG system queries | 4 | _NO, _TDA, TIME, @AN |
 | Motor on/off & axis cmds | 4 | SH/MO via QR status bits, SP/AC set+query, DP |
-| Thread management | 4 | XQ sets bits, completion clears, multi-thread, HX |
+| Thread management | 6 | XQ sets bits, completion clears, multi-thread, HX, busy-thread rejection |
 | #Init | 1 | Default variable initialization |
 | #Setup | 1 | Stepper config, motor off |
 | #Home | 1 | Position reset, motor enable |
@@ -212,13 +274,16 @@ sbt "galil-simulator/testOnly *GalilSimulatorActorTest"
 | #Stop / ST / MO | 3 | Thread leak fix via #StopX, ST all-axes, MO cleanup |
 | #Track | 2 | Jog start + thread release, position change over time |
 | QR DataRecord | 8 | Header/axis count, position, velocity 64x, threadStatus, stepper bit, PA mode bit, jog clears PA bit, negative direction bit |
-| Program upload/download | 2 | UL/DL protocol |
+| Program upload/download | 5 | UL/DL protocol, stored text round-trip |
 | Edge cases | 3 | Zero-distance move, sequential moves, sample counter increment |
 | JG/BG direct commands | 2 | Jog speed set/query, begin motion |
 | Direct queries (TP/TD/TV/SC/TS) | 13 | Single-axis, all-axis comma-separated, homed bit, motion reflection, axis B |
 | LV / LA | 5 | Scalar-only filtering, array dimensions, empty state |
 | Digital I/O (SB/CB) | 6 | Set/clear bit, byte/bit mapping, accumulation, isolation, bits 9-16 |
 | Analog inputs (`MG @AN`) | 3 | Numeric for all 8 channels, 2.5V baseline, compound query (`MG @AN[1],@AN[2],...`) |
+| Limit configuration (`_LDx`) | 3 | Default (both enabled), LDx write/read round-trip, compound query |
+| #Select / `whlpos[]` | 10 | Default unknown slot, invalidation while moving, `(slot-1)*cpr/8` target, publication on arrival, slot 1 = home angle, cpr-unset fallback, a plain move leaving the slot untouched, abandon-by-`#StopX` and by `ST` leaving it unknown, per-axis independence, compound poll form |
+| PVT / tracking | 23 | PVA accept + malformed rejection, `_PVA` free slots, `_BTA` executed count, compound and multi-axis queries, per-axis independence, BT begin + counter reset, multi-segment execution, status word bits 15/14, implicit motor-on, `(0,0,0)` terminator, ST/MO/#StopX FIFO drain, silent underrun, FIFO at capacity, RS recovery |
 
 ### Legacy Integration Test
 
@@ -236,6 +301,6 @@ sbt "galil-simulator/testOnly *GalilIoTests"
 
 | Suite | Tests | Dependencies |
 |-------|------:|-------------|
-| GalilSimulatorActorTest | 73 | None |
+| GalilSimulatorActorTest | 114 | None |
 | GalilIoTests | 2 | Simulator running |
-| **Total** | **75** | |
+| **Total** | **116** | |

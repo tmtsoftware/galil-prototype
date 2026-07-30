@@ -30,7 +30,12 @@ import scala.concurrent.duration._
  * Error conditions:
  *   - axisErrorMsg is non-empty → Error
  *   - commandHalted flag set → Error (command was interrupted, SDD 4.8.1)
- *   - Timeout exceeded → halt motion, set axisState=Error, Error
+ *   - HCD enters Faulted → Error (a controller-level fault while the command was running)
+ *   - Timeout exceeded → Error, and the hardware cleanup is handed to the CommandHandler
+ *     (CommandTimedOut): halt the thread, stop the motor, release the reservation, and settle
+ *     the axis into its post-stop state.  This actor does not do that work itself — it holds
+ *     no controller handle, and giving it one would put a second orchestrator of halts
+ *     alongside CommandHandlerActor, which ADR-001 deliberately concentrated in one place.
  */
 object CommandWatcherActor:
 
@@ -163,7 +168,8 @@ object CommandWatcherActor:
     onSuccessAxisUpdates: Map[String, Any] = Map.empty,
     activeThread: Int = -1,
     resultReporter: Option[(Id, Boolean, String) => Unit] = None,
-    loggerFactory: LoggerFactory = null
+    loggerFactory: LoggerFactory = null,
+    commandHandler: Option[ActorRef[CommandHandlerActor.Command]] = None
   )
 
   // ========================================
@@ -306,11 +312,19 @@ object CommandWatcherActor:
 
         case CommandTimeout =>
           log.warn(s"Watch ${config.commandName}/${config.axis}: TIMEOUT after ${config.timeout}")
-          config.internalStateActor ! InternalStateActor.UpdateAxisCmdState(
-            config.axis,
-            Map("clearActiveCommand" -> true),
-            ctx.system.ignoreRef
-          )
+          // Hardware cleanup (halt the thread, stop the motor, release the reservation) and the
+          // post-stop axis state belong to the CommandHandler: this actor has no controller
+          // handle, and the halt sequence is deliberately implemented in one place (ADR-001).
+          // Note we do NOT clear the active command here — clearing it zeroes activeThread,
+          // and doing that ahead of the halt is the defect shape ADR-001 Amendment A4 records.
+          config.commandHandler match {
+            case Some(handler) =>
+              handler ! CommandHandlerActor.CommandTimedOut(
+                config.axis, config.activeThread, config.commandName, config.runId)
+            case None =>
+              log.debug(s"Watch ${config.commandName}/${config.axis}: no CommandHandler ref — " +
+                s"reporting the timeout without hardware cleanup (unit-test wiring)")
+          }
           cleanup(config, cmdStateAdapter, hcdStateAdapter, ctx, log)
           reportResult(config, false,
             s"${config.commandName} on axis ${config.axis} timed out after ${config.timeout}", ctx)

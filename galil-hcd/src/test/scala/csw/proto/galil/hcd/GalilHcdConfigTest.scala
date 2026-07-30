@@ -99,6 +99,81 @@ class GalilHcdConfigTest extends AnyFunSuite {
     assert(defaultConfig.axes.contains("B"))
   }
   
+  // ============================================================
+  // Config -> internal state seeding (AxisState.seedFromConfig)
+  //
+  // S89: indexOffset was written to the controller's hoff[] but never seeded into
+  // internal state, so the HMI reported 0.0 for a configured axis and the SDD's
+  // "config file is the single source of truth" claim did not hold. The first test
+  // below is the guard against that class of omission recurring.
+  // ============================================================
+
+  test("axis seed covers exactly the declared set of configured fields") {
+    val hcdConfig = GalilHcdConfig.fromConfig(ConfigFactory.load("GalilHcdConfig.conf"))
+    val seed = AxisState.seedFromConfig(hcdConfig.axes("A"))
+
+    assert(seed.keySet == AxisState.SeededKeys,
+      s"seed/SeededKeys mismatch — missing: ${AxisState.SeededKeys -- seed.keySet}, " +
+      s"unexpected: ${seed.keySet -- AxisState.SeededKeys}")
+  }
+
+  test("axis seed carries every configured value, including indexOffset (S89 regression)") {
+    val hcdConfig = GalilHcdConfig.fromConfig(ConfigFactory.load("GalilHcdConfig.conf"))
+    val axisA = hcdConfig.axes("A")
+    val seed  = AxisState.seedFromConfig(axisA)
+
+    assert(seed("indexOffset") == axisA.indexOffset)
+    assert(axisA.indexOffset != 0.0, "fixture must use a non-zero indexOffset to be meaningful")
+    assert(seed("inPositionThreshold") == axisA.inPositionThreshold)
+    assert(seed("upperLimit") == axisA.upperLimit)
+    assert(seed("lowerLimit") == axisA.lowerLimit)
+    assert(seed("maxSpeed") == axisA.maxSpeed)
+    assert(seed("acceleration") == axisA.acceleration)
+    assert(seed("deceleration") == axisA.deceleration)
+    assert(seed("motionDelay") == axisA.motionDelay)
+    assert(seed("indexSpeed") == axisA.indexSpeed)
+    assert(seed("countsPerRevolution") == axisA.countsPerRevolution)
+    assert(seed("mechanismType") == MechanismType.Linear)
+    assert(seed("algorithm") == RotatingAlgorithm.Forward)
+  }
+
+  test("applying the seed populates AxisState, including indexOffset (S89 regression)") {
+    val hcdConfig = GalilHcdConfig.fromConfig(ConfigFactory.load("GalilHcdConfig.conf"))
+    val axisB = hcdConfig.axes("B")
+    val seeded = AxisState().update(AxisState.seedFromConfig(axisB))
+
+    assert(seeded.indexOffset.contains(axisB.indexOffset))
+    assert(seeded.inPositionThreshold == axisB.inPositionThreshold)
+    assert(seeded.maxSpeed.contains(axisB.maxSpeed))
+    assert(seeded.acceleration.contains(axisB.acceleration))
+    assert(seeded.deceleration.contains(axisB.deceleration))
+    assert(seeded.indexSpeed.contains(axisB.indexSpeed))
+    assert(seeded.motionDelay.contains(axisB.motionDelay))
+    assert(seeded.countsPerRevolution.contains(axisB.countsPerRevolution))
+    assert(seeded.mechanismType == MechanismType.Rotating)
+    assert(seeded.algorithm.contains(RotatingAlgorithm.Shortest))
+    assert(seeded.upperLimit.contains(axisB.upperLimit))
+    assert(seeded.lowerLimit.contains(axisB.lowerLimit))
+  }
+
+  test("a rotating axis with a non-zero indexOffset seeds it (fixture-independent)") {
+    val ax = AxisConfig(
+      mechanismType = "rotating",
+      upperLimit = 360.0,
+      lowerLimit = 0.0,
+      algorithm = "reverse",
+      inPositionThreshold = 1.0,
+      indexOffset = 37.5,
+      axisName = Some("Test Wheel"),
+      countsPerRevolution = 3600.0
+    )
+    val seeded = AxisState().update(AxisState.seedFromConfig(ax))
+
+    assert(seeded.indexOffset.contains(37.5))
+    assert(seeded.algorithm.contains(RotatingAlgorithm.Reverse))
+    assert(seeded.axisName.contains("Test Wheel"))
+  }
+
   test("should validate activeAxes has exactly 8 elements") {
     val badConfig = """
       controller {
