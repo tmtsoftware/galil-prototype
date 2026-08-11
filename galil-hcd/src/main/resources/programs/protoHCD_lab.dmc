@@ -1,0 +1,347 @@
+REM ----------------------------------------------------------------------------
+REM Programs to control a testbench with 2 steppers
+REM testing lab hardware of 2 stepper motors on axes A and B
+REM Source file name: protoHCD_lab.dmc
+REM Updated for FD phase Embedded design
+REM ----------------------------------------------------------------------------
+REM Helper Routines
+REM ----------------------------------------------------------------------------
+#fill;              'simple subroutine to fill array with values
+^c= 0;              'use local scope ^c for iterator
+#fill_h;            'fill loop
+^a[^c]= ^b;         'set each value of the array
+^c= ^c+1
+JP #fill_h,(^c<^a[-1]);'keep setting array values for length of array
+EN
+#print;             'simple subroutine to print all values of an array
+^c= 0;              'use local scope ^c for iterator
+#print_h;           'print loop
+MG "axis ",^c, " is ",^a[^c]
+^c=^c+1
+JP #print_h,(^c<^a[-1])
+EN
+REM ----------------------------------------------------------------------------
+#AUTO
+REM Code here runs automatically when the controller starts
+REM Call INIT here for now. May want to eventually call Init from the HCD only.
+REM XQ #Init,7
+EN
+'
+REM ----------------------------------------------------------------------------
+REM Start of ERROR Handling
+REM ----------------------------------------------------------------------------
+REM Ensure EEPROM errors are reported.
+#AUTOERR
+MG "HCD EEPROM ERROR ", _RS,{^17}{^10},":"
+WT 3000
+REM Impacts all axes
+JP #fill("ae",1)
+JS #AUTOERR
+EN
+REM  Report any position errors
+#POSERR
+MG "HCD POSERR"
+REM Check each axis
+~a=0; ' axis designator
+b=0;  ' array index
+#pe_h
+IF (@ABS[_TE~a]>=_ER~a)
+  MG "Position Error ",_TE~a, " occured on ",~a{F1.0}," axis "
+  ae[b]=2
+ENDIF
+~a=~a+1; b=b+1
+JP#pe_h,~a<_BV
+ZS
+RE
+REM  Report any lost TCP connections
+#TCPERR
+MG "HCD TCPERR ", _IA4
+RE
+REM Trap program errors so threads are not killed
+#CMDERR
+MG "HCD CMDERR ",_ED,_TA,_TC
+EN
+#LIMSWI
+MG "Limit Hit"
+WT500
+RE1
+#MCTIME
+MG "Motion Timeout"
+SC
+EN
+REM ----------------------------------------------------------------------------
+REM Init - setup controller and intialize variables
+#Init
+REM ----------------------------------------------------------------------------
+REM Global configuration
+CN 1;    'All Limit Switches active high
+MO;      'All motors OFF - necessary or some commands fail
+' create arrays, variables
+DM ae[8]
+DM dmd[8]
+DM accel[8]
+DM decel[8]
+DM speed[8]
+DM hspd[8]
+DM hoff[8]
+DM mdelay[8]
+DM cpr[8]
+DM whlpos[8]
+aeBusy=0
+' default the motor parameters to those in flash EEPROM
+accel[0]=_ACA
+accel[1]=_ACB
+accel[2]=_ACC
+accel[3]=_ACD
+accel[4]=_ACE
+accel[5]=_ACF
+accel[6]=_ACG
+REM
+decel[0]=_DCA
+decel[1]=_DCB
+decel[2]=_DCC
+decel[3]=_DCD
+decel[4]=_DCE
+decel[5]=_DCF
+decel[6]=_DCG
+REM
+speed[0]=_SPA
+speed[1]=_SPB
+speed[2]=_SPC
+speed[3]=_SPD
+speed[4]=_SPE
+speed[5]=_SPF
+speed[6]=_SPG
+REM
+hspd[0]=_HVA
+hspd[1]=_HVB
+hspd[2]=_HVC
+hspd[3]=_HVD
+hspd[4]=_HVE
+hspd[5]=_HVF
+hspd[6]=_HVG
+REM
+JS #fill("ae",0)
+REM setup home offset values
+REM (motion after index before setting position to 0)
+JS #fill("hoff",0); 'default to 0 home offset
+JS #fill("whlpos",-1); 'default to no achieved wheel position
+REM
+REM setup motor delay values (wait/settling times after moves before 
+REM the move is considered done - needed before MO cmd)
+mdelay[0]=100
+mdelay[1]=100
+mdelay[2]=100
+mdelay[3]=100
+mdelay[4]=100
+mdelay[5]=100
+mdelay[6]=100
+MG "Controller Initialized"
+EN
+REM ----------------------------------------------------------------------------
+REM End of #INIT
+REM ----------------------------------------------------------------------------
+REM 
+REM Helper routine to clear all axis error messages
+#ae0
+JS #fill("ae",0)
+EN
+#Status
+' generate a status message
+ MG "HCD STATUS threads: "{N}
+ MG (_NO&128)/128{N}{F1.0}
+ MG (_NO&64)/64{N}{F1.0}
+ MG (_NO&32)/32{N}{F1.0}
+ MG (_NO&16)/16{N}{F1.0}
+ MG (_NO&8)/8{N}{F1.0}
+ MG (_NO&4)/4{N}{F1.0}
+ MG (_NO&2)/2{N}{F1.0}
+ MG (_NO&1)/1{F1.0}
+ MG "HCD STATUS error code:  ", _TC, _TA0
+REM MG "axisErr error codes:  "; JS #print("ae")
+ MG "axis error codes: ",ae[0]{F1.0}, ae[1]
+ MG "HCD STATUS positions: ", _TDA, _TDB
+EN
+REM Call all Setup Routines in parallel
+REM Call this on thread 0, spawn the others
+#Setup
+MG "Starting all Setup programs"
+XQ #SetupA,1
+WT 2
+XQ #SetupB,2
+EN
+REM Call all Init(Home) Routines in parallel
+REM Call this on thread 0, spawn the others
+#HomeAll
+MG "Starting all Home programs"
+XQ #HomeA,1
+WT 2
+XQ #HomeB,2
+EN
+'
+REM ----------------------------------------------------------------------------
+REM Axis A - Stepper Motor setup
+REM continuously rotating with no limits or home?
+#SetupA
+ae[0]=1
+MTA=2.0;     'Stepper motor with active low step pulses
+REM LCA=2;   'Waits for 0 samples after a move is completed, then provides 0% current
+LDA=3;       'Both limit switches disabled
+AGA=1;       'D4140 stepper amplifier - 0.85 A phase current
+SPA=1000;   'Value of jog speed in encoder counts/second
+speed[0]=1000; 'Sync embedded speed array 
+cpr[0]=400; 'counts in one 360 degree rotation
+STA;         'SAFETY: Stop Axis A
+MOA;         'SAFETY: Stop Motor A
+MG "Axis A setup done"
+ae[0]=0
+EN
+REM Axis A done
+REM ----------------------------------------------------------------------------
+REM Axis B - Stepper Motor setup
+REM continuously rotating with no limits or home
+#SetupB
+ae[1]=1
+MTB=2.0;    'Stepper motor with active low step pulses
+REM LCB=2;  'Waits for 0 samples after a move is completed, then provides 0% current
+LDB=3;      'Both limit switches disabled
+AGB=1;      'D4140 stepper amplifier - 0.85 A phase current
+SPB=1000;  'Value of jog speed in encoder counts/second
+speed[1]=1000; 'Sync embedded speed array 
+cpr[1]=400; 'counts in one 360 degree rotation
+STB;        'SAFETY: Stop Axis F
+MOB;        'SAFETY: Stop Motor F
+MG "Axis B setup done"
+ae[1]=0
+EN
+REM Axis B done
+'
+#HomeA
+ae[0]=1
+HVA=hspd[0]
+SHA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+DPA=0
+MG "Motor A Homed",_TDA," OK",{^13}{^10},":"
+ae[0]=0
+EN
+'
+#HomeB
+ae[1]=1
+HVB=hspd[1]
+SHB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+DPB=0
+MG "Motor B Homed",_TDB," OK",{^13}{^10},":"
+ae[1]=0
+EN
+'
+#MoveA
+ae[0]=1
+SPA=speed[0]
+ACA=accel[0]
+DCA=decel[0]
+SHA
+PAA=dmd[0]
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+MG "Motor A MOVE to ",_TDA," in ",dtime0/tcon," sec"
+ae[0]=0
+EN
+'
+#MoveB
+ae[1]=1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=dmd[1]
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B MOVE to ",_TDB," in ",dtime1/tcon," sec"
+ae[1]=0
+EN
+'
+#SelectA
+ae[0]=1
+' Move rotational device A to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[0]=-1
+SPB=speed[0]
+ACB=accel[0]
+DCB=decel[0]
+SHA
+PAA=(dmd[0]-1)*(cpr[0]/8)
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+whlpos[0]=dmd[0]
+MG "Motor A select #", dmd[0]," move to ",_TDA," in ", dtime0/tcon," sec"
+ae[0]=0
+EN
+'
+#SelectB
+ae[1]=1
+' Move rotational device B to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[1]=-1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=(dmd[1]-1)*(cpr[1]/8)
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+whlpos[1]=dmd[1]
+MG "Motor B select #", dmd[1]," move to ",_TDB," in ", dtime0/tcon," sec"
+ae[1]=0
+EN
+'
+#StopA
+' a command to stop the motor
+ae[0]=1
+STA
+MG "Motor A STOP"
+ae[0]=0
+EN
+'
+#StopB
+' a command to stop the motor
+ae[1]=1
+STB
+MG "Motor B STOP"
+ae[1]=0
+EN

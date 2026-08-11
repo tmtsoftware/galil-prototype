@@ -6,3 +6,4 @@ target
 /dump_alarm_master.rdb
 /dump_event_master.rdb
 /.bsp/sbt.json
+.DS_Store

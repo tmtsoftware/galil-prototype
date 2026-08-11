@@ -15,6 +15,31 @@ abstract class GalilIo {
   protected def write(sendBuf: Array[Byte]): Unit
 
   /**
+   * Writes raw data to the socket without waiting for a response.
+   * Used for streaming commands like DL (program download) where
+   * responses don't come after each line.
+   * 
+   * @param data string to write (will add \r\n terminator)
+   */
+  def writeRaw(data: String): Unit = {
+    val sendBuf = s"$data\r\n".getBytes()
+    write(sendBuf)
+  }
+
+  /**
+   * Drains input buffer and shows what data is present.
+   * Waits up to timeoutMs for data to arrive before returning.
+   * 
+   * This is a safety net for debugging and error recovery.
+   * In normal operation with proper protocol implementation, this should
+   * return empty strings. If it finds data, that indicates a protocol bug.
+   * 
+   * @param timeoutMs maximum time to wait for data (default 200ms)
+   * @return string of data read from buffer
+   */
+  def drainAndShowBuffer(timeoutMs: Int = 200): String
+
+  /**
    * Reads the reply from the socket and returns it as a ByteString
    */
   protected def read(): ByteString
@@ -24,6 +49,22 @@ abstract class GalilIo {
    * (Do not use this object after closing the socket).
    */
   def close(): Unit
+
+  /**
+   * Set the socket read timeout. 0 = block indefinitely until a response arrives.
+   * The normal operating value is 3000ms. During axis setup, callers may set this
+   * to 0 so that MG _NO polls block through BZ commutation pauses without timing
+   * out and desynchronizing the socket. Default implementation is a no-op (simulator).
+   */
+  def setReadTimeout(timeoutMs: Int): Unit = ()
+
+  /**
+   * Returns the current socket read timeout in ms.
+   * Default implementation returns 0 (simulator); concrete TCP impl returns SO_TIMEOUT.
+   */
+  def getReadTimeout: Int = 0
+
+
 
   // From the Galil doc:
   // 2) Sending a Command
@@ -43,13 +84,204 @@ abstract class GalilIo {
    *
    * @param cmd command to pass to the controller (May contain multiple commands separated by ";")
    * @return list of (command, reply) from the controller (one pair for each ";" separated command)
+   * @throws IllegalArgumentException if cmd exceeds the controller's per-line command buffer (80 chars)
    */
   def send(cmd: String): List[(String, ByteString)] = {
+    // Galil DMC controllers parse one command line at a time, terminated by \r\n.
+    // The line buffer is 80 characters (includes any compound `;`-separated content).
+    // Sending an over-length line risks truncation or rejection at the controller,
+    // with hard-to-diagnose downstream symptoms. Catch it at the boundary.
+    // (If a future firmware/model changes this, update the constant below.)
+    if (cmd.length > GalilIo.maxCommandLineLength) {
+      throw new IllegalArgumentException(
+        s"Galil command line exceeds ${GalilIo.maxCommandLineLength} chars (${cmd.length}): '$cmd'")
+    }
     val cmds    = cmd.split(';')
     val sendBuf = s"$cmd\r\n".getBytes()
     write(sendBuf)
-    val result = for (c <- cmds) yield (c, receiveReplies())
-    result.toList
+    
+    if (cmds.length == 1) {
+      // Single command — use existing receiveReplies() directly
+      List((cmds.head, receiveReplies()))
+    } else {
+      // Compound command — collect all responses, then pair with commands.
+      // Galil sends one ":" per sub-command, but they may arrive in a single TCP packet
+      // (e.g. "speed[0]=500;accel[0]=9216" returns "::" as one read).
+      // We read until we have the expected number of colon-delimited responses.
+      val allResponses = receiveCompoundReplies(cmds.length)
+      cmds.zip(allResponses).toList
+    }
+  }
+
+  /**
+   * Sends a command and waits only for the acknowledgment prompt (:).
+   * Used for commands that don't return data, just confirmation.
+   *
+   * Drains the receive buffer before sending so the ":" we consume is
+   * unambiguously the ack for this command, not a stray byte left by a
+   * prior operation.  Short timeout — under normal operation the buffer
+   * is empty and this is a no-op.
+   *
+   * @param cmd command to send
+   * @throws RuntimeException if response is not ":" or command was rejected ("?")
+   */
+  def sendAndWaitForPrompt(cmd: String): Unit = {
+    drainAndShowBuffer(timeoutMs = 50)
+    val responses = send(cmd)
+    if (responses.size != 1) {
+      throw new RuntimeException(s"Expected 1 response to '$cmd', got ${responses.size}")
+    }
+    val (_, response) = responses.head
+    val responseStr = response.utf8String.trim
+    // Empty response means we got ":" which was stripped by receiveReplies
+    // "?" means command was rejected
+    if (responseStr == "?") {
+      throw new RuntimeException(s"Command '$cmd' rejected by controller")
+    }
+    // Otherwise, empty or ":" is success
+  }
+
+  /**
+   * Downloads program from controller using UL command.
+   * Properly implements the UL protocol.
+   * 
+   * @return program text from controller (without backslash terminator)
+   */
+  def downloadProgram(): String = {
+    val responses = send("UL")
+    if (responses.size != 1) {
+      throw new RuntimeException(s"Expected 1 response to UL, got ${responses.size}")
+    }
+    
+    val program = responses.head._2.utf8String
+    
+    // UL terminates with backslash - remove it if present
+    program
+      .stripSuffix("\\")
+      .stripSuffix("\u001A")  // Control-Z (alternative terminator)
+      .trim
+  }
+
+  /**
+   * Uploads program to controller using the DL command.
+   *
+   * Protocol mechanics (verified S59/S60 on lab DMC-50040 and STB DMC-4080):
+   *  - Controller is silent during DL reception and program streaming.
+   *  - After the "\" terminator, the controller emits TWO ":" acks:
+   *    first for "\" (exit DL mode), then a deferred ack for "DL" itself
+   *    (the DL command could not ack at its conventional moment because the
+   *    parser was held in DL-streaming mode).  Both must be consumed.
+   *  - If the DL parser rejects any line (e.g. line >80 chars), it emits "?"
+   *    after streaming completes but BEFORE "\" is sent.  We sample the
+   *    receive buffer for "?" between program streaming and "\" so we can
+   *    fail loudly with a useful diagnostic rather than silently committing
+   *    a truncated program.
+   *
+   * Internally manages a longer read timeout (10s) for the duration of the
+   * upload because large programs can race the default 3s timeout on the
+   * post-"\" ack; restored in finally.  Callers therefore don't need to know.
+   *
+   * Note: this is a pure protocol primitive.  Callers are responsible for
+   * halting running threads (HX) and any other higher-level coordination
+   * before invoking upload.
+   *
+   * @param program the program text to upload (already prepared / size-validated)
+   * @throws RuntimeException if the DL parser rejected any line (response contains "?")
+   * @throws RuntimeException if the final "\" ack is "?"
+   */
+  def uploadProgram(program: String): Unit = {
+    val oldTimeout = getReadTimeout
+    try {
+      setReadTimeout(10000)
+
+      // Buffer hygiene before DL: any stray byte left by a prior operation
+      // would otherwise be misread as part of the DL response stream.
+      drainAndShowBuffer(timeoutMs = 100)
+
+      // Begin download.  Controller is silent until "\" arrives if DL is
+      // healthy; any "?" in the post-stream drain means at least one line
+      // was rejected (typically a line >80 chars — see ProgramFileManager).
+      writeRaw("DL")
+      writeRaw(program)
+      val drained = drainAndShowBuffer(timeoutMs = 50)
+      if (drained.contains('?')) {
+        val preview = drained.replace("\r", "\\r").replace("\n", "\\n").take(120)
+        throw new RuntimeException(
+          s"DL rejected ${drained.count(_ == '?')} line(s). Drain content: '$preview'"
+        )
+      }
+
+      // Terminate the download.  sendAndWaitForPrompt throws on "?".  After
+      // it returns we drain the DL command's own deferred ack so subsequent
+      // commands don't misread it as their own response.
+      sendAndWaitForPrompt("\\")
+      drainAndShowBuffer(timeoutMs = 200)
+    } finally {
+      setReadTimeout(oldTimeout)
+    }
+  }
+
+  // Receives multiple replies for a compound command (semicolon-separated).
+  // Galil sends one ":" per sub-command, but for commands that don't return data
+  // (like variable assignments), multiple ":" may arrive in a single TCP read.
+  // This method accumulates data and splits on ":" boundaries until we have
+  // the expected number of responses.
+  //
+  // Response formats:
+  //   Assignment (speed[0]=500):   ":"
+  //   Query (MG speed[0]):         "500.0000\r\n:"
+  //   Error:                       "?"
+  //
+  // So a compound like "speed[0]=500;MG speed[0]" returns ":\r\n500.0000\r\n:"
+  // and "speed[0]=500;accel[0]=9216" returns "::"
+  private def receiveCompoundReplies(expectedCount: Int): Array[ByteString] = {
+    var accumulated = ByteString.empty
+    var responses = Array.empty[ByteString]
+    
+    while (responses.length < expectedCount) {
+      val data = read()
+      if (data.isEmpty) {
+        // Timeout or connection closed — return what we have, padded with empty
+        return responses.padTo(expectedCount, ByteString.empty)
+      }
+      accumulated = accumulated ++ data
+      
+      // Split accumulated data on ":" boundaries
+      responses = splitResponses(accumulated)
+    }
+    
+    responses.take(expectedCount)
+  }
+
+  // Split raw Galil response data into individual responses.
+  // Each response is terminated by ":". Data responses include "\r\n" before the ":".
+  // We split on ":" and clean up each segment.
+  // Split raw Galil response data into individual responses.
+  // Each response is terminated by ":". Data responses include "\r\n" before the ":".
+  // We split on ":" and clean up each segment.
+  //
+  // Java's String.split(":") drops trailing empty strings, so ":::" returns Array().
+  // We must use split(":", -1) to preserve them: ":::" → Array("", "", "", "")
+  private def splitResponses(data: ByteString): Array[ByteString] = {
+    val str = data.utf8String
+    // A complete compound response ends with ":" (success) or "?" (error on last sub-command).
+    // Without this check we'd loop forever if the last sub-command returns an error on hardware.
+    if (!str.endsWith(":") && !str.endsWith("?")) return Array.empty  // incomplete response
+    
+    // Normalise: replace "?" error terminators with ":" so we can split uniformly.
+    // Each "?" represents one rejected sub-command response.
+    val normalised = str.replace("?", ":")
+    
+    val parts = normalised.split(":", -1)  // -1 preserves trailing empty strings
+    // For ":::" → ["", "", "", ""]  (4 parts, 3 responses)
+    // For "500.0000\r\n:" → ["500.0000\r\n", ""]  (2 parts, 1 response)
+    // For ":500.0000\r\n:" → ["", "500.0000\r\n", ""]  (3 parts, 2 responses)
+    // Last element is always "" (after final ":"), so drop it.
+    // Remaining elements are the response data (one per sub-command).
+    val responses = parts.dropRight(1)  // drop trailing empty after last ":"
+    responses.map { part =>
+      ByteString(part.stripSuffix("\r\n").stripSuffix("\r"))
+    }
   }
 
   // Receives a reply (up to endMarker) for the given command and returns the result
@@ -59,18 +291,35 @@ abstract class GalilIo {
   private def receiveReplies(result: ByteString = ByteString()): ByteString = {
     val data   = read()
     val length = data.length
+    
+    // DEBUG: Show what we received and what terminators we're checking
+    // if (length > 0) {
+    //   val preview = if (length > 50) data.utf8String.take(50) + "..." else data.utf8String
+    //   val endChars = if (length >= 3) data.takeRight(3).utf8String.map(c => s"'$c'(${c.toInt})").mkString(" ") else ""
+    //   println(s"DEBUG GalilIo.receiveReplies: Read $length bytes, end chars: [$endChars], preview: $preview")
+    // }
+    
     if (length == 0) result
     else if (length == 1 && data.utf8String == "?")
       result ++ data
-    else if (data.takeRight(endMarker.length).utf8String == endMarker)
+    else if (data.takeRight(endMarker.length).utf8String == endMarker) {
+      // println(s"DEBUG GalilIo: Found endMarker '\\r\\n:', complete")
       result ++ data.dropRight(endMarker.length)
-    else if (data.takeRight(separator.length).utf8String == separator)
-      result ++ data.dropRight(separator.length)
+    }
+    // REMOVED separator check - it was stopping at line endings instead of response end
+    // else if (data.takeRight(separator.length).utf8String == separator) {
+    //   println(s"DEBUG GalilIo: Found separator '\\r\\n', complete")
+    //   result ++ data.dropRight(separator.length)
+    // }
     else if (data.takeRight(1).utf8String == ":") {
+      // println(s"DEBUG GalilIo: Found colon ':', complete")
       result ++ data.dropRight(1)
     }
-    else
-      result ++ data // Should not happen?
+    else {
+      // Response incomplete - recurse to read more
+      // println(s"DEBUG GalilIo: Response incomplete ($length bytes, total so far: ${result.length + data.length}), recursing...")
+      receiveReplies(result ++ data)
+    }
   }
 }
 
@@ -86,6 +335,79 @@ object GalilIo {
   // See http://www.galilmc.com/news/software/using-socket-tcpip-or-udp-communication-galil-controllers
   //  val bufSize: Int = 450
   val bufSize: Int = 406
+
+  // Maximum length of a single command line (one \r\n-terminated string).
+  // Per Galil DMC documentation the parser line buffer is 80 characters; this
+  // applies to compound `;`-separated lines as a whole, not per sub-command.
+  // Update if a future controller model documents a different limit.
+  val maxCommandLineLength: Int = 80
+
+  /**
+   * Pack sub-commands into chunks that each fit within maxCommandLineLength
+   * when joined with ';'. Returns a sequence of compound command strings
+   * ready for individual `send()` calls.
+   *
+   * Greedy packing: each chunk is grown until adding the next sub-command
+   * would exceed the line limit. A sub-command longer than the limit by
+   * itself is returned as a single-element chunk (which `send` will then
+   * reject with IllegalArgumentException — letting the caller see exactly
+   * which sub-command is over-length).
+   *
+   * Empty input → empty output.
+   */
+  def chunkCompound(subCommands: Seq[String]): Seq[String] = {
+    val chunks  = scala.collection.mutable.ListBuffer[String]()
+    val current = new StringBuilder
+    subCommands.foreach { cmd =>
+      val addedLen = if (current.isEmpty) cmd.length else current.length + 1 + cmd.length
+      if (current.nonEmpty && addedLen > maxCommandLineLength) {
+        chunks += current.toString
+        current.clear()
+      }
+      if (current.nonEmpty) current.append(';')
+      current.append(cmd)
+    }
+    if (current.nonEmpty) chunks += current.toString
+    chunks.toSeq
+  }
+
+  /**
+   * Split the operands of a compound `MG` read across as many command lines as the
+   * controller's line buffer requires, returning ready-to-send strings ("MG a,b,c").
+   * Operand order is preserved across chunks, so a caller that concatenates the reply
+   * tokens receives them in request order.
+   *
+   * Distinct from chunkCompound: that packs independent sub-commands joined with ';'
+   * (each answered by its own ':'), whereas this packs the comma-separated arguments of
+   * a SINGLE MG, whose reply is one line of space-separated values.
+   *
+   * A compound MG over eight axes is not automatically within the limit. At nine
+   * characters per operand `MG whlpos[0],...,whlpos[7]` is 82 characters, so `send`
+   * rejected it before writing and the achieved wheel-slot readback never happened on
+   * any 8-axis configuration; the same arithmetic applies to `MG _PVx,_BTx` over eight
+   * tracking axes. Callers must chunk rather than assume.
+   *
+   * An operand too long to share a line is returned as its own chunk, which `send` then
+   * rejects — surfacing which operand is at fault rather than truncating the read.
+   *
+   * Empty input → empty output (no round trip).
+   */
+  def chunkMgOperands(operands: Seq[String]): Seq[String] = {
+    val prefix  = "MG "
+    val chunks  = scala.collection.mutable.ListBuffer[String]()
+    val current = new StringBuilder
+    operands.foreach { op =>
+      val addedLen = if (current.isEmpty) op.length else 1 + op.length
+      if (current.nonEmpty && prefix.length + current.length + addedLen > maxCommandLineLength) {
+        chunks += prefix + current.toString
+        current.clear()
+      }
+      if (current.nonEmpty) current.append(',')
+      current.append(op)
+    }
+    if (current.nonEmpty) chunks += prefix + current.toString
+    chunks.toSeq
+  }
 }
 
 /**
@@ -113,6 +435,11 @@ case class GalilIoUdp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
     ByteString.fromArray(packet.getData, packet.getOffset, packet.getLength)
   }
 
+  // UDP doesn't have the same buffering as TCP - just return empty
+  override def drainAndShowBuffer(timeoutMs: Int = 200): String = {
+    ""
+  }
+
   override def close(): Unit = socket.close()
 }
 
@@ -131,19 +458,87 @@ case class GalilIoTcp(host: String = "127.0.0.1", port: Int = 8888) extends Gali
   private val socket        = new Socket()
   private val timeoutInMs   = 3 * 1000; // 3 seconds
 
-  // XXX TODO: Error handling when there is no device available!
+  // connect() throws (ConnectException / SocketTimeoutException) when no controller is
+  // reachable — intentional fail-fast.  The connection-owning actors wrap construction in
+  // try/catch (ControllerCommandActor initial + reconnect, ControllerStatusActor reconnect)
+  // and drive the Disconnected/recovery path.  ControllerStatusActor's *initial* connect
+  // (its Behaviors.setup) does not yet wrap this — tracked in the connection-retry backlog.
   socket.connect(socketAddress, timeoutInMs)
+  socket.setSoTimeout(timeoutInMs)  // Set read timeout to prevent infinite blocking
+  socket.setKeepAlive(true)         // Enable TCP keepalive — prevents silent drop by OS or intermediate devices
 
   override def write(sendBuf: Array[Byte]): Unit = {
     socket.getOutputStream.write(sendBuf)
+    socket.getOutputStream.flush()  // Force immediate send to controller
   }
 
-  // Receives a single reply for the given command and returns the result
+  // Receives a single reply for the given command and returns the result.
+  // InputStream.read() returns -1 when the remote end has closed the connection.
+  // ByteString.fromArray with a negative length throws ArrayIndexOutOfBoundsException,
+  // which surfaces as an opaque crash rather than a meaningful error. We detect -1
+  // explicitly and throw IOException so callers can handle it as a connection failure.
   override def read(): ByteString = {
     val buf    = Array.ofDim[Byte](bufSize)
     val length = socket.getInputStream.read(buf)
+    if (length == -1)
+      throw new java.io.IOException(s"Connection closed by remote ($host:$port)")
     ByteString.fromArray(buf, 0, length)
   }
+
+  /**
+   * Drains input buffer with timeout to ensure data is actually read.
+   * 
+   * This waits with timeout to ensure we catch all data.
+   * In normal operation with proper protocol implementation, this should
+   * return empty strings. If it finds data, that indicates a protocol bug.
+   * 
+   * @param timeoutMs maximum time to wait for data
+   * @return all data read from buffer
+   */
+  override def drainAndShowBuffer(timeoutMs: Int = 200): String = {
+    val result = new StringBuilder
+    val startTime = System.currentTimeMillis()
+    val oldTimeout = socket.getSoTimeout
+    
+    try {
+      // Set a short timeout for non-blocking reads
+      socket.setSoTimeout(timeoutMs)
+      
+      // Keep reading until timeout or no more data
+      var continue = true
+      while (continue && (System.currentTimeMillis() - startTime) < timeoutMs) {
+        try {
+          val available = socket.getInputStream.available()
+          if (available > 0) {
+            val buf = Array.ofDim[Byte](Math.min(available, 1000))
+            val length = socket.getInputStream.read(buf)
+            if (length > 0) {
+              result.append(ByteString.fromArray(buf, 0, length).utf8String)
+            } else {
+              // 0 = timeout already handled by SocketTimeoutException; -1 = connection closed
+              continue = false
+            }
+          } else {
+            // No data available - wait a bit and check again
+            Thread.sleep(10)
+          }
+        } catch {
+          case _: java.net.SocketTimeoutException =>
+            // Timeout - no more data coming
+            continue = false
+        }
+      }
+    } finally {
+      // Restore original timeout
+      socket.setSoTimeout(oldTimeout)
+    }
+    
+    result.toString
+  }
+
+  override def setReadTimeout(timeoutMs: Int): Unit = socket.setSoTimeout(timeoutMs)
+
+  override def getReadTimeout: Int = socket.getSoTimeout
 
   override def close(): Unit = socket.close()
 }

@@ -16,7 +16,7 @@ object GalilRepl {
 
   // Parses the command line options
   private val parser = new scopt.OptionParser[Options]("test-pekko-service-app") {
-    head("simulatorrepl", System.getProperty("VERSION"))
+    head("simulatorrepl", Option(System.getProperty("VERSION")).getOrElse("dev"))
 
     opt[String]("host") valueName "<hostname>" action { (x, c) =>
       c.copy(host = x)
@@ -57,7 +57,7 @@ object GalilRepl {
 
     def loop(): Unit = {
       val cmd = StdIn.readLine(":")
-      if (cmd == "q") {
+      if (cmd == null || cmd == "q") {
         system.terminate()
       }
       else {

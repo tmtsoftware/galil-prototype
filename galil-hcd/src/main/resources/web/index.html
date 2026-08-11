@@ -1,0 +1,2010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GalilMotion HCD — Test Console</title>
+<style>
+  :root { --mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0B0F19; color: #F9FAFB; font-family: system-ui, -apple-system, sans-serif; overflow-x: hidden; overflow-y: auto; }
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+  input::placeholder { color: #4B5563; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  @keyframes ping { 0%{transform:scale(1);opacity:.4} 100%{transform:scale(2);opacity:0} }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+<div id="root"><p style="color:#6B7280;padding:20px;font-family:monospace">Loading GalilMotion HMI...</p></div>
+
+<!-- Vendored UMD builds, served by the HCD from resources/web/vendor/ (ADR-002).
+     Previously loaded from unpkg.com.  Vendored because this console must run on
+     observatory networks with no internet, and because a CDN dependency turns a
+     wiring error into silence: prop-types was missing for the entire life of the
+     position chart and the only symptom was that the chart never appeared.
+
+     LOAD ORDER IS LOAD-BEARING.  The recharts 2.x UMD build declares prop-types as
+     an EXTERNAL, not a bundled dependency -- its factory tail is
+     `t.Recharts = e(t.React, t.PropTypes, t.ReactDOM)`.  With no global PropTypes
+     the factory throws inside Animate.js and the Recharts global is never assigned.
+     react, react-dom and prop-types must all precede Recharts.
+
+     Versions: react 18.3.1, react-dom 18.3.1, prop-types 15.8.1, recharts 2.12.7. -->
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/prop-types.min.js"></script>
+<script src="vendor/Recharts.js"></script>
+
+<script>
+'use strict';
+const { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } = React;
+// Recharts is now vendored and served by the HCD, so its absence is a deployment
+// fault, not an environment condition.  The old `hasRecharts` probe silently
+// disabled the chart when the library failed to load; it hid a missing prop-types
+// dependency indefinitely.  Fail loudly instead -- a blank panel with a reason beats
+// a panel that quietly does not exist.
+const rechartsError = (typeof Recharts === 'undefined')
+  ? 'Recharts failed to load from vendor/Recharts.js (check load order: react, react-dom, prop-types must precede it)'
+  : null;
+const RC = rechartsError ? {} : Recharts;
+const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } = RC;
+const e = React.createElement;
+
+// ── Configuration ──
+const CHART_COLORS = {A:'#10B981',B:'#3B82F6',C:'#F59E0B',D:'#EF4444',E:'#8B5CF6',F:'#EC4899',G:'#14B8A6',H:'#F97316'};
+const STATE_COLORS = {
+  Lost:    {bg:'#374151',text:'#9CA3AF',dot:'#6B7280',bdr:'#4B5563'},
+  Idle:    {bg:'#064E3B',text:'#6EE7B7',dot:'#10B981',bdr:'#065F46'},
+  Homing:  {bg:'#1E3A5F',text:'#93C5FD',dot:'#3B82F6',bdr:'#1E40AF'},
+  Moving:  {bg:'#78350F',text:'#FCD34D',dot:'#F59E0B',bdr:'#92400E'},
+  Tracking:{bg:'#164E63',text:'#67E8F9',dot:'#06B6D4',bdr:'#155E75'},
+  Error:   {bg:'#7F1D1D',text:'#FCA5A5',dot:'#EF4444',bdr:'#991B1B'},
+};
+
+const API_BASE = window.location.origin;
+const WS_URL = `ws://${window.location.host}/ws/state`;
+
+// ── Position history accumulation (ADR-002) ──
+//
+// The HCD records one sample per QR scan into a ring buffer and ships everything
+// recorded since the previous push on the EXISTING 4Hz WebSocket tick.  The client
+// therefore sees full scan-rate fidelity -- 1Hz at standby, 10Hz during motion --
+// without the socket running at 10Hz.  Do not "simplify" this by sampling `state`
+// on a browser timer: that is what the previous chart did, and it can only ever
+// produce a decimated, jittered copy of data the HCD already holds at full rate.
+//
+// Columns stay index-aligned with the shared time array.  An axis absent from a
+// scan is null, never 0, so an unconfigured axis does not draw a line at the origin.
+const HISTORY_CAP_FALLBACK = 3000;
+
+// Mirrors HmiServer.LogRingCapacity, which the HCD replays to a connecting client.
+// Sized to what this panel can usefully show: the log list re-renders on every arriving
+// line, so retention beyond a panel-sized window buys sluggishness rather than insight.
+// The durable record is the CSW log files under TMT_LOG_HOME; this buffer only has to
+// survive a page reload. Keep the two constants equal.
+const LOG_RETAIN = 1000;
+
+function emptyHistory() {
+  return {t: [], axes: {}, nextSeq: 0, gap: false, capacity: 0};
+}
+
+function appendPositionSamples(buf, msg) {
+  const t = msg.t || [];
+  if (!t.length) return false;
+  const first = msg.firstSeq, next = msg.nextSeq;
+  if (buf.t.length) {
+    if (next <= buf.nextSeq) return false;        // wholly covered already
+    if (first > buf.nextSeq) buf.gap = true;      // samples lost between frames
+  }
+  // Trim any overlap instead of duplicating samples onto the trace.
+  const skip = buf.t.length ? Math.max(0, Math.min(t.length, buf.nextSeq - first)) : 0;
+  const before = buf.t.length;
+  for (let i = skip; i < t.length; i++) buf.t.push(t[i]);
+
+  const incoming = msg.axes || {};
+  const keys = new Set(Object.keys(buf.axes).concat(Object.keys(incoming)));
+  keys.forEach(k => {
+    let col = buf.axes[k];
+    // An axis seen for the first time is back-filled with nulls so every column
+    // stays the same length as `t` and index i always means the same instant.
+    if (!col) { col = new Array(before).fill(null); buf.axes[k] = col; }
+    const srcCol = incoming[k];
+    for (let i = skip; i < t.length; i++) col.push(srcCol ? srcCol[i] : null);
+  });
+
+  buf.nextSeq = next;
+  if (msg.gap) buf.gap = true;
+  if (msg.capacity) buf.capacity = msg.capacity;
+
+  // Mirror the server's retention so the client cannot grow without bound.
+  const cap = buf.capacity || HISTORY_CAP_FALLBACK;
+  const over = buf.t.length - cap;
+  if (over > 0) {
+    buf.t.splice(0, over);
+    Object.keys(buf.axes).forEach(k => buf.axes[k].splice(0, over));
+  }
+  return true;
+}
+
+// ── WebSocket hook ──
+function useHmiConnection() {
+  const [state, setState] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [logLines, setLogLines] = useState([]);
+  // Position history lives in a ref: frames arriving while the plot tab is closed cost
+  // nothing but an array push.  `posTick` is bumped only while the plot is mounted, so
+  // the 4Hz sample frames do not force a whole-app re-render the rest of the time.
+  const posRef = useRef(emptyHistory());
+  const [posTick, setPosTick] = useState(0);
+  const posLiveRef = useRef(false);
+  const setPlotLive = useCallback((on) => { posLiveRef.current = on; }, []);
+  const wsRef = useRef(null);
+  const reconnectRef = useRef(null);
+  // Tracks whether we've ever observed a WS close.  Used to distinguish the
+  // initial page-load connect (no reload) from a post-drop reconnect (reload
+  // to refresh React state from the new HCD session).  Plain ref rather than
+  // useState because it's read inside the WS callbacks without needing to
+  // trigger re-renders.
+  const hasDisconnectedRef = useRef(false);
+  // Per-connection liveness watchdog.  The HCD streams a stateUpdate every
+  // 250ms (and log lines whenever they happen), so any silence longer than
+  // a couple of seconds means the connection is dead — even if the browser
+  // hasn't yet noticed (e.g. the server's TCP socket was closed via Pekko's
+  // ServerBinding.terminate(), but the OS-level keep-alive on the client
+  // hasn't fired yet, which can take a minute or more).  The watchdog
+  // detects this case and force-closes the WS so the existing onclose →
+  // reconnect → reload path can run.
+  const lastFrameAtRef = useRef(0);
+  const watchdogRef = useRef(null);
+  const FRAME_TIMEOUT_MS = 3000;
+  // Reconnect backoff: start at 2s, double up to a 30s ceiling on each failed
+  // connection.  Reset to the floor whenever a connection succeeds.  Without
+  // this, a long-term HCD outage (overnight, weekend) leaves the browser tab
+  // making a reconnect attempt every 2s indefinitely — wasteful and noisy in
+  // DevTools.  At the 30s ceiling we still recover within half a minute when
+  // the HCD comes back.
+  const reconnectDelayRef = useRef(2000);
+  const RECONNECT_DELAY_MIN_MS = 2000;
+  const RECONNECT_DELAY_MAX_MS = 30000;
+
+  const connect = useCallback(() => {
+    // Centralised reconnect scheduler with exponential backoff.  Each call
+    // uses the current delay then doubles it for the next attempt, capped at
+    // RECONNECT_DELAY_MAX_MS.  Reset back to the floor inside onmessage when
+    // a frame proves the connection is healthy (see below).
+    const scheduleReconnect = () => {
+      const delay = reconnectDelayRef.current;
+      console.log(`WS scheduling reconnect in ${delay}ms`);
+      clearTimeout(reconnectRef.current);
+      reconnectRef.current = setTimeout(connect, delay);
+      reconnectDelayRef.current = Math.min(delay * 2, RECONNECT_DELAY_MAX_MS);
+    };
+
+    if (wsRef.current && wsRef.current.readyState < 2) return;
+    try {
+      const ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        console.log(`WS open: hasDisconnectedRef=${hasDisconnectedRef.current}, readyState=${ws.readyState}`);
+        // If we previously disconnected (i.e. this is a *re*-connect, not the
+        // initial page-load connect), do a full page reload.  The HCD's
+        // Restart action gives us a fresh InternalStateActor with re-initialized
+        // axes (un-homed, all flags reset), but React's component state is
+        // sticky across the WS drop — even though stateUpdate frames refresh
+        // the per-axis fields, derived display state (cfgLoaded, expanded
+        // panels, sticky form values) and any field that the new payload
+        // happens to omit can show stale data.  A page reload is the cleanest
+        // way to get a clean view of the new HCD session.
+        //
+        // No reload on first connect, since there's no stale state to clear
+        // and the existing initial-status fetch handles it.
+        if (hasDisconnectedRef.current) {
+          console.log('WS reconnected — reloading page to refresh HMI state');
+          window.location.reload();
+          return;
+        }
+        setConnected(true);
+        // Clear stale log lines from a previous HCD session on every fresh connection.
+        // The HCD clears its own state on restart; we mirror that here so the log
+        // panel shows only messages from the current session.
+        setLogLines([]);
+        // Start the liveness watchdog: if no frame arrives within
+        // FRAME_TIMEOUT_MS, assume the connection is dead and force-close it.
+        // Seed lastFrameAt now so the timeout doesn't fire on connections that
+        // are healthy but haven't pushed their first frame yet.
+        lastFrameAtRef.current = Date.now();
+        if (watchdogRef.current) clearInterval(watchdogRef.current);
+        watchdogRef.current = setInterval(() => {
+          const silence = Date.now() - lastFrameAtRef.current;
+          if (silence > FRAME_TIMEOUT_MS) {
+            console.log(`WS watchdog: no frames for ${silence}ms — abandoning connection (readyState=${ws.readyState})`);
+            // Stop the watchdog
+            clearInterval(watchdogRef.current);
+            watchdogRef.current = null;
+            // CRITICAL: when the server has done a half-broken close (e.g.
+            // pekko-http's ServerBinding.terminate() during JVM Restart), the
+            // browser does NOT fire onclose for a client-side ws.close() —
+            // observed empirically. So we don't rely on onclose; we do its
+            // work directly: mark disconnected, detach handlers from this
+            // dead socket, schedule a reconnect.  The old socket will be GC'd
+            // (or closed by OS-level keep-alive eventually) — we just stop
+            // listening to it.
+            try { ws.close(); } catch(_) { /* best-effort */ }
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onclose = null;
+            ws.onerror = null;
+            wsRef.current = null;
+            setConnected(false);
+            hasDisconnectedRef.current = true;
+            console.log('WS watchdog: scheduling reconnect');
+            scheduleReconnect();
+          }
+        }, 1000);
+        console.log('WS connected');
+      };
+      ws.onmessage = (evt) => {
+        // Any frame counts as proof of liveness for the watchdog
+        lastFrameAtRef.current = Date.now();
+        // Healthy frame proves the server is reachable; reset backoff so a
+        // future blip starts fresh from the floor instead of inheriting a
+        // long delay from a previous outage.
+        reconnectDelayRef.current = RECONNECT_DELAY_MIN_MS;
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'stateUpdate') {
+            setState(msg);
+          } else if (msg.type === 'positionSamples') {
+            if (appendPositionSamples(posRef.current, msg) && posLiveRef.current) {
+              setPosTick(n => n + 1);
+            }
+          } else if (msg.type === 'logLine') {
+            setLogLines(prev => {
+              const next = [...prev, msg];
+              // Matches HmiServer.LogRingCapacity, so a reconnecting client keeps
+              // exactly what the HCD was willing to replay to it.
+              return next.length > LOG_RETAIN ? next.slice(-LOG_RETAIN) : next;
+            });
+          }
+        } catch(e) { console.warn('Bad WS frame', e); }
+      };
+      ws.onclose = (evt) => {
+        console.log(`WS close: code=${evt?.code}, reason='${evt?.reason}', wasClean=${evt?.wasClean}`);
+        setConnected(false);
+        hasDisconnectedRef.current = true;
+        if (watchdogRef.current) {
+          clearInterval(watchdogRef.current);
+          watchdogRef.current = null;
+        }
+        scheduleReconnect();
+      };
+      ws.onerror = (err) => {
+        console.log('WS error fired', err);
+        ws.close();
+      };
+      wsRef.current = ws;
+    } catch(e) {
+      console.error('WS connect error', e);
+      scheduleReconnect();
+    }
+  }, []);
+
+  useEffect(() => {
+    // Fetch initial state snapshot via REST
+    fetch(`${API_BASE}/api/status`)
+      .then(r => r.json()).then(setState)
+      .catch(e => console.warn('Initial status fetch failed', e));
+    // Backfill the retained position window before the first WebSocket frame, so the
+    // plot has history the moment it is opened rather than starting from empty.  This
+    // is the whole point of the HCD-side buffer: the browser cannot reconstruct what
+    // happened before the page loaded, and the reconnect path reloads the page.
+    fetch(`${API_BASE}/api/history`)
+      .then(r => r.json())
+      .then(h => { if (appendPositionSamples(posRef.current, h)) setPosTick(n => n + 1); })
+      .catch(e => console.warn('Position history backfill failed', e));
+    connect();
+    return () => {
+      clearTimeout(reconnectRef.current);
+      if (watchdogRef.current) clearInterval(watchdogRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [connect]);
+
+  const submitCommand = useCallback((commandName, params) => {
+    console.log(`[DBG] submitCommand: ${commandName}`, params);
+    const p = fetch(`${API_BASE}/api/command`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({commandName, params})
+    }).then(r => r.json()).then(result => {
+      console.log(`[DBG] submitCommand response: ${commandName}`, result);
+      return result;
+    }).catch(err => {
+      console.error(`[DBG] submitCommand FAILED: ${commandName}`, err);
+      return {runId:'',status:'Error',message:err.message};
+    });
+    return p;
+  }, []);
+
+  return { state, connected, submitCommand, logLines, posRef, posTick, setPlotLive };
+}
+
+// ── Components ──
+
+function StatusDot({axisState}) {
+  const c = (STATE_COLORS[axisState]||STATE_COLORS.Lost).dot;
+  const pulse = axisState==='Moving'||axisState==='Homing'||axisState==='Tracking';
+  const pulseStyle = pulse ? {animation:'pulse 1.2s ease-in-out infinite'} : {};
+  return e('span',{style:{position:'relative',display:'inline-flex',alignItems:'center',justifyContent:'center',width:12,height:12,marginRight:5}},
+    e('span',{style:Object.assign({width:8,height:8,borderRadius:'50%',backgroundColor:c}, pulseStyle)}),
+    pulse ? e('span',{style:{position:'absolute',width:12,height:12,borderRadius:'50%',border:'1.5px solid '+c,opacity:.4,animation:'ping 1.2s ease-in-out infinite'}}) : null
+  );
+}
+
+function BoolFlag({value,label,trueColor='#10B981',falseColor='#4B5563',enabled,disabledColor='#374151'}) {
+  // Tri-state: when `enabled` prop is provided and false, render the disabled color
+  // regardless of value (e.g. limit switch not implemented on this axis).
+  // When `enabled` is undefined, behaves as a normal two-state flag (back-compat).
+  const dotColor = (enabled === false) ? disabledColor : (value ? trueColor : falseColor);
+  return e('span',{style:{display:'inline-flex',alignItems:'center',gap:3,fontSize:10.5,color:'#D1D5DB',marginRight:8}},
+    e('span',{style:{width:6,height:6,borderRadius:1.5,backgroundColor:dotColor}}),
+    label
+  );
+}
+
+function Btn({label,color,onClick,small}) {
+  const [h,setH] = useState(false);
+  return e('button',{onClick,onMouseEnter:()=>setH(true),onMouseLeave:()=>setH(false),
+    style:{backgroundColor:h?color:`${color}22`,color:h?'#FFF':color,
+      border:`1px solid ${color}55`,borderRadius:4,
+      padding:small?'2px 8px':'3px 12px',fontSize:small?10.5:11.5,
+      fontWeight:600,cursor:'pointer',fontFamily:'var(--mono)',
+      transition:'all .12s',whiteSpace:'nowrap'}},label);
+}
+
+function In({value,onChange,ph,onEnter,style}) {
+  return e('input',{type:'text',value,onChange:ev=>onChange(ev.target.value),
+    onKeyDown:ev=>ev.key==='Enter'&&onEnter&&onEnter(),
+    placeholder:ph,
+    style:{backgroundColor:'#1F2937',border:'1px solid #374151',borderRadius:4,
+      padding:'3px 6px',fontSize:11.5,color:'#F9FAFB',fontFamily:'var(--mono)',outline:'none',...style}});
+}
+
+function CmdRow({label,value,onChange,ph,onGo,goColor='#10B981'}) {
+  return e('div',{style:{display:'flex',gap:4,alignItems:'center',marginTop:4}},
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label),
+    e(In,{value,onChange,ph,onEnter:onGo,style:{flex:1}}),
+    e(Btn,{label:'Go',color:goColor,small:true,onClick:onGo}));
+}
+
+// Two CmdRows side by side on one line — used for Pos + Ofs
+function CmdRowPair({label1,value1,onChange1,ph1,onGo1,goColor1='#10B981',
+                     label2,value2,onChange2,ph2,onGo2,goColor2='#10B981'}) {
+  return e('div',{style:{display:'flex',gap:6,alignItems:'center',marginTop:4}},
+    // Left: label + input + Go
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label1),
+    e(In,{value:value1,onChange:onChange1,ph:ph1,onEnter:onGo1,style:{flex:1,minWidth:0}}),
+    e(Btn,{label:'Go',color:goColor1,small:true,onClick:onGo1}),
+    // Divider
+    e('span',{style:{color:'#374151',flexShrink:0}},'│'),
+    // Right: label + input + Go
+    e('span',{style:{fontSize:10,color:'#6B7280',width:26,fontFamily:'var(--mono)',flexShrink:0}},label2),
+    e(In,{value:value2,onChange:onChange2,ph:ph2,onEnter:onGo2,style:{flex:1,minWidth:0}}),
+    e(Btn,{label:'Go',color:goColor2,small:true,onClick:onGo2}));
+}
+
+// Collapsible section toggle label (▸ / ▾)
+function ExpandToggle({label, open, onToggle, color='#6B7280'}) {
+  return e('div',{
+    onClick:onToggle,
+    style:{display:'flex',alignItems:'center',gap:4,marginTop:5,cursor:'pointer',
+      userSelect:'none',fontSize:10,color,fontFamily:'var(--mono)'}},
+    e('span',{style:{fontSize:8,lineHeight:1}}, open ? '▾' : '▸'),
+    e('span',null, label));
+}
+
+function AxisErrorBar({msg, kind}) {
+  if (!msg) return null;
+  // 'fault' = genuine controller error (e.g. POSERR, LIMSWI) — red.
+  // 'reject' = HMI-side command rejection (e.g. soft-limit violation) — amber,
+  //   to signal "the command was refused; the axis itself is fine".
+  // Default to 'fault' colouring for back-compat.
+  const isReject = kind === 'reject';
+  const bg     = isReject ? '#3F2D14' : '#451A1A';
+  const border = isReject ? '#F59E0B' : '#EF4444';
+  const text   = isReject ? '#FCD34D' : '#FCA5A5';
+  const tag    = isReject ? 'REJ' : 'ERR';
+  const tagFg  = isReject ? '#FBBF24' : '#F87171';
+  return e('div',{style:{backgroundColor:bg,borderRadius:3,padding:'4px 8px',margin:'6px 0 2px',
+    fontSize:10.5,color:text,display:'flex',alignItems:'center',gap:5,
+    fontFamily:'var(--mono)',borderLeft:`3px solid ${border}`}},
+    e('span',{style:{fontWeight:700,fontSize:9.5,color:tagFg}},tag),
+    msg);
+}
+
+function AxisCard({axis,axState,cmdSt,onCommand,active,compact}) {
+  const [posTarget,setPosTarget] = useState('');
+  const [offTarget,setOffTarget] = useState('');
+  const [wheelPos,setWheelPos] = useState('');
+  const [angPos,setAngPos] = useState('');
+  const [override,setOverride] = useState(false);
+  const [showDemand,setShowDemand] = useState(false);
+  // Last HMI-side command rejection for this axis (e.g. soft-limit violation
+  // returned synchronously from POST /api/command).  Cleared on the next
+  // command from this card.  Server-side axisErrorMsg from a genuine controller
+  // error takes precedence over this in the AxisErrorBar display.
+  const [rejectMsg,setRejectMsg] = useState('');
+
+  if (!axState) return null;
+  const enabled = active || override;
+  const colors = STATE_COLORS[axState.axisState] || STATE_COLORS.Lost;
+  const cs = cmdSt || {};
+  const dim = enabled ? 1 : 0.35;
+
+  // Dispatch a command and toggle demand visibility:
+  // positionAxis and offsetAxis show demand; all other commands hide it.
+  // Captures HMI-side synchronous rejections (e.g. soft-limit violations) into
+  // rejectMsg so the user sees why the command did nothing — the calling
+  // assembly would see the same message in its own response, but the HMI
+  // bypasses the assembly and submits direct to the HCD.  Server-side errors
+  // (genuine controller faults) flow through axisErrorMsg and override this.
+  const cmd = (name, extra={}) => {
+    if (!enabled) return;
+    if (name === 'positionAxis' || name === 'offsetAxis' || name === 'positionWheel') setShowDemand(true);
+    else setShowDemand(false);
+    setRejectMsg('');  // clear stale rejection when a new command is issued
+    const p = onCommand(name, {axis, ...extra});
+    if (p && typeof p.then === 'function') {
+      p.then(result => {
+        if (result && result.status === 'Error' && result.message) {
+          setRejectMsg(result.message);
+        }
+      });
+    }
+  };
+
+  // Collapsed view for inactive axes — just a slim header strip, click INACTIVE to expand
+  if (!active && !override) {
+    return e('div',{style:{backgroundColor:'#0D1117',border:'1px solid #1F2937',
+        borderRadius:8,overflow:'hidden',borderTop:'2px solid #1F2937'}},
+      e('div',{style:{padding:'5px 12px',display:'flex',justifyContent:'space-between',alignItems:'center'}},
+        e('span',{style:{display:'flex',alignItems:'baseline',gap:6}},
+          e('span',{style:{fontFamily:'var(--mono)',fontWeight:600,fontSize:10,color:'#4B5563',letterSpacing:1.2}},`AXIS ${axis}`),
+          axState?.axisName
+            ? e('span',{style:{fontFamily:'var(--mono)',fontWeight:700,fontSize:12,color:'#4B5563'}}, axState.axisName)
+            : null),
+        e('span',{style:{fontSize:8.5,color:'#4B5563',cursor:'pointer',
+            padding:'2px 6px',borderRadius:3,border:'1px solid #27303f',userSelect:'none'},
+            onClick:()=>setOverride(true),title:'Click to enable commands on this axis'},
+          'INACTIVE')));
+  }
+
+  return e('div',{style:{backgroundColor:'#111827',border:`1px solid ${enabled?colors.bdr:'#1F2937'}`,
+    borderRadius:8,overflow:'hidden',minWidth:280,borderTop:`3px solid ${enabled?colors.dot:'#374151'}`,
+    opacity:enabled?1:0.85, position:'relative',display:'flex',flexDirection:'column'}},
+
+    // Header
+    e('div',{style:{backgroundColor:enabled?colors.bg:'#0D1117',padding:'7px 12px',display:'flex',justifyContent:'space-between',alignItems:'center',position:'relative'}},
+      e('span',{style:{display:'flex',alignItems:'baseline',gap:6}},
+        e('span',{style:{fontFamily:'var(--mono)',fontWeight:600,fontSize:11,color:enabled?'#9CA3AF':'#4B5563',letterSpacing:1.2}},`AXIS ${axis}`)),
+      axState.axisName ? e('span',{style:{position:'absolute',left:0,right:0,textAlign:'center',
+          fontFamily:'var(--mono)',fontWeight:700,fontSize:14,color:enabled?'#F9FAFB':'#6B7280',
+          letterSpacing:.3,pointerEvents:'none'}}, axState.axisName) : null,
+      e('span',{style:{display:'flex',alignItems:'center',gap:6}},
+        !active && override
+          ? e('span',{style:{fontSize:8.5,color:'#F59E0B',cursor:'pointer',
+              padding:'2px 6px',borderRadius:3,border:'1px solid #F59E0B44',
+              backgroundColor:'#F59E0B11',userSelect:'none'},
+              onClick:()=>setOverride(false),title:'Click to collapse this axis'},
+              'OVERRIDE')
+          : null,
+        e('span',{style:{display:'flex',alignItems:'center',fontSize:11.5,fontWeight:600,color:colors.text}},
+          e(StatusDot,{axisState:axState.axisState}), axState.axisState))),
+
+    // Telemetry + commands body
+    e('div',{style:{padding:'6px 12px 8px',fontFamily:'var(--mono)',fontSize:11.5,opacity:dim,
+      display:'flex',flexDirection:'column',flex:1}},
+
+      // Error bar — immediately below header when present.
+      // Server-side errors (real controller faults) take precedence over
+      // HMI-side rejections (e.g. soft-limit violations) so a stale rejection
+      // never masks a live fault.  rejectMsg is cleared when the next command
+      // is issued from this card.
+      e(AxisErrorBar,{msg: axState.axisErrorMsg || cs.axisErrorMsg || rejectMsg || null,
+                      kind: (axState.axisErrorMsg || cs.axisErrorMsg) ? 'fault' : (rejectMsg ? 'reject' : null)}),
+
+      // Type badge + Home/Stop/Config on same row
+      e('div',{style:{display:'flex',gap:5,alignItems:'center',marginBottom:6,
+          paddingBottom:5,borderBottom:'1px solid #1F2937',flexWrap:'wrap'}},
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
+              backgroundColor:'#2D1B69',color:'#A78BFA',fontWeight:700,letterSpacing:.5}},'ROTATING')
+          : e('span',{style:{fontSize:9.5,padding:'1px 6px',borderRadius:3,
+              backgroundColor:'#1C3240',color:'#67E8F9',fontWeight:700,letterSpacing:.5}},'LINEAR'),
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#6B7280'}},'alg:') : null,
+        axState.mechanismType==='Rotating'
+          ? e('span',{style:{fontSize:9.5,color:'#C4B5FD'}},(axState.algorithm||'\u2014').toLowerCase()) : null,
+        e('span',{style:{flex:1}}),
+        enabled ? e('span',{style:{display:'flex',gap:4}},
+          e(Btn,{label:'Home',color:'#3B82F6',small:true,onClick:()=>cmd('homeAxis')}),
+          e(Btn,{label:'Stop',color:'#EF4444',small:true,onClick:()=>cmd('stopAxis')}))
+        : null),
+
+      // ── ROTATING: (telemetry + dial) left, commands right — mirrors linear layout ──
+      axState.mechanismType==='Rotating' ? e('div',{style:{display:'flex',gap:8,alignItems:'flex-start',flex:1}},
+
+        // Left column — telemetry grid then dial
+        e('div',{style:{flexShrink:0,fontFamily:'var(--mono)',fontSize:11.5}},
+          e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2,marginBottom:5}},
+            e('span',{style:{color:'#6B7280'}},'Position'),
+            e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}},
+              (axState.position||0).toFixed(1),
+              e('span',{style:{fontSize:10,color:'#4B5563',fontWeight:400,marginLeft:5,fontVariantNumeric:'tabular-nums'}},
+                '(',(axState.rawMotorPosition||0).toFixed(0),')')),
+            e('span',{style:{color:'#6B7280'}},'Velocity'),
+            e('span',{style:{color:(axState.velocity||0)!==0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
+              (axState.velocity||0).toFixed(1)),
+            e('span',{style:{color:showDemand?'#6B7280':'#374151'}},'Demand'),
+            e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
+              (axState.demand||0).toFixed(1)),
+            // Achieved wheel slot from the embedded #Select logic (— if unknown), with the
+            // commanded slot as a hint. Green when parked at the confirmed commanded slot
+            // (this is what drives inPosition), amber while a select is in progress, gray
+            // when no select governs the axis.
+            e('span',{style:{color:'#8B5CF6'}},'Slot'),
+            e('span',{style:{fontVariantNumeric:'tabular-nums',
+                color:(axState.wheelPosition>=1&&axState.wheelPosition===axState.commandedWheelPosition)?'#10B981'
+                     :(axState.commandedWheelPosition>=1)?'#FCD34D':'#4B5563'}},
+              (axState.wheelPosition>=1?String(axState.wheelPosition):'\u2014'),
+              axState.commandedWheelPosition>=1
+                ? e('span',{style:{fontSize:10,color:'#4B5563',fontWeight:400,marginLeft:5}},
+                    '(cmd ',axState.commandedWheelPosition,')')
+                : null)),
+          !compact ? e(AxisVisual,{axState,colors,showDemand}) : null),
+
+        // Right column — Whl+Ang always; Pos+Ofs hidden in compact
+        enabled ? e('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:3,fontFamily:'var(--mono)'}},
+          e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#8B5CF6',width:22,flexShrink:0}},'Whl'),
+            e(In,{value:wheelPos,onChange:setWheelPos,ph:'pos #',
+              onEnter:()=>cmd('selectWheel',{target:wheelPos}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#8B5CF6',small:true,onClick:()=>cmd('selectWheel',{target:wheelPos})})),
+          e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#8B5CF6',width:22,flexShrink:0}},'Ang'),
+            e(In,{value:angPos,onChange:setAngPos,ph:'degrees',
+              onEnter:()=>cmd('positionWheel',{target:angPos}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#8B5CF6',small:true,onClick:()=>cmd('positionWheel',{target:angPos})})),
+          !compact ? e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#6B7280',width:22,flexShrink:0}},'Pos'),
+            e(In,{value:posTarget,onChange:setPosTarget,ph:'target',
+              onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('positionAxis',{target:posTarget})})) : null,
+          !compact ? e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+            e('span',{style:{fontSize:10,color:'#6B7280',width:22,flexShrink:0}},'Ofs'),
+            e(In,{value:offTarget,onChange:setOffTarget,ph:'offset',
+              onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:0,flex:1,minWidth:0}}),
+            e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})) : null)
+        : null)
+      // ── LINEAR: telemetry left + commands right, wide track below; track grows to fill remaining height ──
+      : e('div',{style:{display:'flex',flexDirection:'column',flex:1}},
+        e('div',{style:{display:'flex',gap:8,alignItems:'flex-start',marginBottom:4}},
+          e('div',{style:{flex:1,minWidth:0}},
+            e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:2}},
+              e('span',{style:{color:'#6B7280'}},'Position'),
+              e('span',{style:{color:'#F9FAFB',fontWeight:600,fontSize:14,fontVariantNumeric:'tabular-nums'}},
+                (axState.position||0).toFixed(1)),
+              e('span',{style:{color:'#6B7280'}},'Velocity'),
+              e('span',{style:{color:(axState.velocity||0)>0?'#FCD34D':'#4B5563',fontVariantNumeric:'tabular-nums'}},
+                (axState.velocity||0).toFixed(1)),
+              e('span',{style:{color:'#6B7280'}},'Demand'),
+              e('span',{style:{color:showDemand?'#93C5FD':'#374151',fontVariantNumeric:'tabular-nums'}},
+                (axState.demand||0).toFixed(1)))),
+          enabled ? e('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',gap:3}},
+            e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+              e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Pos'),
+              e(In,{value:posTarget,onChange:setPosTarget,ph:'target',
+                onEnter:()=>cmd('positionAxis',{target:posTarget}),style:{width:0,flex:1,minWidth:0}}),
+              e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('positionAxis',{target:posTarget})})),
+            e('div',{style:{display:'flex',gap:3,alignItems:'center'}},
+              e('span',{style:{fontSize:10,color:'#6B7280',width:22,fontFamily:'var(--mono)',flexShrink:0}},'Ofs'),
+              e(In,{value:offTarget,onChange:setOffTarget,ph:'offset',
+                onEnter:()=>cmd('offsetAxis',{target:offTarget}),style:{width:0,flex:1,minWidth:0}}),
+              e(Btn,{label:'Go',color:'#10B981',small:true,onClick:()=>cmd('offsetAxis',{target:offTarget})})))
+          : null),
+        // Track visual — grows to fill remaining card height, centered vertically
+        !compact && e('div',{style:{flex:1,display:'flex',alignItems:'center'}},
+          e(AxisVisual,{axState,colors,showDemand}))),
+
+      // Bool flags — nowrap; marginTop:auto pins to bottom of flex-column card body
+      e('div',{style:{marginTop:'auto',paddingTop:5,display:'flex',flexWrap:'nowrap',gap:0}},
+        e(BoolFlag,{value:axState.inPosition,label:'InPos'}),
+        e(BoolFlag,{value:axState.isStepper,label:'Stepper',trueColor:'#8B5CF6'}),
+        e(BoolFlag,{value:!axState.motorOff,label:'Motor',trueColor:'#10B981',falseColor:'#EF4444'}),
+        e(BoolFlag,{value:axState.forwardLimit,label:'FwdLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.forwardLimitEnabled}),
+        e(BoolFlag,{value:axState.reverseLimit,label:'RevLim',trueColor:'#EF4444',falseColor:'#10B981',enabled:axState.reverseLimitEnabled})),
+
+      // CmdState bar (no longer carries Trk toggle — telemetry below is auto-shown when Tracking)
+      e('div',{style:{marginTop:4,padding:'3px 7px',backgroundColor:'#1F2937',borderRadius:4,
+          fontSize:10.5,color:'#9CA3AF',display:'flex',gap:8,alignItems:'center'}},
+        e('span',null,'Thr: ',e('span',{style:{color:cs.activeThread>=0?'#FCD34D':'#4B5563'}},cs.activeThread>=0?cs.activeThread:'—')),
+        e('span',{style:{color:'#374151'}},'\u2502'),
+        e('span',null,'Mov: ',e('span',{style:{color:cs.moving?'#F59E0B':'#4B5563'}},cs.moving?'Y':'N')),
+        e('span',{style:{color:'#374151'}},'\u2502'),
+        e('span',null,'Cmd: ',e('span',{style:{color:cs.activeCommand?'#93C5FD':'#4B5563'}},cs.activeCommand||'—'))),
+
+      // Tracking telemetry panel — auto-shown when axisState === Tracking and
+      // a trackingSession is present.  Surfaces live PVT-mode internals so an
+      // operator can verify that a remote tracking client (TrackInjector or the
+      // APS-ICS Assembly) is keeping the controller's PVT FIFO fed.
+      //
+      //   • session ledger: lastTargetCounts, lastValidTime age, btFiredAt elapsed,
+      //                     segmentsSubmitted
+      //   • controller FIFO: _PV<x> free slots out of 255, _BT<x> segments executed,
+      //                      (submitted − executed) depth
+      //   • lastValidTime age is the heartbeat — green near zero, yellow > 1.0s,
+      //     red approaching the 2.048s per-segment hard cap.
+      (axState.axisState === 'Tracking' && axState.trackingSession)
+        ? e(TrackingTelemetry, {axState})
+        : null));
+}
+
+// ── Tracking Telemetry Panel ─────────────────────────────────────────
+// Renders when axisState === Tracking.  Self-updating 4Hz via state push.
+function TrackingTelemetry({axState}) {
+  const ts = axState.trackingSession;
+  if (!ts) return null;
+
+  // Compute age of lastValidTime vs now (negative when lastValidTime is in the future,
+  // which is the normal case for a fresh trackAxis — validTime is ~1 sec ahead).
+  // Display sign-corrected: positive means "past", negative means "future".
+  const now = Date.now();
+  const lvtMs = new Date(ts.lastValidTime).getTime();
+  const btMs  = new Date(ts.btFiredAt).getTime();
+  const ageSec = (now - lvtMs) / 1000;
+  const elapsedSec = (now - btMs) / 1000;
+
+  // Heartbeat color: green within ±1.5s of zero, yellow approaching 2s, red past 2s.
+  // The hard controller cap is T ≤ 2,048 samples ≈ 2.048s at TM=1000.
+  const ageAbs = Math.abs(ageSec);
+  const ageColor = ageAbs < 1.5 ? '#10B981' : ageAbs < 2.0 ? '#F59E0B' : '#EF4444';
+
+  // FIFO occupancy: _PV is free slots (255 = empty buffer); occupancy = 255 - _PV.
+  // _BT is segments executed since the last BT.
+  const fifoUsed = 255 - (axState.pvFreeSlots ?? 255);
+  const depth    = (ts.segmentsSubmitted ?? 0) - (axState.btSegmentsExecuted ?? 0);
+
+  // Format helpers — keep numbers compact in the row.
+  const fmtSec = s => (s >= 0 ? '+' : '') + s.toFixed(2) + 's';
+  const fmtElapsed = s => {
+    if (s < 60) return s.toFixed(1) + 's';
+    const m = Math.floor(s / 60), r = s % 60;
+    return m + 'm' + r.toFixed(0) + 's';
+  };
+
+  const rowStyle = {display:'flex',gap:10,alignItems:'baseline',fontSize:10.5,
+                   fontFamily:'var(--mono)',color:'#9CA3AF'};
+  const labelStyle = {color:'#6B7280',fontSize:9.5};
+  const valStyle = {color:'#E5E7EB'};
+
+  return e('div',{style:{marginTop:3,padding:'4px 7px',backgroundColor:'#0B2738',
+                         borderRadius:4,borderLeft:'2px solid #06B6D4',
+                         display:'flex',flexDirection:'column',gap:2}},
+    // Row 1: session ledger (submitted, target, age)
+    e('div',{style:rowStyle},
+      e('span',{style:labelStyle},'TRK'),
+      e('span',null,
+        e('span',{style:labelStyle},'seg '),
+        e('span',{style:valStyle}, ts.segmentsSubmitted)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'tgt '),
+        e('span',{style:valStyle}, ts.lastTargetCounts)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'age '),
+        e('span',{style:{color:ageColor,fontWeight:600}}, fmtSec(ageSec))),
+      e('span',{style:{flex:1}}),
+      e('span',null,
+        e('span',{style:labelStyle},'run '),
+        e('span',{style:valStyle}, fmtElapsed(elapsedSec)))),
+    // Row 2: controller FIFO (_PV, _BT, depth)
+    e('div',{style:rowStyle},
+      e('span',{style:labelStyle},'FIFO'),
+      e('span',null,
+        e('span',{style:labelStyle},'used '),
+        e('span',{style:valStyle}, fifoUsed),
+        e('span',{style:labelStyle}, '/255')),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'exec '),
+        e('span',{style:valStyle}, axState.btSegmentsExecuted ?? 0)),
+      e('span',{style:{color:'#374151'}},'\u2502'),
+      e('span',null,
+        e('span',{style:labelStyle},'depth '),
+        e('span',{style:{color: depth <= 0 ? '#EF4444' : depth < 2 ? '#F59E0B' : '#10B981'}},
+          depth))));
+}
+
+function AxisVisual({axState, colors, showDemand}) {
+  if (!axState) return null;
+  const isRotating = axState.mechanismType === 'Rotating' && axState.countsPerRevolution > 0;
+
+  if (isRotating) {
+    // ── Rotating dial ── 76×76
+    const angDeg = axState.angularPosition || 0;
+    const demandDeg = axState.countsPerRevolution > 0
+      ? ((axState.demand / axState.countsPerRevolution * 360) % 360 + 360) % 360
+      : null;
+    const toRad = d => (d - 90) * Math.PI / 180;
+    const cx = 38, cy = 38, r = 30, rNeedle = 23, rDemand = 27;
+    const nx = cx + rNeedle * Math.cos(toRad(angDeg));
+    const ny = cy + rNeedle * Math.sin(toRad(angDeg));
+    const dx = demandDeg != null ? cx + rDemand * Math.cos(toRad(demandDeg)) : null;
+    const dy = demandDeg != null ? cy + rDemand * Math.sin(toRad(demandDeg)) : null;
+    const ticks = [0, 90, 180, 270];
+    const tickLabels = ['0', '90', '180', '270'];
+
+    const dial = e('svg', {width:76, height:76, style:{flexShrink:0}},
+      e('circle', {cx, cy, r, fill:'none', stroke:'#1F2937', strokeWidth:2}),
+      e('circle', {cx, cy, r:r-2, fill:'#0D1117'}),
+      ...ticks.map((t, i) => {
+        const ra = toRad(t);
+        const x1 = cx + (r-2) * Math.cos(ra), y1 = cy + (r-2) * Math.sin(ra);
+        const x2 = cx + (r-8) * Math.cos(ra), y2 = cy + (r-8) * Math.sin(ra);
+        const lx = cx + (r-16) * Math.cos(ra), ly = cy + (r-16) * Math.sin(ra);
+        return [
+          e('line', {key:'tk'+i, x1, y1, x2, y2, stroke:'#374151', strokeWidth:1.5}),
+          e('text', {key:'tl'+i, x:lx, y:ly, textAnchor:'middle', dominantBaseline:'middle',
+            fontSize:9, fill:'#4B5563', fontFamily:'var(--mono)'}, tickLabels[i])
+        ];
+      }).flat(),
+      dx != null && showDemand ? e('line', {x1:cx, y1:cy, x2:dx, y2:dy,
+        stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.5}) : null,
+      e('line', {x1:cx, y1:cy, x2:nx, y2:ny,
+        stroke:colors.dot, strokeWidth:2, strokeLinecap:'round'}),
+      e('circle', {cx, cy, r:3, fill:colors.dot})
+    );
+
+    // Angle label beside the dial
+    const angleLabel = e('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',
+        alignItems:'flex-start',paddingLeft:4,fontFamily:'var(--mono)'}},
+      e('span',{style:{fontSize:9,color:'#6B7280',marginBottom:2}},'Angle'),
+      e('span',{style:{fontSize:13,fontWeight:700,color:'#A78BFA',fontVariantNumeric:'tabular-nums'}},
+        angDeg.toFixed(1)+'\u00b0'),
+      showDemand && demandDeg != null
+        ? e('span',{style:{fontSize:9,color:'#93C5FD',fontVariantNumeric:'tabular-nums',marginTop:2}},
+            '\u21d2 '+demandDeg.toFixed(1)+'\u00b0')
+        : null);
+
+    return e('div',{style:{display:'flex',alignItems:'center',flexShrink:0}}, dial, angleLabel);
+  } else {
+    // ── Linear track ── wide/short, motion left→right; lo/hi labels below the rail
+    const pos    = axState.position || 0;
+    const lo     = axState.lowerLimit != null ? axState.lowerLimit : 0;
+    const hi     = axState.upperLimit != null ? axState.upperLimit : 1000;
+    const demand = axState.demand || 0;
+    const W = 252, H = 56;
+    const padL = 8, padR = 8;
+    const trackY = 22;
+    const clamp  = v => Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1)));
+    const posX   = padL + clamp(pos)    * (W - padL - padR);
+    const demX   = padL + clamp(demand) * (W - padL - padR);
+    const inPos  = axState.inPosition;
+    const indColor = inPos ? '#10B981' : colors.dot;
+
+    return e('svg', {width:'100%', viewBox:`0 0 ${W} ${H}`, style:{display:'block',marginTop:4}},
+      e('line', {x1:padL, y1:trackY, x2:W-padR, y2:trackY,
+        stroke:'#374151', strokeWidth:2, strokeLinecap:'round'}),
+      e('line', {x1:padL, y1:trackY-4, x2:padL, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
+      e('line', {x1:W-padR, y1:trackY-4, x2:W-padR, y2:trackY+4, stroke:'#4B5563', strokeWidth:1.5}),
+      // lo/hi labels below the rail, left/right justified within track width
+      e('text', {x:padL, y:trackY+18, textAnchor:'start', dominantBaseline:'auto',
+        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, lo.toFixed(0)),
+      e('text', {x:W-padR, y:trackY+18, textAnchor:'end', dominantBaseline:'auto',
+        fontSize:10, fill:'#6B7280', fontFamily:'var(--mono)'}, hi.toFixed(0)),
+      showDemand ? e('line', {x1:demX, y1:trackY-9, x2:demX, y2:trackY+9,
+        stroke:'#93C5FD', strokeWidth:1.5, strokeDasharray:'3 2', opacity:.6}) : null,
+      e('line', {x1:posX, y1:trackY-11, x2:posX, y2:trackY+11,
+        stroke:indColor, strokeWidth:2, strokeLinecap:'round'}),
+      e('circle', {cx:posX, cy:trackY, r:4.5, fill:indColor}),
+      e('text', {x:posX, y:trackY-14, textAnchor:'middle', dominantBaseline:'auto',
+        fontSize:9.5, fill:'#F9FAFB', fontFamily:'var(--mono)', fontWeight:700},
+        pos.toFixed(0))
+    );
+  }
+}
+
+
+function CpuBadge({cpu}) {
+  if (!cpu) return null;
+  const proc = cpu.processCpuLoad, sys = cpu.systemCpuLoad;
+  const pct = proc >= 0 ? proc*100 : null;
+  const sysPct = sys >= 0 ? sys*100 : null;
+  const fmt = v => v == null ? '\u2014' : v.toFixed(0) + '%';
+  // Thresholds keyed off REQ-2-APS-0621's 70% ceiling: green < 55, amber 55-70, red >= 70.
+  const col = pct == null ? '#6B7280' : pct >= 70 ? '#FCA5A5' : pct >= 55 ? '#FCD34D' : '#6EE7B7';
+  const bg  = pct != null && pct >= 70 ? '#7F1D1D' : pct != null && pct >= 55 ? '#78350F' : '#1F2937';
+  return e('span',{
+    title:`This HCD JVM CPU load vs REQ-2-APS-0621 (target <= 70%) \u2014 process ${fmt(pct)} \u00B7 system ${fmt(sysPct)} \u00B7 ${cpu.availableProcessors} logical cores`,
+    style:{display:'inline-flex',alignItems:'center',gap:4,fontSize:9.5,padding:'2px 7px',borderRadius:3,
+      backgroundColor:bg,color:col,fontFamily:'var(--mono)',fontWeight:700}},
+    e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:col,flexShrink:0}}),
+    `CPU ${fmt(pct)}`);
+}
+
+function ThreadStatusBar({threadStatus}) {
+  if (!threadStatus) return null;
+  return e('div',{style:{display:'flex',gap:2,alignItems:'center',fontFamily:'var(--mono)',fontSize:9.5,color:'#6B7280'}},
+    e('span',{style:{marginRight:2}},'Thr:'),
+    ...threadStatus.split('').map((b,i) =>
+      e('span',{key:i,style:{width:13,height:13,borderRadius:2,display:'inline-flex',
+        alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:700,
+        backgroundColor:b==='1'?'#F59E0B22':'#1F2937',
+        color:b==='1'?'#FCD34D':'#374151',
+        border:`1px solid ${b==='1'?'#F59E0B44':'#27303f'}`}},i)));
+}
+
+// Severity level ordering for filter comparison
+const LOG_LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
+const LEVEL_RANK = Object.fromEntries(LOG_LEVELS.map((l, i) => [l, i]));
+
+const LEVEL_COLOR = {
+  TRACE: '#6B7280', DEBUG: '#6B7280', INFO: '#D1D5DB',
+  WARN:  '#FCD34D', ERROR: '#FCA5A5', FATAL: '#FCA5A5'
+};
+
+// Colour-code the message text by content (controller MG output keywords)
+function msgColor(msg, severity) {
+  if (severity === 'WARN' || severity === 'ERROR' || severity === 'FATAL') return LEVEL_COLOR[severity];
+  if (msg.includes('ERROR') || msg.includes('POSERR')) return '#FCA5A5';
+  if (msg.includes('Homed') || msg.includes('Completed')) return '#6EE7B7';
+  if (msg.includes('STOP') || msg.includes('Stopped'))    return '#FCD34D';
+  if (msg.includes('MOVE') || msg.includes('move to'))    return '#93C5FD';
+  if (msg.includes('TRACK'))                              return '#67E8F9';
+  if (msg.includes('[GALIL:'))                            return '#C4B5FD'; // controller console lines
+  return LEVEL_COLOR[severity] || '#D1D5DB';
+}
+
+// ── IO Panel ──────────────────────────────────────────────────────────────────
+// Full-width collapsed panel showing DI (read-only), DO (clickable), AI (read-only).
+// Bit numbering: 1-based (matching Galil @IN/@OUT/@AN convention).
+// Bits are greyed when the corresponding axis slot is not active on this controller.
+// DO bits are clickable toggles — send setBit address=n, value=1 or 0.
+// BitCell must be defined outside IOPanel so it is a stable component type.
+// If defined inside IOPanel, React sees a new function on every render and
+// unmounts/remounts the DOM node — causing clicks to miss their target when
+// a QR poll re-render races with a mousedown/mouseup sequence.
+const BitCell = memo(({bit1, value, clickable, supported, onToggle}) => {
+  const MONO = 'var(--mono)';
+  const active = supported && value;
+  const bgColor = !supported ? '#0D1117'
+                : active    ? (clickable ? '#10B981' : '#3B82F6')
+                :              '#1F2937';
+  const textColor = !supported ? '#2D3748' : active ? '#F9FAFB' : '#6B7280';
+  return e('div', {
+    title: supported ? `${clickable?'DO':'DI'} ${bit1}` : `Not supported (axis ${String.fromCharCode(64+bit1)} inactive)`,
+    onClick: clickable ? () => onToggle(bit1, value) : undefined,
+    style:{
+      width:28, height:28, borderRadius:4, display:'flex', alignItems:'center',
+      justifyContent:'center', flexDirection:'column', gap:1,
+      backgroundColor:bgColor, border:`1px solid ${supported?'#374151':'#1A202C'}`,
+      cursor: clickable && supported ? 'pointer' : 'default',
+      userSelect:'none', transition:'background-color 0.15s'
+    }},
+    e('span',{style:{fontSize:8, color:textColor, fontFamily:MONO}}, bit1),
+    e('span',{style:{fontSize:9, fontWeight:700, color:textColor, fontFamily:MONO}},
+      supported ? (value ? '1' : '0') : '–')
+  );
+});
+
+const IOPanel = memo(function IOPanel({state, onCommand}) {
+  const [open, setOpen] = React.useState(false);
+  const activeAxes = state?.activeAxes || [];
+
+  // I/O availability is determined by the controller's axis count (from ID command).
+  // The number of DI/DO channels is an intrinsic property of the DMC-500x0 model:
+  //   DMC-50040 (4-axis): 8 DI, 8 DO  → bits 1-8 only
+  //   DMC-50080 (8-axis): 16 DI, 16 DO → bits 1-16
+  // No expansion module is involved — channel count is determined by the controller model itself.
+  const controllerAxisCount = state?.controllerAxisCount ?? -1;
+  const isSupported = useCallback((bit1) => bit1 <= 8 || controllerAxisCount >= 8, [controllerAxisCount]);
+
+  const dout = state?.digitalOutputs || Array(16).fill(false);
+  const di   = state?.digitalInputs  || Array(16).fill(false);
+  const ai   = state?.analogInputs   || Array(8).fill(0);
+
+  // Stable callback — does not change between renders, so BitCell onClick
+  // closures remain valid even if IOPanel re-renders due to state updates.
+  const toggleDO = useCallback((bit1, currentVal) => {
+    if (!isSupported(bit1)) return;
+    const sendVal = currentVal ? 0 : 1;
+    onCommand('setBit', {address: bit1, value: sendVal});
+  }, [isSupported, onCommand]);
+
+  const MONO = 'var(--mono)';
+  const sectionLabel = (txt) => e('div', {style:{
+    fontSize:9.5, fontWeight:700, color:'#6B7280', letterSpacing:1,
+    fontFamily:MONO, marginBottom:4
+  }}, txt);
+
+  const headerStyle = {
+    display:'flex', justifyContent:'space-between', alignItems:'center',
+    padding:'5px 10px', cursor:'pointer', userSelect:'none',
+    backgroundColor:'#0D1117', borderBottom: open ? '1px solid #1F2937' : 'none'
+  };
+
+  return e('div', {style:{
+    border:'1px solid #1F2937', borderRadius:6, marginBottom:10,
+    flexShrink:0, overflow:'hidden'
+  }},
+    // Header — always visible, click to toggle
+    e('div', {style:headerStyle, onClick:()=>setOpen(!open)},
+      e('span', {style:{fontFamily:MONO, fontWeight:700, fontSize:11, color:'#6B7280', letterSpacing:1}},
+        'I/O'),
+      e('span', {style:{display:'flex', gap:16, alignItems:'center'}},
+        // Mini DI/DO summary indicators when collapsed
+        !open ? e('span', {style:{display:'flex', gap:3}},
+          ...[1,2,3,4,5,6,7,8].map(b =>
+            e('div', {key:b, style:{
+              width:8, height:8, borderRadius:2,
+              backgroundColor: !isSupported(b) ? '#1A202C'
+                              : di[b-1]        ? '#3B82F6'
+                              :                  '#1F2937',
+              border:'1px solid #374151'
+            }})
+          )
+        ) : null,
+        !open ? e('span', {style:{display:'flex', gap:3}},
+          ...[1,2,3,4,5,6,7,8].map(b =>
+            e('div', {key:b, style:{
+              width:8, height:8, borderRadius:2,
+              backgroundColor: !isSupported(b) ? '#1A202C'
+                              : dout[b-1]      ? '#10B981'
+                              :                  '#1F2937',
+              border:'1px solid #374151'
+            }})
+          )
+        ) : null,
+        e('span', {style:{fontSize:9.5, color:open?'#9CA3AF':'#4B5563', fontFamily:MONO}},
+          open ? '▲ hide' : '▼ show')
+      )
+    ),
+
+    // Expanded body
+    open ? e('div', {style:{padding:'10px 12px', backgroundColor:'#111827'}},
+      e('div', {style:{display:'flex', gap:24, flexWrap:'wrap'}},
+
+        // Digital Inputs
+        e('div', null,
+          sectionLabel('DIGITAL INPUTS (read-only)'),
+          e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
+            ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
+              e(BitCell, {key:b, bit1:b, value:di[b-1], clickable:false, supported:isSupported(b), onToggle:toggleDO})
+            )
+          )
+        ),
+
+        // Digital Outputs
+        e('div', null,
+          sectionLabel('DIGITAL OUTPUTS (click to toggle)'),
+          e('div', {style:{display:'grid', gridTemplateColumns:'repeat(8,1fr)', gap:4}},
+            ...[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16].map(b =>
+              e(BitCell, {key:b, bit1:b, value:dout[b-1], clickable:true, supported:isSupported(b), onToggle:toggleDO})
+            )
+          )
+        ),
+
+        // Analog Inputs — all 8 always present on main board
+        e('div', null,
+          sectionLabel('ANALOG INPUTS (V)'),
+          e('div', {style:{
+            display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:4
+          }},
+            ...[1,2,3,4,5,6,7,8].map(b =>
+              e('div', {key:b, style:{
+                backgroundColor:'#1F2937', border:'1px solid #374151',
+                borderRadius:4, padding:'3px 6px', textAlign:'center'
+              }},
+                e('div',{style:{fontSize:8,color:'#6B7280',fontFamily:MONO}}, `AN${b}`),
+                e('div',{style:{fontSize:11,fontWeight:600,color:'#93C5FD',fontFamily:MONO}},
+                  ai[b-1] != null ? ai[b-1].toFixed(3) : '–')
+              )
+            )
+          )
+        )
+      )
+    ) : null
+  );
+});
+
+
+// ConfigPanel: per-axis configuration form (MOTION / ROTATING / LINEAR / soft-lim / ENGINEERING).
+//
+// Lifted out of AxisCard in S62 when the config UI moved from per-card expansion
+// into a permanent bottom-right bay.  Form-field state lives here and is
+// re-initialized whenever the `axis` prop changes — switching tabs in the bay
+// is therefore a state reset, not a preserve.  That matches the chosen UX
+// (simpler state model, single source of truth: the live axState).
+function ConfigPanel({axis, axState, cmdSt, onCommand}) {
+  const cs = cmdSt || {};
+
+  const [cfgVel, setCfgVel] = useState('');
+  const [cfgAcc, setCfgAcc] = useState('');
+  const [cfgDec, setCfgDec] = useState('');
+  const [cfgIdxOfs, setCfgIdxOfs] = useState('');
+  const [cfgIdxSpd, setCfgIdxSpd] = useState('');
+  const [cfgThresh, setCfgThresh] = useState('');
+  const [cfgAlgorithm, setCfgAlgorithm] = useState('shortest');
+  const [cfgUpperLimit, setCfgUpperLimit] = useState('');
+  const [cfgLowerLimit, setCfgLowerLimit] = useState('');
+  const [jogSpeed, setJogSpeed] = useState('');
+
+  // Populate form from current axState whenever the axis tab changes, and only
+  // then — subsequent axState polls would otherwise stomp on in-progress edits.
+  // The explicit `Reload` button below re-pulls from current axState on demand.
+  useEffect(() => {
+    if (!axState) return;
+    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
+    setJogSpeed('');
+  }, [axis]); // intentionally not [axState] — see comment above
+
+  if (!axState) {
+    return e('div',{style:{padding:8,fontFamily:'var(--mono)',fontSize:10.5,color:'#6B7280'}},
+      `Axis ${axis}: no state available`);
+  }
+
+  const sendConfig = () => {
+    const params = {};
+    if (cfgVel) params.velocity = cfgVel;
+    if (cfgAcc) params.acceleration = cfgAcc;
+    if (cfgDec) params.deceleration = cfgDec;
+    if (cfgIdxOfs) params.indexOffset = cfgIdxOfs;
+    if (cfgIdxSpd) params.indexSpeed = cfgIdxSpd;
+    if (cfgThresh) params.inPositionThreshold = cfgThresh;
+    if (Object.keys(params).length > 0) onCommand('configAxis', {axis, ...params});
+  };
+
+  const sendRotatingConfig = () => {
+    onCommand('configRotatingAxis', {axis, algorithm: cfgAlgorithm});
+  };
+
+  const sendLinearConfig = () => {
+    const params = {};
+    if (cfgUpperLimit) params.upperLimit = cfgUpperLimit;
+    if (cfgLowerLimit) params.lowerLimit = cfgLowerLimit;
+    if (Object.keys(params).length > 0) onCommand('configLinearAxis', {axis, ...params});
+  };
+
+  const reloadConfig = () => {
+    setCfgVel(axState.maxSpeed ? String(axState.maxSpeed) : '');
+    setCfgAcc(axState.acceleration ? String(axState.acceleration) : '');
+    setCfgDec(axState.deceleration ? String(axState.deceleration) : '');
+    setCfgIdxOfs(axState.indexOffset != null ? String(axState.indexOffset) : '');
+    setCfgIdxSpd(axState.indexSpeed ? String(axState.indexSpeed) : '');
+    setCfgThresh(axState.inPositionThreshold != null ? String(axState.inPositionThreshold) : '');
+    if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
+    setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
+    setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
+  };
+
+  return e('div',{style:{padding:'8px',backgroundColor:'#0D1117',borderRadius:6,
+    border:'1px solid #1F2937',boxSizing:'border-box'}},
+
+    // ── MOTION CONFIG ──
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'MOTION CONFIG'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Speed'),
+      e(In,{value:cfgVel,onChange:setCfgVel,ph:'counts/s'}),
+      e('span',{style:{color:'#9CA3AF'}},'Accel'),
+      e(In,{value:cfgAcc,onChange:setCfgAcc,ph:'counts/s²'}),
+      e('span',{style:{color:'#9CA3AF'}},'Decel'),
+      e(In,{value:cfgDec,onChange:setCfgDec,ph:'counts/s²'}),
+      e('span',{style:{color:'#9CA3AF'}},'Idx Ofs'),
+      e(In,{value:cfgIdxOfs,onChange:setCfgIdxOfs,ph:'counts'}),
+      e('span',{style:{color:'#9CA3AF'}},'Idx Spd'),
+      e(In,{value:cfgIdxSpd,onChange:setCfgIdxSpd,ph:'counts/s'}),
+      e('span',{style:{color:'#9CA3AF'}},'Thresh'),
+      e(In,{value:cfgThresh,onChange:setCfgThresh,ph:'counts'})),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Reload',color:'#4B5563',small:true,onClick:reloadConfig}),
+      e(Btn,{label:'Apply',color:'#8B5CF6',small:true,onClick:sendConfig})),
+
+    // ── ROTATING MECHANISM ──
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'ROTATING MECHANISM'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Approach'),
+      e('select',{
+        value:cfgAlgorithm,
+        onChange:e=>setCfgAlgorithm(e.target.value),
+        style:{backgroundColor:'#1F2937',color:'#E5E7EB',border:'1px solid #374151',
+          borderRadius:3,padding:'2px 4px',fontSize:10.5,fontFamily:'var(--mono)',width:'100%'}},
+        e('option',{value:'shortest'},'shortest'),
+        e('option',{value:'forward'},'forward'),
+        e('option',{value:'reverse'},'reverse'))),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Apply Rotating',color:'#8B5CF6',small:true,onClick:sendRotatingConfig})),
+
+    // ── LINEAR MECHANISM ──
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#6B7280',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'LINEAR MECHANISM'),
+    e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center',
+      fontFamily:'var(--mono)',fontSize:10.5}},
+      e('span',{style:{color:'#9CA3AF'}},'Upper Lim'),
+      e(In,{value:cfgUpperLimit,onChange:setCfgUpperLimit,ph:'counts'}),
+      e('span',{style:{color:'#9CA3AF'}},'Lower Lim'),
+      e(In,{value:cfgLowerLimit,onChange:setCfgLowerLimit,ph:'counts'})),
+    e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end'}},
+      e(Btn,{label:'Apply Linear',color:'#8B5CF6',small:true,onClick:sendLinearConfig})),
+
+    // Soft-limit enforcement toggle.  Operational state (not config), so
+    // takes effect immediately on click — no Apply.  Visible only on linear
+    // axes; meaningless for rotating mechanisms (no soft limits in play).
+    // Bypassing leaves the axis protected only by its hardware limit
+    // switches (#LIMSWI), which is the necessary condition for testing
+    // those switches.
+    axState.mechanismType === 'Linear'
+      ? e('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:8,paddingTop:6,
+          borderTop:'1px dashed #1F2937',fontFamily:'var(--mono)',fontSize:10.5}},
+          e('span',{style:{color:'#9CA3AF',width:70,flexShrink:0}},'Soft Lim'),
+          e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
+            color: axState.softLimitsEnabled ? '#6EE7B7' : '#FCD34D'}},
+            e('span',{style:{width:6,height:6,borderRadius:1.5,
+              backgroundColor: axState.softLimitsEnabled ? '#10B981' : '#F59E0B'}}),
+            axState.softLimitsEnabled ? 'Enforced' : 'Bypassed'),
+          e('span',{style:{flex:1}}),
+          e(Btn,{
+            label: axState.softLimitsEnabled ? 'Bypass' : 'Enforce',
+            color: axState.softLimitsEnabled ? '#F59E0B' : '#10B981',
+            small: true,
+            onClick: () => onCommand('setSoftLimits',{axis,enabled:!axState.softLimitsEnabled})}))
+      : null,
+
+    // ── ENGINEERING ──
+    // Low-level jog controls.  Bypasses CommandHandlerActor; issues SH/JG/BG/ST
+    // directly on the command connection via the HMI engJog/engStop handlers.
+    // Reserved for lab/test use (limit-switch checkout, motor smoke-test before
+    // homing).  Soft limits are NOT enforced — engineer takes responsibility.
+    //
+    // Jog buttons enabled when axis is in a jog-permissible state:
+    //   Idle, Lost                              — first jog from quiescent
+    //   Moving (with activeThread == -1)        — reentrant speed/direction update
+    //     (-1 = no thread; 0 is a valid thread)
+    //                                              (engineering jog already running)
+    // Stop is always enabled — fundamentally a safety command; works against
+    // spontaneous motion and externally-issued JGs as well as our own jogs.
+    e('div',{style:{borderTop:'1px solid #1F2937',marginTop:8,paddingTop:8}}),
+    e('div',{style:{fontSize:9.5,fontWeight:700,color:'#F59E0B',marginBottom:6,letterSpacing:1,
+      fontFamily:'var(--mono)'}},'ENGINEERING'),
+    (() => {
+      const canJog =
+        axState.axisState === 'Idle'
+        || axState.axisState === 'Lost'
+        || (axState.axisState === 'Moving' && (cs.activeThread ?? -1) === -1);
+      const speedNum = parseInt(jogSpeed, 10);
+      const speedValid = !isNaN(speedNum) && speedNum > 0;
+      return e('div',{style:{fontFamily:'var(--mono)',fontSize:10.5}},
+        e('div',{style:{display:'grid',gridTemplateColumns:'70px 1fr',rowGap:4,alignItems:'center'}},
+          e('span',{style:{color:'#9CA3AF'}},'Jog Spd'),
+          e(In,{value:jogSpeed,onChange:setJogSpeed,ph:'counts/s (magnitude)'})),
+        e('div',{style:{display:'flex',gap:5,marginTop:6,justifyContent:'flex-end',alignItems:'center'}},
+          e('span',{style:{flex:1,fontSize:9.5,color:'#6B7280'}},
+            canJog ? (speedValid ? '' : 'enter speed magnitude') : `jog blocked: ${axState.axisState}`),
+          e(Btn,{
+            label:'Jog \u2212',  // unicode minus
+            color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+            small:true,
+            onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:-speedNum}); }}),
+          e(Btn,{
+            label:'Jog +',
+            color: (canJog && speedValid) ? '#F59E0B' : '#374151',
+            small:true,
+            onClick: () => { if (canJog && speedValid) onCommand('engJog',{axis,speed:speedNum}); }}),
+          e(Btn,{
+            label:'Stop',
+            color:'#EF4444',
+            small:true,
+            onClick: () => onCommand('engStop',{axis})})));
+    })()
+  );
+}
+
+// ConfigBay: collapsible right-side region of the bottom row.  When collapsed,
+// just a thin vertical strip with an expand button.  When expanded, a tab bar
+// across the top (one tab per active axis) and the selected axis's ConfigPanel
+// below.  Tab switching resets the form (see ConfigPanel comment).
+function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelectAxis, onCommand, innerRef}) {
+  // Collapsed: thin strip with expand chevron.
+  if (!expanded) {
+    return e('div',{ref:innerRef, style:{flexShrink:0,width:24,height:'100%',backgroundColor:'#111827',
+        border:'1px solid #1F2937',borderRadius:8,marginLeft:8,
+        display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-start',
+        cursor:'pointer',userSelect:'none',padding:'8px 0'},
+        title:'Expand config bay', onClick:onToggle},
+      e('span',{style:{color:'#6B7280',fontFamily:'var(--mono)',fontSize:14,marginBottom:6}},'\u25C0'),
+      // Vertical "CONFIG" label, rotated.
+      e('span',{style:{color:'#4B5563',fontFamily:'var(--mono)',fontSize:9.5,fontWeight:700,
+          letterSpacing:1.2,writingMode:'vertical-rl',transform:'rotate(180deg)'}},'CONFIG'));
+  }
+
+  // Expanded: 340px wide column with tab bar on top and config below.
+  // No explicit height — the bay sizes to its natural content (tab bar +
+  // ConfigPanel).  GalilHMI measures this height in a useLayoutEffect and
+  // passes it as `panelHeight` to HcdLogPanel so the two stay aligned.
+  return e('div',{ref:innerRef, style:{flexShrink:0,width:340,
+      backgroundColor:'#111827',
+      border:'1px solid #1F2937',borderRadius:8,marginLeft:8,
+      display:'flex',flexDirection:'column'}},
+
+    // Tab bar.  overflowX:auto handles many tabs gracefully — STB has 7 active.
+    e('div',{style:{display:'flex',alignItems:'center',backgroundColor:'#0D1117',
+        borderBottom:'1px solid #1F2937',padding:'4px 4px 0 4px',flexShrink:0,gap:2,
+        overflowX:'auto'}},
+      // Collapse chevron on the far left — pinned, doesn't scroll with tabs.
+      e('span',{style:{color:'#6B7280',fontFamily:'var(--mono)',fontSize:14,
+          cursor:'pointer',userSelect:'none',padding:'2px 6px',flexShrink:0},
+          title:'Collapse config bay', onClick:onToggle}, '\u25B6'),
+      // One tab per active axis.
+      ...activeAxes.map(a => {
+        const isSel = a === selectedAxis;
+        return e('span',{
+          key:a,
+          onClick: () => onSelectAxis(a),
+          style:{cursor:'pointer',userSelect:'none',flexShrink:0,
+            padding:'4px 10px',marginBottom:-1,
+            fontFamily:'var(--mono)',fontSize:11,fontWeight:700,
+            color: isSel ? '#F9FAFB' : '#6B7280',
+            backgroundColor: isSel ? '#0D1117' : 'transparent',
+            border: isSel ? '1px solid #1F2937' : '1px solid transparent',
+            borderBottom: isSel ? '1px solid #0D1117' : '1px solid transparent',
+            borderTopLeftRadius:4,borderTopRightRadius:4}},
+          a);
+      })),
+
+    // Selected axis's ConfigPanel (or hint if nothing selected).
+    // Sized to ConfigPanel's natural content; the bay matches, the row
+    // matches via alignItems:stretch, and the log stretches to match.
+    e('div',{style:{padding:6,boxSizing:'border-box'}},
+      selectedAxis
+        ? e(ConfigPanel,{
+            axis:selectedAxis,
+            axState:state?.axes?.[selectedAxis],
+            cmdSt:state?.cmdState?.[selectedAxis],
+            onCommand})
+        : e('div',{style:{padding:8,fontFamily:'var(--mono)',fontSize:10.5,color:'#6B7280'}},
+            'Click an axis tab above to view its config.')));
+}
+
+
+// Tab selector shared by the two bottom-panel views.  The plot deliberately occupies
+// the same real estate as the log rather than adding a third band: both are things you
+// consult while watching a mechanism, and screen height is the scarce resource on this
+// page.  Rendered by both panels in the same header position so switching does not
+// shift the layout.
+function PanelTabs({tab, onTab}) {
+  const mk = (id, label) => e('span', {
+    key: id,
+    onClick: () => onTab(id),
+    style: {cursor:'pointer', userSelect:'none', fontSize:9.5, fontWeight:700,
+      letterSpacing:1.2, padding:'1px 6px', borderRadius:3,
+      color: tab === id ? '#F9FAFB' : '#4B5563',
+      backgroundColor: tab === id ? '#1F2937' : 'transparent'}
+  }, label);
+  return e('div', {style:{display:'flex', alignItems:'center', gap:2}},
+    mk('log', 'HCD LOG'), mk('plot', 'PLOT'));
+}
+
+// One stacked channel: label strip plus an independently autoscaled chart sharing the
+// caller's X domain.  Stacked rather than overlaid because the axes on one controller
+// differ in scale by orders of magnitude -- a stage at ~200 000 counts and a wheel at
+// ~4 000 counts cannot share a Y axis without the wheel becoming a flat line at the
+// bottom.  Each channel keeps its own absolute counts; only the time axis is shared.
+function PlotChannel({axis, times, col, tEnd, xDomain, height}) {
+  const color = CHART_COLORS[axis] || '#9CA3AF';
+  const data = [];
+  let lo = Infinity, hi = -Infinity, n = 0;
+  for (let i = 0; i < times.length; i++) {
+    const v = (col && col[i] != null) ? col[i] : null;
+    data.push({x: (times[i] - tEnd) / 1000, v});
+    if (v != null) { n++; if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  // A dead-flat trace autoscales to a zero-height domain and Recharts draws it on the
+  // frame edge; pad so a stationary axis reads as a line through the middle.
+  const pad = (hi - lo) < 1e-9 ? Math.max(1, Math.abs(hi) * 1e-6) : (hi - lo) * 0.08;
+  const domain = n ? [lo - pad, hi + pad] : [0, 1];
+  const fmt = (v) => Math.abs(v) >= 1e5 ? v.toExponential(2) : v.toFixed(Math.abs(v) < 10 ? 2 : 0);
+
+  return e('div', {style:{display:'flex', alignItems:'stretch', gap:6, marginBottom:2}},
+    e('div', {style:{width:78, flexShrink:0, display:'flex', flexDirection:'column',
+        justifyContent:'center', paddingLeft:2}},
+      e('div', {style:{display:'flex', alignItems:'center', gap:5}},
+        e('span', {style:{width:7, height:7, borderRadius:2, backgroundColor:color, flexShrink:0}}),
+        e('span', {style:{color:'#D1D5DB', fontSize:11, fontWeight:700}}, axis)),
+      e('div', {style:{color:'#4B5563', fontSize:8.5, marginTop:2}},
+        n ? `${fmt(lo)} … ${fmt(hi)}` : 'no data'),
+      e('div', {style:{color:'#374151', fontSize:8, marginTop:1}}, 'counts')),
+    e('div', {style:{flex:1, minWidth:0, height}},
+      e(ResponsiveContainer, {width:'100%', height:'100%'},
+        e(LineChart, {data, margin:{top:6, right:8, left:2, bottom:2}},
+          e(CartesianGrid, {strokeDasharray:'3 3', stroke:'#1F293788'}),
+          e(XAxis, {dataKey:'x', type:'number', domain:xDomain,
+            tick:{fontSize:8.5, fill:'#374151'}, axisLine:{stroke:'#1F2937'},
+            tickLine:false, tickFormatter:(v)=>`${v.toFixed(0)}s`, height:14}),
+          e(YAxis, {domain, tick:{fontSize:8.5, fill:'#4B5563'}, axisLine:{stroke:'#1F2937'},
+            tickLine:false, width:62, tickFormatter:fmt}),
+          e(Tooltip, {
+            contentStyle:{backgroundColor:'#1F2937', border:'1px solid #374151',
+              fontSize:10, fontFamily:'monospace'},
+            labelFormatter:(v)=>`t ${Number(v).toFixed(2)} s`,
+            formatter:(v)=>[v == null ? '—' : v, axis]}),
+          // connectNulls false: a gap in acquisition must read as a gap, not as a
+          // straight line interpolated across data we never had.
+          e(Line, {type:'linear', dataKey:'v', stroke:color, dot:false, strokeWidth:1.4,
+            isAnimationActive:false, connectNulls:false})))));
+}
+
+// Position plot over the HCD-side per-scan history (ADR-002).
+// View state (axis selection, freeze) is owned by GalilHMI and passed in, NOT held
+// locally: this panel unmounts whenever the bottom row switches to the log, and local
+// state would die with it -- so every trip to the log and back would silently reset the
+// axis selection and drop a freeze the operator had deliberately taken.
+function PlotPanel({buf, panelHeight, bayExpanded, tab, onTab, setPlotLive,
+                    selected, setSelected, frozenSnap, setFrozenSnap}) {
+  const frozen = !!frozenSnap;
+
+  // Tell the connection hook to start bumping its render tick while this panel is
+  // mounted, and to stop when it is not.
+  useEffect(() => { setPlotLive(true); return () => setPlotLive(false); }, [setPlotLive]);
+
+  // The frozen view is a deep-enough copy taken at click time, not a flag: the live
+  // buffer keeps being appended to and trimmed underneath us, so holding a reference
+  // would let the "frozen" trace shift as the ring wrapped.
+  const toggleFreeze = useCallback(() => {
+    setFrozenSnap(prev => {
+      if (prev) return null;
+      const axes = {};
+      Object.keys(buf.axes).forEach(k => { axes[k] = buf.axes[k].slice(); });
+      return {t: buf.t.slice(), axes, gap: buf.gap};
+    });
+  }, [buf, setFrozenSnap]);
+
+  if (rechartsError) {
+    return e('div', {style:{flex:1, minWidth:0, height: bayExpanded ? panelHeight : 500,
+        backgroundColor:'#111827', border:'1px solid #7F1D1D', borderRadius:8,
+        padding:'8px 12px', fontFamily:'var(--mono)', fontSize:11}},
+      e(PanelTabs, {tab, onTab}),
+      e('div', {style:{color:'#FCA5A5', marginTop:10, fontSize:10.5}}, rechartsError));
+  }
+
+  const view = frozenSnap || buf;
+  const times = view.t;
+  const available = Object.keys(view.axes).sort();
+  const shown = available.filter(a => selected === null || selected.includes(a));
+
+  const tEnd = times.length ? times[times.length - 1] : 0;
+  const xMin = times.length ? (times[0] - tEnd) / 1000 : -1;
+  const xDomain = [xMin, 0];
+  const spanMs = times.length > 1 ? times[times.length - 1] - times[0] : 0;
+  // Effective rate over the retained window.  Worth showing because the HCD's polling
+  // is adaptive (1Hz standby / 10Hz action), so the window's DURATION varies with what
+  // the mechanism has been doing -- the buffer is bounded by sample count, not time.
+  const rateHz = spanMs > 0 ? ((times.length - 1) * 1000 / spanMs) : 0;
+
+  // Height policy: every ENABLED channel must be visible without scrolling -- seeing
+  // all axes at once is the entire reason for stacking them -- and the channels share
+  // whatever height there is rather than each taking a fixed slice.  So the panel is
+  // sized from its content, not the other way round:
+  //
+  //   1. start from a budget (the log panel's default height, or the ConfigBay's
+  //      measured height when the bay is expanded, so the bottom row stays aligned);
+  //   2. divide it among the enabled channels, clamped to a readable band;
+  //   3. set the panel height to exactly what those channels need.
+  //
+  // Consequences, both intentional: with all 8 axes enabled the panel grows slightly
+  // past the base height rather than clipping the last channel, and with only one or
+  // two enabled it shrinks to fit instead of leaving dead space below the traces.
+  const CH_MIN = 56, CH_MAX = 190, CH_GAP = 2;
+  const CHROME = 58;    // header row + footer line + vertical padding
+  const BASE_H = 500;   // matches HcdLogPanel's default so tab switching barely shifts
+  const nCh = shown.length;
+  const budget = Math.max(BASE_H, bayExpanded ? panelHeight : 0) - CHROME;
+  const chH = nCh ? Math.max(CH_MIN, Math.min(CH_MAX, Math.floor(budget / nCh) - CH_GAP)) : 0;
+  const contentH = nCh ? CHROME + nCh * (chH + CH_GAP) : 200;
+  const outerH = Math.max(contentH, bayExpanded ? panelHeight : 0, 200);
+
+  const chip = (a) => {
+    const on = shown.includes(a);
+    return e('span', {key:a,
+      onClick: () => setSelected(prev => {
+        const base = prev === null ? available.slice() : prev.slice();
+        const i = base.indexOf(a);
+        if (i >= 0) base.splice(i, 1); else base.push(a);
+        return base;
+      }),
+      style:{cursor:'pointer', userSelect:'none', fontSize:9.5, fontWeight:700,
+        padding:'1px 7px', borderRadius:3, marginRight:3,
+        border:`1px solid ${on ? (CHART_COLORS[a]||'#4B5563') : '#1F2937'}`,
+        color: on ? (CHART_COLORS[a]||'#9CA3AF') : '#4B5563',
+        backgroundColor: on ? '#1F2937' : 'transparent'}}, a);
+  };
+
+  return e('div', {style:{display:'flex', flexDirection:'column', flex:1, minWidth:0,
+      height: outerH, backgroundColor:'#111827', border:'1px solid #1F2937',
+      borderRadius:8, padding:'8px 12px', fontFamily:'var(--mono)', fontSize:11}},
+
+    // Header: tabs on the left (same position as the log panel), controls on the right.
+    e('div', {style:{display:'flex', justifyContent:'space-between', alignItems:'center',
+        marginBottom:4, flexShrink:0}},
+      e('div', {style:{display:'flex', alignItems:'center', gap:8}},
+        e(PanelTabs, {tab, onTab}),
+        e('span', {style:{fontSize:9, padding:'1px 5px', borderRadius:3,
+            backgroundColor:'#1F2937', color:'#4B5563'}},
+          times.length
+            ? `${(spanMs/1000).toFixed(1)}s · ${times.length} samples · ${rateHz.toFixed(1)} Hz`
+            : 'no samples yet'),
+        view.gap && e('span', {
+            title:'Samples were lost between frames or evicted from the HCD ring buffer before this client read them. The trace is discontinuous.',
+            style:{fontSize:9, padding:'1px 5px', borderRadius:3,
+              backgroundColor:'#78350F', color:'#FCD34D', fontWeight:700}}, 'GAP')),
+      e('div', {style:{display:'flex', alignItems:'center', gap:6}},
+        e('span', {style:{color:'#374151', fontSize:9.5}}, '│'),
+        ...available.map(chip),
+        e('span', {style:{color:'#374151', fontSize:9.5}}, '│'),
+        e('button', {
+            onClick: toggleFreeze,
+            title:'Freeze the view for reading a transient. The HCD keeps recording; unfreezing jumps back to live.',
+            style:{fontSize:9.5, padding:'2px 8px', borderRadius:10, fontWeight:700,
+              cursor:'pointer', fontFamily:'var(--mono)',
+              border:`1px solid ${frozen ? '#92400E' : '#374151'}`,
+              backgroundColor: frozen ? '#78350F' : '#1F2937',
+              color: frozen ? '#FCD34D' : '#6B7280'}},
+          frozen ? 'Frozen ✓' : 'Freeze'),
+        e('a', {href:`${API_BASE}/api/history.csv`, download:true,
+            title:'Download the HCD\'s full retained window as CSV.',
+            style:{fontSize:9.5, padding:'2px 8px', borderRadius:10, fontWeight:700,
+              fontFamily:'var(--mono)', textDecoration:'none',
+              border:'1px solid #374151', backgroundColor:'#1F2937', color:'#6B7280'}},
+          'CSV'))),
+
+    // Stacked channels.
+    e('div', {style:{flex:1, minHeight:0, overflowY:'auto'}},
+      // Sized to fit by the height policy above, so this should never actually scroll;
+      // overflowY stays as a safety net rather than a layout mechanism.
+      shown.length === 0
+        ? e('div', {style:{color:'#4B5563', fontSize:10.5, padding:8}},
+            available.length ? 'No axes selected.' : 'Waiting for the first scan samples…')
+        : shown.map(a => e(PlotChannel, {key:a, axis:a, times, col:view.axes[a],
+            tEnd, xDomain, height:chH}))),
+
+    e('div', {style:{flexShrink:0, marginTop:2, color:'#374151', fontSize:8.5}},
+      frozen
+        ? 'Frozen — the HCD is still recording; unfreeze to rejoin the live trace.'
+        : 'Live · positions sampled once per QR scan (adaptive 1 Hz standby / 10 Hz action)'));
+}
+
+function HcdLogPanel({lines, panelHeight, bayExpanded, tab, onTab}) {
+  const containerRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [minLevel, setMinLevel] = useState('INFO');
+  const [hcdLevel, setHcdLevel] = useState('INFO');
+  const [minimized, setMinimized] = useState(false);
+
+  // Fetch current HCD log level on mount
+  useEffect(() => {
+    fetch('/api/loglevel')
+      .then(r => r.json())
+      .then(d => { if (d.logLevel) setHcdLevel(d.logLevel); })
+      .catch(() => {});
+  }, []);
+
+  const changeHcdLevel = (level) => {
+    fetch('/api/loglevel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({logLevel: level})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.logLevel) setHcdLevel(d.logLevel); })
+    .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!minimized && autoScroll && containerRef.current) {
+      // Scroll the log container directly rather than scrollIntoView on the
+      // end marker — the latter walks up the DOM to find a scrollable ancestor
+      // and can scroll the page itself if the log container isn't currently
+      // overflowing.
+      const el = containerRef.current;
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [lines.length, autoScroll, minimized]);
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 30);
+  }, []);
+
+  const minRank = LEVEL_RANK[minLevel] ?? 2; // default INFO
+  const visible = lines.filter(l => (LEVEL_RANK[l.severity?.toUpperCase()] ?? 2) >= minRank);
+
+  const fmtTime = (t) => { try { return new Date(t).toISOString().slice(11,23); } catch(e) { return ''; } };
+
+  const selectStyle = {backgroundColor:'#1F2937',color:'#9CA3AF',border:'1px solid #374151',
+                       borderRadius:3,fontSize:9.5,padding:'1px 4px',cursor:'pointer'};
+
+  // Log height is set externally via the `panelHeight` prop, which is
+  // measured from the ConfigBay's natural content height by GalilHMI's
+  // useLayoutEffect.  This is necessary because flexbox `alignItems:stretch`
+  // alone cannot prevent the log's accumulating content from driving the
+  // row's max-content height upward — we need a definite pixel height to
+  // bound the log so its inner `flex:1, overflowY:auto` can scroll.
+  return e('div', {style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,
+      ...(minimized ? {} : {height: bayExpanded ? panelHeight : 500}),
+      backgroundColor:'#111827',border:'1px solid #1F2937',borderRadius:8,padding:'8px 12px',
+      fontFamily:'var(--mono)',fontSize:11}},
+    // Header row — always visible; click label area to toggle
+    e('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',
+        marginBottom: minimized ? 0 : 4, flexShrink:0}},
+      // Left: view tabs + line count badge.  Minimize is now on the chevron alone --
+      // the label became a tab target, so a whole-group click would swallow tab clicks.
+      e('div', {style:{display:'flex',alignItems:'center',gap:6}},
+        e(PanelTabs, {tab, onTab}),
+        e('span', {style:{fontSize:9,padding:'1px 5px',borderRadius:3,
+            backgroundColor:'#1F2937',color:'#4B5563'}},
+          `${visible.length} lines`),
+        e('span', {style:{fontSize:9,color:'#374151', userSelect:'none', cursor:'pointer'},
+            title: minimized ? 'Expand log' : 'Minimize log',
+            onClick: () => setMinimized(v => !v)},
+          minimized ? '▲' : '▼')
+      ),
+      // Right: controls — always visible so log level can be changed while minimized
+      e('div', {style:{display:'flex',gap:8,alignItems:'center'}},
+        e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'HCD level:'),
+        e('select', {
+            value: hcdLevel,
+            onChange: ev => changeHcdLevel(ev.target.value),
+            style: selectStyle
+          },
+          LOG_LEVELS.map(l => e('option', {key:l, value:l}, l))
+        ),
+        e('span', {style:{color:'#374151',fontSize:9.5}}, '│'),
+        e('span', {style:{color:'#4B5563',fontSize:9.5}}, 'display:'),
+        e('select', {
+            value: minLevel,
+            onChange: ev => setMinLevel(ev.target.value),
+            style: selectStyle
+          },
+          LOG_LEVELS.map(l => e('option', {key:l, value:l}, l))
+        ),
+        !minimized && e('span', {
+            style:{fontSize:9,color:autoScroll?'#065F46':'#4B5563',
+                   backgroundColor:autoScroll?'#064E3B22':'transparent',
+                   padding:'1px 6px',borderRadius:3,cursor:'pointer'},
+            onClick: () => setAutoScroll(v => !v)
+          },
+          autoScroll ? 'auto-scroll' : 'scroll paused'
+        )
+      )
+    ),
+    // Log lines — hidden when minimized
+    !minimized && e('div', {ref:containerRef, onScroll:handleScroll,
+        style:{flex:1,overflowY:'auto',lineHeight:1.6,minHeight:0}},
+      ...visible.map((l, i) => {
+        const sev = (l.severity || 'INFO').toUpperCase();
+        const color = msgColor(l.message || '', sev);
+        const actor = l.actor || '';
+        return e('div', {key:i, style:{display:'flex',gap:8,alignItems:'baseline'}},
+          e('span', {style:{color:'#374151',flexShrink:0,fontSize:10}}, fmtTime(l.timestamp)),
+          e('span', {style:{color:LEVEL_COLOR[sev]||'#6B7280',flexShrink:0,minWidth:36,fontSize:9.5,fontWeight:700}}, sev),
+          actor ? e('span', {style:{color:'#6B7280',flexShrink:0,fontSize:9.5,fontFamily:'var(--mono)',minWidth:140,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, `[${actor}]`) : null,
+          e('span', {style:{color,flex:1}}, l.message || '')
+        );
+      })
+    )
+  );
+}
+
+// Lifecycle modal — used for both Shutdown and Restart confirmations.
+// `kind` is either 'shutdown' or 'restart'; the modal adapts title, body,
+// and confirm-button colour/label accordingly.  Both actions go through
+// the same modal because they're administrative siblings — we want the
+// operator to look at the same dialog and pick which they actually want.
+function LifecycleModal({open, kind, onConfirm, onCancel, busy, error}) {
+  if (!open) return null;
+
+  // Per-kind appearance and copy.
+  const isRestart = kind === 'restart';
+  const title       = isRestart ? 'Restart HCD?' : 'Shutdown HCD?';
+  const tagBg       = isRestart ? '#451A03'     : '#7F1D1D';
+  const tagBorder   = isRestart ? '#F59E0B'     : '#7F1D1D';
+  const tagFg       = isRestart ? '#FCD34D'     : '#FCA5A5';
+  const confirmBorder = isRestart ? '#FBBF24'   : '#F87171';
+  const confirmBg     = isRestart ? '#92400E'   : '#991B1B';
+  const confirmFg     = isRestart ? '#FEF3C7'   : '#FEE2E2';
+  const confirmLabel  = busy
+    ? (isRestart ? 'Restarting…' : 'Shutting down…')
+    : (isRestart ? 'Restart'     : 'Shutdown');
+  const body = isRestart
+    ? ('This will safe all motors, drop all controller connections, and re-initialise '
+       + 'the HCD from scratch (fresh embedded program load and #Init).  The HMI will '
+       + 'briefly disconnect and reconnect on its own within a few seconds.  '
+       + 'Any in-flight commands will be cancelled.')
+    : ('This will stop all motion, disable motor drives, and terminate the HCD process.  '
+       + 'The HMI will lose its connection.  Any in-flight commands will be cancelled.');
+
+  return e('div',{style:{position:'fixed',top:0,left:0,right:0,bottom:0,
+    backgroundColor:'rgba(0,0,0,0.65)',display:'flex',alignItems:'center',justifyContent:'center',
+    zIndex:1000,fontFamily:'var(--mono)'},
+    onClick:(ev)=>{ if(ev.target===ev.currentTarget && !busy) onCancel(); }},
+    e('div',{style:{backgroundColor:'#111827',border:`1px solid ${tagBorder}`,borderRadius:8,
+      padding:'18px 22px',minWidth:340,maxWidth:440,boxShadow:'0 10px 40px rgba(0,0,0,0.5)'}},
+      e('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:10}},
+        e('span',{style:{fontSize:22,lineHeight:1}},'⚠'),
+        e('span',{style:{fontSize:14,fontWeight:700,color:tagFg,letterSpacing:.3}},
+          title)),
+      e('div',{style:{fontSize:12,color:'#D1D5DB',lineHeight:1.55,marginBottom:6}}, body),
+      error
+        ? e('div',{style:{backgroundColor:'#7F1D1D44',border:'1px solid #991B1B',borderRadius:4,
+            padding:'6px 10px',marginTop:10,marginBottom:10,fontSize:11,color:'#FCA5A5'}},error)
+        : null,
+      e('div',{style:{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}},
+        e('button',{
+          onClick:onCancel,
+          disabled:busy,
+          style:{padding:'6px 14px',borderRadius:4,border:'1px solid #4B5563',
+            backgroundColor:'#1F2937',color:'#D1D5DB',fontFamily:'var(--mono)',
+            fontSize:11,fontWeight:600,cursor:busy?'not-allowed':'pointer',
+            opacity:busy?0.5:1}},
+          'Cancel'),
+        e('button',{
+          onClick:onConfirm,
+          disabled:busy,
+          style:{padding:'6px 14px',borderRadius:4,border:`1px solid ${confirmBorder}`,
+            backgroundColor:confirmBg,color:confirmFg,fontFamily:'var(--mono)',
+            fontSize:11,fontWeight:700,cursor:busy?'wait':'pointer',
+            opacity:busy?0.7:1},
+          autoFocus:false},
+          confirmLabel))));
+}
+
+// Banner shown when HCD is not Ready, OR when there is a controller error
+// message that should be visible to the operator even in Ready (rare —
+// usually controllerErrorMsg only persists in Faulted/Uninitialized).
+//
+// Three rendering modes:
+//   - Faulted: red banner, severity dropdown + Clear Fault button.
+//     Severity choices are None/Init/Reset/Reload per ICD.
+//   - Uninitialized: amber banner, no buttons (HCD is busy initialising
+//     or recovering — operator just waits).  Shows initializingReason
+//     ("startup", "faultReset Init", etc) so the operator knows why.
+//   - Ready with non-empty controllerErrorMsg: rare; shown but no buttons.
+function ErrorBanner({hcdState,controllerErrorMsg,initializingReason,onCommand}) {
+  if (hcdState==='Ready' && !controllerErrorMsg) return null;
+
+  const isFaulted        = hcdState === 'Faulted';
+  const isUninitialized  = hcdState === 'Uninitialized';
+
+  // Severity selection state for the Clear Fault button.  Held locally in
+  // the banner — the user picks a severity, then clicks Clear Fault, then
+  // the dropdown resets to None on the next render after Faulted clears.
+  const [severity, setSeverity] = useState('None');
+
+  // Color scheme: red for Faulted, amber for Uninitialized.
+  const palette = isFaulted ? {
+    bg:'#7F1D1D', border:'#991B1B', titleColor:'#FCA5A5', msgColor:'#FECACA'
+  } : isUninitialized ? {
+    bg:'#78350F', border:'#92400E', titleColor:'#FCD34D', msgColor:'#FDE68A'
+  } : {
+    bg:'#7F1D1D', border:'#991B1B', titleColor:'#FCA5A5', msgColor:'#FECACA'
+  };
+
+  // Headline text varies by state.  Uninitialized gets a more informative
+  // message via initializingReason ("startup", "faultReset Init") if set.
+  const headline = isUninitialized
+    ? (initializingReason ? `Initializing — ${initializingReason}` : 'HCD State: Uninitialized')
+    : `HCD State: ${hcdState}`;
+
+  return e('div',{style:{backgroundColor:palette.bg,border:`1px solid ${palette.border}`,borderRadius:6,
+    padding:'8px 14px',marginBottom:10,display:'flex',alignItems:'center',gap:10,fontFamily:'var(--mono)',fontSize:12}},
+    e('span',{style:{fontSize:18,lineHeight:1}}, isUninitialized ? '⏳' : '⚠'),
+    e('div',{style:{flex:1}},
+      e('div',{style:{color:palette.titleColor,fontWeight:700}},headline),
+      controllerErrorMsg && e('div',{style:{color:palette.msgColor,marginTop:2,fontSize:11}},controllerErrorMsg)),
+    isFaulted && e('div',{style:{display:'flex',alignItems:'center',gap:6,flexShrink:0}},
+      // Severity selector — small dropdown in the same color family as the banner
+      e('label',{style:{color:'#FCA5A5',fontSize:10,fontWeight:600}},'Severity:'),
+      e('select',{
+        value:severity,
+        onChange:(ev)=>setSeverity(ev.target.value),
+        title:'None: clear error.  Init: re-run controller init.  Reset: RS controller, then init.  Reload: upload fresh code, BP to EEPROM, RS, then init.',
+        style:{padding:'3px 6px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#7F1D1D',
+          color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer'}},
+        ['None','Init','Reset','Reload'].map(sev =>
+          e('option',{key:sev,value:sev,style:{backgroundColor:'#7F1D1D',color:'#FEE2E2'}},sev))),
+      e('button',{
+        onClick:()=>onCommand('faultReset',{severity}),
+        title:`Submit faultReset with severity=${severity}`,
+        style:{padding:'4px 10px',borderRadius:4,border:'1px solid #F87171',backgroundColor:'#991B1B',
+          color:'#FEE2E2',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,cursor:'pointer',
+          flexShrink:0,whiteSpace:'nowrap'}},
+        'Clear Fault')));
+}
+
+// ── Main App ──
+function GalilHMI() {
+  const {state, connected, submitCommand, logLines, posRef, posTick, setPlotLive} = useHmiConnection();
+  // Which view occupies the bottom-left panel: the position plot or the HCD log.
+  // Defaults to the plot -- it is the view you want up while driving a mechanism, and
+  // the log is one click away.
+  const [bottomTab, setBottomTab] = useState('plot');
+  // Plot view state lives here rather than in PlotPanel so it survives the panel being
+  // unmounted on every switch to the log tab.  null selection = every axis with data;
+  // null snapshot = live.
+  const [plotAxes, setPlotAxes] = useState(null);
+  const [plotFrozenSnap, setPlotFrozenSnap] = useState(null);
+  const [compact, setCompact] = useState(false);
+  // Lifecycle (Shutdown / Restart) modal state.  `kind` is 'shutdown' or 'restart'
+  // when the modal is open, null when closed.  busy/error apply to the in-flight
+  // request regardless of which kind triggered it.
+  const [lifecycleKind, setLifecycleKind] = useState(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState(null);
+  // Config bay (bottom-right region).  Collapsed by default.  When expanded,
+  // shows a tab bar across the top with one tab per active axis; selected
+  // axis's ConfigPanel below.  null = no tab selected; first toggle picks
+  // the first active axis.
+  const [configExpanded, setConfigExpanded] = useState(false);
+  const [selectedConfigAxis, setSelectedConfigAxis] = useState(null);
+  // Bottom-row height alignment: the ConfigBay sizes to its natural content
+  // (which varies by axis type — Linear has Soft Lim row, Rotating doesn't),
+  // and HcdLogPanel needs an explicit pixel height to match (flex stretch
+  // alone won't bound log-content-driven growth).  bayRef + useLayoutEffect
+  // measure the bay after each render and set panelHeight, which we then
+  // pass into HcdLogPanel as a definite cap on its column-direction size.
+  const bayRef = useRef(null);
+  const [panelHeight, setPanelHeight] = useState(300);
+
+  // Open the modal in the requested mode, clearing any prior error from a
+  // previous open.  Wrapped in useCallback because it's used as a button
+  // onClick directly.
+  const openLifecycle = useCallback((kind) => {
+    setLifecycleError(null);
+    setLifecycleKind(kind);
+  }, []);
+
+  // Send the current modal action to the HCD.  Both endpoints have identical
+  // shape (POST, no body, 200 with JSON status / 5xx with JSON error), so the
+  // request code is shared — only the path differs by kind.
+  const confirmLifecycle = useCallback(() => {
+    if (!lifecycleKind) return;
+    const path = lifecycleKind === 'restart' ? '/api/restart' : '/api/shutdown';
+    setLifecycleError(null);
+    setLifecycleBusy(true);
+    fetch(`${API_BASE}${path}`, {method:'POST'})
+      .then(async (resp) => {
+        if (!resp.ok) {
+          let msg = `HTTP ${resp.status}`;
+          try { const j = await resp.json(); if (j.error) msg = j.error; } catch (_) {}
+          throw new Error(msg);
+        }
+        // Success — close the modal.  The page-level Connected → Disconnected
+        // indicator will signal completion within a couple seconds:
+        //   shutdown — WebSocket drops permanently as the HCD process exits
+        //   restart  — WebSocket drops briefly, then auto-reconnects when
+        //              the new HmiServer comes up inside the same JVM
+        setLifecycleBusy(false);
+        setLifecycleKind(null);
+      })
+      .catch(err => {
+        setLifecycleBusy(false);
+        setLifecycleError(err.message || String(err));
+      });
+  }, [lifecycleKind]);
+
+  const cancelLifecycle = useCallback(() => {
+    if (lifecycleBusy) return;
+    setLifecycleKind(null);
+    setLifecycleError(null);
+  }, [lifecycleBusy]);
+
+  // Derive active axes from state
+  const activeAxes = state?.activeAxes || [];
+  const allAxes = state?.axes ? Object.keys(state.axes).sort() : [];
+  const isActive = (a) => activeAxes.includes(a);
+
+
+  const handleCommand = useCallback((commandName, params) => {
+    return submitCommand(commandName, params);
+  }, [submitCommand]);
+
+  // Toggle the config bay's collapsed/expanded state.  When transitioning
+  // from collapsed → expanded with no tab currently selected, auto-select
+  // the first active axis as a convenience.  Subsequent toggles preserve
+  // whatever tab was last selected.
+  const toggleConfigExpanded = useCallback(() => {
+    setConfigExpanded(prev => {
+      const next = !prev;
+      if (next && selectedConfigAxis === null && activeAxes.length > 0) {
+        setSelectedConfigAxis(activeAxes[0]);
+      }
+      return next;
+    });
+  }, [selectedConfigAxis, activeAxes]);
+
+  // Defensive: if the selected config axis is no longer active (config change
+  // dropped it from the active set), clear the selection so the tab bar and
+  // panel stay coherent with available axes.
+  useEffect(() => {
+    if (selectedConfigAxis !== null && activeAxes.length > 0
+        && !activeAxes.includes(selectedConfigAxis)) {
+      setSelectedConfigAxis(null);
+    }
+  }, [selectedConfigAxis, activeAxes.join(',')]);
+
+  // Measure ConfigBay's rendered height after every render and update
+  // panelHeight, which HcdLogPanel uses as its definite column-direction
+  // size.  We watch:
+  //   - configExpanded (bay shape changes — strip vs full panel)
+  //   - selectedConfigAxis (Linear vs Rotating content differs)
+  //   - mechanismType of the selected axis (rare runtime change)
+  //   - softLimitsEnabled (doesn't change content height, included for safety)
+  // Using useLayoutEffect (not useEffect) so the measurement and corresponding
+  // log-height update happen before paint, avoiding a one-frame flash where
+  // log and bay don't match.
+  useLayoutEffect(() => {
+    if (bayRef.current) {
+      const h = bayRef.current.getBoundingClientRect().height;
+      if (h > 0 && Math.abs(h - panelHeight) > 1) setPanelHeight(h);
+    }
+  });
+
+  const hcdState = state?.hcdState || 'Unknown';
+  const simulation = state?.simulation || false;
+
+  return e('div',{style:{padding:'10px 14px',display:'flex',flexDirection:'column',
+    boxSizing:'border-box', borderTop: simulation ? '3px solid #F59E0B' : 'none'}},
+
+    // Header
+    e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',
+      marginBottom:8,paddingBottom:7,borderBottom:'1px solid #1F2937',flexShrink:0}},
+      e('div',{style:{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}},
+        e('h1',{style:{fontSize:15,fontWeight:700,fontFamily:'var(--mono)',letterSpacing:.5}},
+          state?.prefix || 'GalilMotion HCD'),
+        e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,backgroundColor:'#1F2937',color:'#9CA3AF',fontFamily:'var(--mono)'}},
+          'DMC-500x0'),
+        e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,fontFamily:'var(--mono)',fontWeight:700,
+          backgroundColor:hcdState==='Ready'?'#064E3B':'#7F1D1D',
+          color:hcdState==='Ready'?'#6EE7B7':'#FCA5A5'}},hcdState),
+        simulation && e('span',{style:{fontSize:9,padding:'2px 6px',borderRadius:3,
+          backgroundColor:'#92400E',color:'#FCD34D',fontFamily:'var(--mono)',fontWeight:700,
+          letterSpacing:1}},'SIMULATING'),
+        e(ThreadStatusBar,{threadStatus:state?.threadStatus}),
+        // Scan rate badge — shows current StatusMonitor polling rate
+        state?.pollingRateHz != null && e('span',{style:{fontSize:9.5,padding:'2px 7px',borderRadius:3,
+          backgroundColor:'#1F2937',color:'#6B7280',fontFamily:'var(--mono)'}},
+          `${(state.pollingRateHz).toFixed(0)} Hz`),
+        // Per-JVM CPU load vs the 70% ceiling (REQ-2-APS-0621).
+        e(CpuBadge,{cpu:state?.cpuLoad}),
+        // Per-TCP-connection status: Cmd (command), Sts (status), Con (console/informational)
+        e('span',{style:{display:'inline-flex',alignItems:'center',gap:5,padding:'2px 7px',
+          borderRadius:3,backgroundColor:'#1F2937',fontFamily:'var(--mono)',fontSize:9.5}},
+          ...[
+            {label:'Cmd', key:'commandConnection',  informational:false},
+            {label:'Sts', key:'statusConnection',   informational:false},
+            {label:'Con', key:'consoleConnection',  informational:true},
+          ].map(({label, key, informational}) => {
+            const ok = state?.[key] === 'Connected';
+            const dot = ok ? '#10B981' : informational ? '#4B5563' : '#EF4444';
+            const txt = ok ? '#9CA3AF' : informational ? '#4B5563' : '#EF4444';
+            return e('span',{key:label, style:{display:'inline-flex',alignItems:'center',gap:3,color:txt}},
+              e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:dot,flexShrink:0}}),
+              label);
+          }))),
+      e('div',{style:{display:'flex',alignItems:'center',gap:6}},
+        e('button',{
+          onClick:()=>setCompact(c=>!c),
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:600,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #374151',
+            backgroundColor:compact?'#1D4ED8':'#1F2937',
+            color:compact?'#BFDBFE':'#6B7280',transition:'all .15s'}},
+          compact ? 'Compact ✓' : 'Compact'),
+        // Restart — amber, less destructive than Shutdown.  Re-initialises the
+        // HCD without exiting the JVM; the HMI auto-reconnects after a brief drop.
+        e('button',{
+          onClick:()=>openLifecycle('restart'),
+          title:'Restart the HCD (safes motors, reloads embedded code, re-runs init — JVM stays up; HMI auto-reconnects)',
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:700,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #92400E',
+            backgroundColor:'#1F2937',color:'#FCD34D',transition:'all .15s'}},
+          'Restart'),
+        // Shutdown — red, terminal.  Stops motors and exits the HCD process.
+        e('button',{
+          onClick:()=>openLifecycle('shutdown'),
+          title:'Shut down the HCD process (safes all motors first)',
+          style:{fontSize:9.5,padding:'2px 8px',borderRadius:10,fontWeight:700,cursor:'pointer',
+            fontFamily:'var(--mono)',border:'1px solid #7F1D1D',
+            backgroundColor:'#1F2937',color:'#FCA5A5',transition:'all .15s'}},
+          'Shutdown'),
+        e('span',{style:{display:'inline-flex',alignItems:'center',gap:4,
+          padding:'2px 8px',borderRadius:10,fontSize:10,fontWeight:600,
+          backgroundColor:connected?'#064E3B':'#7F1D1D',
+          color:connected?'#6EE7B7':'#FCA5A5',fontFamily:'var(--mono)'}},
+          e('span',{style:{width:5,height:5,borderRadius:'50%',backgroundColor:connected?'#10B981':'#EF4444'}}),
+          connected?'Connected':'Disconnected'))),
+
+    // Controller error / initialization-progress banner
+    e(ErrorBanner,{hcdState,controllerErrorMsg:state?.controllerErrorMsg,
+      initializingReason:state?.initializingReason,onCommand:handleCommand}),
+
+    // Axis cards (fixed height)
+    e('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fill, minmax(285px, 1fr))',gap:10,marginBottom:10,flexShrink:0}},
+      ...allAxes.map(a =>
+        e(AxisCard,{key:a, axis:a, axState:state?.axes?.[a], cmdSt:state?.cmdState?.[a], onCommand:handleCommand, active:isActive(a), compact}))),
+
+    // I/O panel — collapsed by default, full width
+    e(IOPanel,{state, onCommand:handleCommand}),
+
+    // Bottom row: HCD log (flex-fill) + collapsible config bay (right).
+    // ConfigBay sizes to its natural content; its height is measured into
+    // panelHeight and passed to HcdLogPanel so the two stay aligned.
+    e('div',{style:{display:'flex',alignItems:'stretch',flexShrink:0,minHeight:300}},
+      bottomTab === 'plot'
+        // No `key` keyed on posTick here: that would remount the panel on every sample
+        // frame and wipe freeze state and axis selection.  PlotPanel is not memoized, so
+        // the posTick state change re-renders this component and the panel along with it,
+        // reading the latest contents of the (stable) posRef buffer.
+        ? e(PlotPanel,{buf:posRef.current, panelHeight, bayExpanded:configExpanded,
+            tab:bottomTab, onTab:setBottomTab, setPlotLive,
+            selected:plotAxes, setSelected:setPlotAxes,
+            frozenSnap:plotFrozenSnap, setFrozenSnap:setPlotFrozenSnap})
+        : e(HcdLogPanel,{lines:logLines, panelHeight, bayExpanded:configExpanded,
+            tab:bottomTab, onTab:setBottomTab}),
+      e(ConfigBay,{state, activeAxes, expanded:configExpanded,
+        onToggle:toggleConfigExpanded,
+        selectedAxis:selectedConfigAxis,
+        onSelectAxis:setSelectedConfigAxis,
+        onCommand:handleCommand,
+        innerRef:bayRef})),
+
+    // Footer
+    e('div',{style:{marginTop:6,display:'flex',justifyContent:'space-between',fontSize:9,color:'#374151',
+      fontFamily:'var(--mono)',padding:'0 2px',flexShrink:0}},
+      e('span',null,`${state?.prefix||'APS.ICS.HCD.GalilMotion'} · Prototype HMI`),
+      e('span',null,`Axes: ${activeAxes.join(',')}`)),
+
+    // Lifecycle confirmation modal (Shutdown or Restart) — fixed-position overlay
+    e(LifecycleModal,{
+      open: lifecycleKind !== null,
+      kind: lifecycleKind,
+      onConfirm: confirmLifecycle,
+      onCancel: cancelLifecycle,
+      busy: lifecycleBusy,
+      error: lifecycleError}));
+}
+
+// Mount
+try {
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(e(GalilHMI));
+} catch(err) {
+  document.getElementById('root').innerHTML =
+    '<pre style="color:#FCA5A5;padding:20px;font-family:monospace">HMI render error:\n' + err.stack + '</pre>';
+}
+</script>
+</body>
+</html>

@@ -12,6 +12,14 @@ import csw.proto.galil.io.DataRecord._
 import play.api.libs.json.{Json, OFormat}
 
 /**
+ * Thrown when a received byte stream is not a well-formed Galil data record
+ * (wrong record size or field counts).  Distinct from a generic socket/IO failure
+ * so callers can treat a misaligned or garbage record — recoverable by draining the
+ * receive buffer and resyncing — differently from a genuine connection loss.
+ */
+class DataRecordFormatException(message: String) extends IOException(message)
+
+/**
  * The data record returned from the Galil QR command
  *
  * @param header       the parsed data from the 4 byte header
@@ -63,7 +71,7 @@ case class DataRecord(header: Header, generalState: GeneralState, axisStatuses: 
 object DataRecord {
 
   /**
-   * Param set key for getting the raw data record bytes (with getDataRecordRaw command in GalilCommands.conf)
+   * Param set key for getting the raw data record bytes (QR binary data record).
    */
   val key: Key[ArrayData[Byte]] = KeyType.ByteArrayKey.make("dataRecord")
 
@@ -149,7 +157,7 @@ object DataRecord {
       val recordSize = buffer.getShort() & 0x0ffff
       val header     = Header(blocksPresent.map(_.toString))
       if (recordSize != header.recordSize)
-        throw new IOException(s"Error: Wrong data record size in DataRecord.Header.apply: $recordSize != ${header.recordSize}")
+        throw new DataRecordFormatException(s"Error: Wrong data record size in DataRecord.Header.apply: $recordSize != ${header.recordSize}")
       header
     }
 
@@ -184,10 +192,10 @@ object DataRecord {
 
     import GeneralState._
 
-    if (inputs.length != 10) throw new IOException(s"Error: Wrong number of inputs: ${inputs.length}")
-    if (outputs.length != 10) throw new IOException(s"Error: Wrong number of outputs: ${outputs.length}")
+    if (inputs.length != 10) throw new DataRecordFormatException(s"Error: Wrong number of inputs: ${inputs.length}")
+    if (outputs.length != 10) throw new DataRecordFormatException(s"Error: Wrong number of outputs: ${outputs.length}")
     if (ethernetHandleStatus.length != 8)
-      throw new IOException(s"Error: Wrong number of ethernetHandleStatus: ${ethernetHandleStatus.length}")
+      throw new DataRecordFormatException(s"Error: Wrong number of ethernetHandleStatus: ${ethernetHandleStatus.length}")
 
     /**
      * Appends the GeneralState to the given ByteBuffer in the documented Galil format
@@ -332,7 +340,11 @@ object DataRecord {
       // ADDR 60-61
       val contourModeBufferSpaceRemaining = buffer.getShort()
 
-      // TODO check for existence?
+      // NOTE: the contour / S-plane / T-plane coordinated-motion blocks below are parsed at
+      // fixed offsets assuming every block is present.  The DataRecord header carries a
+      // block-presence bitmask that this parser does not consult.  Safe for the controllers
+      // in use (lab DMC-50040, STB DMC-4080), which return the full record; a controller
+      // configured to omit a block would misalign.  Tracked in the backlog.
 
       // ADDR 62-63
       val sPlaneSegmentCount = buffer.getShort()
@@ -345,8 +357,6 @@ object DataRecord {
 
       // ADDR 70-71
       val sPlaneBufferSpaceRemaining = buffer.getShort()
-
-      // TODO Check for existance
 
       // ADDR 72-73
       val tPlaneSegmentCount = buffer.getShort()

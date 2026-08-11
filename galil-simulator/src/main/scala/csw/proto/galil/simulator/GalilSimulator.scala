@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
  * @param host host to bind to listen for new client connections
  * @param port port to use to listen for new client connections
  */
-case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit typedSystem: ActorSystem[SpawnProtocol.Command]) {
+case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888, debug: Boolean = false)(implicit typedSystem: ActorSystem[SpawnProtocol.Command]) {
 
   implicit val classicSystem: actor.ActorSystem = typedSystem.classicSystem
   implicit val mat: Materializer                 = Materializer(classicSystem)
@@ -31,6 +31,9 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit
 
   // Keep track of current connections, needed to simulate TH command
   private var activeConnections: Set[IncomingConnection] = Set.empty
+  
+  // Helper for debug logging
+  private def debugLog(msg: => String): Unit = if (debug) println(msg)
 
   private val connections: Source[IncomingConnection, Future[ServerBinding]] =
     Tcp().bind(host, port)
@@ -40,18 +43,55 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit
     typedSystem.spawn(Behaviors.withTimers[GalilSimulatorCommand](GalilSimulatorActor.simulate(_)), "GalilSimulatorActor")
 
   // Handle tcp connections
-  connections.runForeach { conn =>
+  println(s"Starting Galil simulator on $host:$port...")
+  private val bindingFuture = connections.runForeach { conn =>
+    debugLog(s"Client connected from ${conn.remoteAddress}")
     activeConnections += conn
     conn.handleWith(parseLines(conn))
   }
+  
+  // Monitor stream for errors
+  bindingFuture.onComplete {
+    case Success(binding) =>
+      debugLog(s"Simulator stream completed normally")
+    case Failure(ex) =>
+      println(s"ERROR: Simulator stream failed: ${ex.getMessage}")
+      ex.printStackTrace()
+      System.exit(1)
+  }(ec)
+  
+  println(s"Simulator ready and accepting connections on $host:$port")
 
   // Parses the incoming lines and process the Galil commands
   private def parseLines(conn: IncomingConnection) =
     Flow[ByteString]
+      .map { bytes =>
+        debugLog(s"[SIMULATOR] Received ${bytes.length} bytes from ${conn.remoteAddress}: ${bytes.utf8String.take(50)}")
+        bytes
+      }
       .via(Framing.delimiter(ByteString("\r\n"), maximumFrameLength = 256, allowTruncation = true))
+      .map { frame =>
+        debugLog(s"[SIMULATOR] Framed line: '${frame.utf8String}'")
+        frame
+      }
       // handle multiple commands on a line separated by ";"
-      .mapConcat(_.utf8String.split(";").map(ByteString(_)).toList)
-      .mapAsync(1)(processCommand(_, conn))
+      // Note: empty commands are valid Galil protocol (returns prompt ":") - don't filter them out
+      .mapConcat { frame =>
+        val parts = frame.utf8String.split(";").map(_.trim)
+        // If original frame was empty (just \r\n), keep one empty string for the prompt response
+        if (parts.forall(_.isEmpty)) List(ByteString(""))
+        else parts.filter(_.nonEmpty).map(ByteString(_)).toList
+      }
+      .mapAsync(1) { cmd =>
+        processCommand(cmd, conn).map { response =>
+          // Add small delay to simulate real Galil processing time
+          // This ensures text responses are sent in separate TCP packets
+          // Note: QR (binary) responses may need different handling
+          Thread.sleep(10)
+          debugLog(s"[SIMULATOR] Sending response: '${response.utf8String.take(50)}'")
+          response
+        }
+      }
       .watchTermination() { (_, f) =>
         closeConnection(f, conn)
       }
@@ -59,7 +99,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit
   // Process the Galil command and return the reply
   private def processCommand(cmd: ByteString, conn: IncomingConnection): Future[ByteString] = {
     val cmdString = cmd.utf8String
-    println(cmdString)
+    debugLog(s"[SIMULATOR] Received command: '$cmdString'")
 
     if (cmdString.startsWith("'"))
       Future.successful(GalilSimulatorActor.formatReply(None)) // ignore comment lines starting with with "'"
@@ -77,7 +117,7 @@ case class GalilSimulator(host: String = "127.0.0.1", port: Int = 8888)(implicit
   private def closeConnection(f: Future[Done], conn: IncomingConnection): Unit = {
     f.onComplete {
       case Success(_) =>
-        println(s"Closing connection $conn")
+        debugLog(s"Closing connection $conn")
         activeConnections -= conn
       case Failure(ex) =>
         println(s"Error for connection $conn: $ex")

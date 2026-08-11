@@ -43,7 +43,7 @@ object GalilAssemblyClient {
 
   private def initialBehavior: Behavior[TrackingEvent] =
     Behaviors.setup { ctx =>
-      val connection = PekkoConnection(ComponentId(Prefix("csw.galil.assembly.GalilAssembly"), Assembly))
+      val connection = PekkoConnection(ComponentId(Prefix("aps.ICS.Assembly.GalilAssembly"), Assembly))
       locationService.subscribe(
         connection,
         { loc =>

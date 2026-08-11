@@ -2,6 +2,7 @@ import Dependencies._
 
 lazy val aggregatedProjects: Seq[ProjectReference] = Seq(
   `galil-assembly`,
+  `ics-assemblies`,
   `galil-hcd`,
   `galil-client`,
   `galil-simulator`,
@@ -15,11 +16,15 @@ lazy val `galil-root` = project
   .in(file("."))
   .aggregate(aggregatedProjects: _*)
 
-// The Galil prototype HCD
 lazy val `galil-hcd` = project
   .enablePlugins(DeployApp)
   .settings(
-    libraryDependencies ++= GalilHcd
+    libraryDependencies ++= GalilHcd,
+    Test / fork := true,
+    Test / javaOptions ++= {
+      val props = sys.props.filter { case (k, _) => k.startsWith("galil.") }
+      props.map { case (k, v) => s"-D$k=$v" }.toSeq
+    }
   )
   .dependsOn(`galil-io`)
 
@@ -30,11 +35,23 @@ lazy val `galil-assembly` = project
     libraryDependencies ++= GalilAssembly
   )
 
+// APS-ICS assemblies: one module hosting common stage-assembly code plus every
+// ICS assembly component (InsertionStage first). Depends on galil-hcd for the
+// generated GalilMotionKeys (the HCD command/CurrentState contract). NOTE: this
+// pulls HCD impl onto the assembly classpath; a future refactor could lift the
+// generated keys into a small shared module to tighten the layering.
+lazy val `ics-assemblies` = project
+  .enablePlugins(DeployApp)
+  .settings(
+    libraryDependencies ++= IcsAssemblies
+  )
+  .dependsOn(`galil-hcd` % "compile->compile")
+
 // A Scala client application that talks to the Galil assembly
 lazy val `galil-client` = project
   .enablePlugins(DeployApp)
   .settings(libraryDependencies ++= `GalilClient`)
-  .dependsOn(`galil-io`, `galil-simulator`, `galil-hcd` % "test->test")
+  .dependsOn(`galil-io`, `galil-simulator`, `galil-hcd` % "compile->compile;test->test")
 
 // A Galil hardware simulator
 lazy val `galil-simulator` = project
@@ -45,7 +62,10 @@ lazy val `galil-simulator` = project
 // A REPL client to test talking to the Galil hardware or simulator
 lazy val `galil-repl` = project
   .enablePlugins(DeployApp)
-  .settings(libraryDependencies ++= `GalilRepl`)
+  .settings(
+    libraryDependencies ++= `GalilRepl`,
+    run / connectInput := true  // REPL needs stdin in forked JVM
+  )
   .dependsOn(`galil-io`)
 
 // Supports talking to and simulating a Galil device
@@ -65,3 +85,11 @@ lazy val `galil-deploy` = project
     libraryDependencies ++= GalilDeploy
   )
 
+// Pass galil.* system properties to forked test JVMs.
+// This allows `sbt -Dgalil.config.path=... "galil-hcd/testOnly ..."` to work
+// reliably across compile/stage/test cycles within a single sbt session.
+Test / fork := true
+Test / javaOptions ++= {
+  val props = sys.props.filter { case (k, _) => k.startsWith("galil.") }
+  props.map { case (k, v) => s"-D$k=$v" }.toSeq
+}

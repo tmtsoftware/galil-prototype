@@ -1,0 +1,936 @@
+REM ----------------------------------------------------------------------------
+REM Programs to control the TMT Alignment & Phasing System
+REM (APS) demonstration hardware
+REM Source file name: galilHCD_STB.dmc
+REM Updated for FD phase Embedded design
+REM ----------------------------------------------------------------------------
+REM Helper Routines
+REM ----------------------------------------------------------------------------
+#fill;              'simple subroutine to fill array with values
+^c= 0;              'use local scope ^c for iterator
+#fill_h;            'fill loop
+^a[^c]= ^b;         'set each value of the array
+^c= ^c+1
+JP #fill_h,(^c<^a[-1]);'keep setting array values for length of array
+EN
+#print;	            'simple subroutine to print all values of an array
+^c= 0;              'use local scope ^c for iterator
+#print_h;           'print loop
+MG "axis ",^c, " is ",^a[^c]
+^c=^c+1
+JP #print_h,(^c<^a[-1])
+EN
+REM ----------------------------------------------------------------------------
+#AUTO
+REM Code here runs automatically when the controller starts
+REM Will call Init, during HCD Initialization.
+REM XQ #Init,7
+EN
+
+REM ----------------------------------------------------------------------------
+REM Start of ERROR Handling
+REM ----------------------------------------------------------------------------
+REM Ensure EEPROM errors are reported.
+#AUTOERR
+MG "HCD EEPROM ERROR ", _RS,{^17}{^10},":"
+WT 3000
+REM Impacts all axes
+JP #fill("ae",1)
+JS #AUTOERR
+EN
+REM  Report any position errors (per axis)
+#POSERR
+MG "HCD POSERR"
+REM Check each axis
+~a=0; ' axis designator
+b=0;  ' array index
+#pe_h
+IF ((@ABS[_TE~a]>=_ER~a) & (_ER~a<>-1))
+  MG "Position Error ",_TE~a, " occured on ",~a{F1.0}," axis "
+  ae[b]=2
+ENDIF
+~a=~a+1; b=b+1
+JP#pe_h,~a<_BV
+ZS
+RE
+REM  Report any lost TCP connections
+#TCPERR
+MG "HCD TCPERR ", _IA4
+RE
+REM Trap program errors so threads are not killed
+#CMDERR
+MG "HCD CMDERR ",_ED,_TA,_TC,_XQ
+EN
+REM Handle limits, treatment varies by mechanism
+REM Ignore limits if used while homing
+#LIMSWI
+IF ((_LFA = 0) | (_LRA = 0))
+ IF (homing[0])
+  MG "Ignoring Limit Hit axis A during homing"
+ ELSE
+  MG "Limit Hit axis A"
+  ae[0]=3
+ ENDIF
+ENDIF
+IF ((_LFB = 0) | (_LRB = 0))
+ IF (homing[1])
+  MG "Ignoring Limit Hit axis B during homing"
+ ELSE
+  MG "Limit Hit axis B"
+  ae[1]=3
+ ENDIF
+ENDIF
+IF ((_LFC = 0) | (_LRC = 0))
+ IF (homing[2])
+  MG "Ignoring Limit Hit axis C during homing"
+ ELSE
+  MG "Limit Hit axis C"
+  ae[2]=3
+ ENDIF
+ENDIF
+IF ((_LFD = 0) | (_LRD = 0))
+REM rotating mechanism, this should never happen
+REM one of these is currently 0, must not be wired, ignoring
+REM MG "Limit Hit axis D"
+REM ae[3]=3
+ENDIF
+IF ((_LFE = 0) | (_LRE = 0))
+ IF (homing[4])
+  MG "Ignoring Limit Hit axis E during homing"
+ ELSE
+  MG "Limit Hit axis E"
+  ae[4]=3
+ ENDIF
+ENDIF
+IF ((_LFF = 0) | (_LRF = 0))
+ IF (homing[5])
+  MG "Ignoring Limit Hit axis F during homing"
+ ELSE
+  MG "Limit Hit axis F"
+  ae[5]=3
+ ENDIF
+ENDIF
+IF ((_LFG = 0) | (_LRG = 0))
+ IF (homing[6])
+  MG "Ignoring Limit Hit axis G during homing"
+ ELSE
+  MG "Limit Hit axis G"
+  ae[6]=3
+ ENDIF
+ENDIF
+WT500
+RE1
+REM Handle motion timeouts, per axis
+#MCTIME
+MG "Motion Timeout"
+REM Check each axis
+~a=0; ' axis designator
+b=0;  ' array index
+#mct_h
+IF (_SC~a==99)
+  MG "Motion Timeout occured on ",~a{F1.0}," axis "
+  ae[b]=4
+ENDIF
+~a=~a+1; b=b+1
+JP#mct_h,~a<_BV
+EN1
+REM ----------------------------------------------------------------------------
+REM Init - setup controller and intialize variables
+#Init
+REM ----------------------------------------------------------------------------
+REM Global configuration
+CN 1;		'All Limit Switches active high
+MO;		  'All motors OFF - necessary or some commands fail
+' create arrays, variables
+DM ae[8]
+DM dmd[8]
+DM accel[8]
+DM decel[8]
+DM speed[8]
+DM hspd[8]
+DM hoff[8]
+DM mdelay[8]
+DM cpr[8]
+DM homing[8]
+DM whlpos[8]
+' default the motor parameters to those in flash EEPROM
+accel[0]=_ACA
+accel[1]=_ACB
+accel[2]=_ACC
+accel[3]=_ACD
+accel[4]=_ACE
+accel[5]=_ACF
+accel[6]=_ACG
+REM
+decel[0]=_DCA
+decel[1]=_DCB
+decel[2]=_DCC
+decel[3]=_DCD
+decel[4]=_DCE
+decel[5]=_DCF
+decel[6]=_DCG
+REM
+speed[0]=_SPA
+speed[1]=_SPB
+speed[2]=_SPC
+speed[3]=_SPD
+speed[4]=_SPE
+speed[5]=_SPF
+speed[6]=_SPG
+REM
+hspd[0]=_HVA
+hspd[1]=_HVB
+hspd[2]=_HVC
+hspd[3]=_HVD
+hspd[4]=_HVE
+hspd[5]=_HVF
+hspd[6]=_HVG
+REM
+JS #fill("ae",0)
+JS #fill("homing",0)
+JS #fill("whlpos",0)
+REM setup home offset values
+REM (motion after index before setting position to 0)
+JS #fill("hoff",0); 'default to 0 home offset
+hoff[0]=-19180; 'A-Ant offset to center stage
+hoff[1]=2048496; 'B-ATS offset to center stage
+hoff[2]=195304; 'C-AVS offset to center stage
+REM
+REM setup motor delay values (wait/settling times after moves before 
+REM the move is considered done - needed before MO cmd)
+mdelay[0]=300
+mdelay[1]=200
+mdelay[2]=200
+mdelay[3]=200
+mdelay[4]=100
+mdelay[5]=100
+mdelay[6]=100
+REM limit on the size of IP offset when tracking
+DIPLim=500
+MG "Controller Initialized"
+EN
+REM ----------------------------------------------------------------------------
+REM End of #INIT
+REM ----------------------------------------------------------------------------
+REM 
+REM Helper routine to clear all axis error messages
+#ae0
+JS #fill("ae",0)
+EN
+REM print some Status info, usefull during testing
+#Status
+' generate a status message
+ MG "HCD STATUS threads: "{N}
+ MG (_NO&128)/128{N}{F1.0}
+ MG (_NO&64)/64{N}{F1.0}
+ MG (_NO&32)/32{N}{F1.0}
+ MG (_NO&16)/16{N}{F1.0}
+ MG (_NO&8)/8{N}{F1.0}
+ MG (_NO&4)/4{N}{F1.0}
+ MG (_NO&2)/2{N}{F1.0}
+ MG (_NO&1)/1{F1.0}
+ MG "HCD STATUS error code:  ", _TC, _TA0
+REM MG "axisErr error codes:  "; JS #print("ae")
+ MG "axis error codes: ",ae[0]{F1.0}, ae[1], ae[2], ae[3], ae[4], ae[5], ae[6]
+ MG "HCD STATUS positions: ", _TPA, _TPB, _TPC, _TPD, _TDE, _TDF, _TDG
+EN
+REM Call all Setup Routines in parallel
+REM Call this on thread 0, spawn the others
+#Setup
+MG "Starting all Setup programs"
+XQ #SetupA,1
+WT 2
+XQ #SetupB,2
+WT 2
+XQ #SetupC,3
+WT 2
+XQ #SetupD,4
+WT 2
+XQ #SetupE,5
+WT 2
+XQ #SetupF,6
+WT 2
+XQ #SetupG,7
+EN
+REM Call all Init(Home) Routines in parallel
+REM Call this on thread 0, spawn the others
+#HomeAll
+MG "Starting all Home programs"
+XQ #HomeA,1
+WT 2
+XQ #HomeB,2
+WT 2
+XQ #HomeC,3
+WT 2
+XQ #HomeD,4
+WT 2
+XQ #HomeE,5
+WT 2
+XQ #HomeF,6
+WT 2
+XQ #HomeG,7
+EN
+REM ----------------------------------------------------------------------------
+REM Axis A - ANT linear stage commutation setup
+REM Single axis linear translation stage
+REM
+#SetupA
+ae[0]=1
+MTA=1.0;	  'Configure A as servo amplifier
+LDA=0;		  'Enable all limit switches on this axis
+AFA=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
+AGA=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
+TLA=2.94/1.6;		'Torque Limit
+TKA=11.76/1.6;		'Peak Torque Limit
+KPA=30;   'Configure servo proportional constant
+KIA=1.5;  'Configure servo integrator constant
+KDA=200;   'Configure servo derivative constant
+BAA;		    'Set A as a Brushless axis
+BMA=51200;	'Set Brushless Modulo for this axis
+BZ <1000>1000;		'Set Brushless Zero routine timeouts
+BZA=-1;	  'Trigger the Brushless Zero command to set commutation
+SPA=20000;'Set the speed (counts/second) for independent moves in axis A
+speed[0]=20000; 'sync embedded speed array
+STA;		    'SAFETY: Stop Axis A
+MOA;		    'SAFETY: Stop Motor A
+MG "Axis A setup done"
+ae[0]=0
+EN
+REM 	Axis A done
+REM ----------------------------------------------------------------------------
+REM Axis B - ATS linear stage commutation setup
+REM Pupil mask X (horizontal) positioning stage
+#SetupB
+ae[1]=1
+MTB=1.0;  'Configure B as servo amplifier
+LDB=0;		  'Enable all limit switches on this axis
+AFB=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
+AGB=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
+TLB=2.3/1.6;		'Torque Limit
+TKB=9.2/1.6;		'Peak Torque Limit
+KPB=20;    'Configure servo proportional constant (was 8)
+KIB=0.9;  'Configure servo integrator constant (was 0.4)
+KDB=150;   'Configure servo derivative constant (was 10)
+BAB;		    'Set B as a Brushless axis
+BMB=8000; 'Set Brushless Modulo for this axis
+BZ <2000>2000;'Set Brushless Zero routine timeouts
+BZB=-1;		'Trigger the Brushless Zero command to set commutation
+SPB=20000;	'Set the speed (counts/second) for independent moves in axis B
+speed[1]=20000; 'sync embedded speed array
+STB;		    'SAFETY: Stop Axis B
+MOB;		    'SAFETY: Stop Motor B
+MG "Axis B setup done"
+ae[1]=0
+EN
+REM 	Axis B done
+REM ----------------------------------------------------------------------------
+REM Axis C - AVS linear vertical (Z) positioner platform commutation setup
+REM Pupil mask Y (vertical) positioning
+#SetupC
+ae[2]=1
+MTC=1.0;	  'Configure C as servo amplifier
+LDC=0;		  'Enable all limit switches on this axis
+AFC=5;		  'Sinusoidal encoder feedback with interpolation factor of 2^5
+AGC=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
+TLC=2.3/1.6;		'Torque Limit
+TKC=9.2/1.6;		'Peak Torque Limit
+KPC=50;   'Configure servo proportional constant
+KIC=1.5;  'Configure servo integrator constant
+KDC=80;   'Configure servo derivative constant
+BAC;		    'Set C as a Brushless axis
+BMC=8000;	'Set Brushless Modulo for this axis
+BZ <2000>2000;	'Set Brushless Zero routine timeouts
+BZC=-2;		'Trigger the Brushless Zero command to set commutation
+SPC=20000;	'Set the speed (counts/second) for independent moves in axis C
+speed[2]=20000; 'sync embedded speed array
+STC;		    'SAFETY: Stop Axis C
+MOC;		    'SAFETY: Stop Motor C
+MG "Axis C setup done"
+ae[2]=0
+EN
+REM 	Axis C done
+REM ----------------------------------------------------------------------------
+REM Axis D - ALAR Clear-aperture rotary stage commutation setup
+REM Pupil mask ? (rotation) positioning
+#SetupD
+ae[3]=1
+MTD=1.0;	  'Configure D as servo amplifier
+LDD=3;		  'Disable all limit switches on this axis (it has none)
+AFD=0;		  'Use digital feedback
+AGD=2;		  'Amplifier Gain (2 equals 1.6 A/V for amplifier D3540)
+TLD=2.7/1.6;		'Torque Limit
+TKD=10.8/1.6;	'Peak Torque Limit
+KPD=100;  'Configure servo proportional constant
+KID=2;    'Configure servo integrator constant
+KDD=230;  'Configure servo derivative constant
+BAD;		    'Set D as a Brushless axis
+BMD=629760/(18/2);	'Set Brushless Modulo for this axis
+BZ <2000>2000;	'Set Brushless Zero routine timeouts
+BZD=-2;		'Trigger the Brushless Zero command to set commutation
+SPD=50000;	'Set the speed (counts/second) for independent moves in axis D
+speed[3]=50000; 'sync embedded speed array
+cpr[3]=629760; 'counts in one 360 degree rotation
+STD;		    'SAFETY: Stop Axis D
+MOD;		    'SAFETY: Stop Motor D
+MG "Axis D setup done"
+ae[3]=0
+EN
+REM 	Axis D done
+REM ----------------------------------------------------------------------------
+REM Axis E - Stepper Motor setup
+REM X-axis of a three-axis linear platform for fiber-source positioning
+#SetupE
+ae[4]=1
+MTE=-2.5; 'Stepper motor with active high step pulses, reversed direction
+LCE=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
+LDE=1;		  'Forward limit switch disabled, Reverse limit switch enabled
+AGE=1;		  'D4140 stepper amplifier - 0.85 A phase current
+SPE=10000;	'Value of jog speed in encoder counts/second
+speed[4]=10000; 'sync embedded speed array
+STE;		    'SAFETY: Stop Axis E
+MOE;		    'SAFETY: Stop Motor E
+MG "Axis E setup done"
+ae[4]=0
+EN
+REM Axis E done
+REM ----------------------------------------------------------------------------
+REM Axis F - Stepper Motor setup
+REM Y-axis of a three-axis linear platform for fiber-source positioning
+#SetupF
+ae[5]=1
+MTF=-2.5;  'Stepper motor with active high step pulses, reversed direction
+LCF=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
+LDF=1;		  'Forward limit switch disabled, Reverse limit switch enabled
+AGF=1;		  'D4140 stepper amplifier - 0.85 A phase current
+SPF=10000;	'Value of jog speed in encoder counts/second
+speed[5]=10000; 'sync embedded speed array
+STF;		    'SAFETY: Stop Axis F
+MOF;		    'SAFETY: Stop Motor F
+MG "Axis F setup done"
+ae[5]=0
+EN
+REM Axis F done
+REM ----------------------------------------------------------------------------
+REM Axis G - Stepper Motor setup
+REM Z-axis of a three-axis linear platform for fiber-source positioning
+#SetupG
+ae[6]=1
+MTG=-2.5; 'Stepper motor with active high step pulses, reversed direction
+LCG=2;		  'Waits for 0 samples after a move is completed, then provides 0% current
+LDG=1;		  'Forward limit switch disabled, Reverse limit switch enabled
+AGG=1;		  'D4140 stepper amplifier - 0.85 A phase current
+SPG=10000;	'Value of jog speed in encoder counts/second
+speed[6]=10000; 'sync embedded speed array
+STG;	      'SAFETY: Stop Axis G
+MOG;		    'SAFETY: Stop Motor G
+MG "Axis G setup done"
+ae[6]=0
+EN
+REM Axis G done
+
+REM ----------------------------------------------------------------------------
+REM Specify custom Home, Move and Stop subroutines for all motors
+REM ----------------------------------------------------------------------------
+REM ----------------------------------------------------------------------------
+REM Axis A - ANT
+REM ----------------------------------------------------------------------------
+#HomeA
+ae[0]=1; 'Flag to detect if this program halts/errors before finishing
+homing[0]=1
+MG "Home Motor A (ANT) started"
+HVA=hspd[0]
+SHA
+IF (_LFA=0); 'we are on the positive limit
+ MG "Positive Limit Hit, Seeking Index Marker negative..."
+ JGA=-10000
+ FIA
+ BGA
+ MCA
+ELSE
+ JGA=10000
+ MG "	Seeking Index marker..."
+ FIA
+ BGA
+ MCA
+ IF (_LFA=0); 'we hit the positive limit
+  MG "Positive Limit Hit, Seeking Index Marker negative..."
+  JGA=-10000
+  FIA
+  BGA
+  MCA
+ ENDIF
+ENDIF
+IF (hoff[0]<>0)
+ MG "Applying offset: ", hoff[0]
+ PRA=hoff[0]
+ BGA
+ MCA
+ENDIF
+IF (mdelay[0]>0)
+ WT mdelay[0]
+ENDIF
+MG "Setting encoder to zero position."
+DPA=0
+MG "Motor A (ANT) homed."
+ae[0]=0; 'successful home
+homing[0]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveA
+ae[0]=1
+SPA=speed[0]
+ACA=accel[0] 
+DCA=decel[0]
+SHA
+PAA=dmd[0]
+REM Must set a reasonable timeout here with TW
+REM (distance/speed)*1000 +1000
+distance=@ABS[dmd[0]-_TPA]
+MG "distance is ", distance
+timeout=((distance/_SPA)*1000)+1000
+REM timeout=1;  to test the MCTIME subroutine
+TWA=timeout
+MG "Timeout set to ", _TWA, " milliseconds"
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+ WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+MG "Motor A (ANT) MOVE to ",_TPA," in ",dtime0/tcon," sec"
+ae[0]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopA
+ae[0]=1
+STA
+MG "Motor A STOP"
+homing[0]=0
+ae[0]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis B - ATS
+REM****************************************************************************
+REM****************************************************************************
+REM ----------------------------------------------------------------------------
+#HomeB
+ae[1]=1
+homing[1]=1
+MG "Home Motor B (ATS) started"
+HVB=hspd[1]
+SHB
+IF (_LRB=1); ' we are not on the negative limit
+ MG "Finding negative limit"
+ JGB=-50000
+ BGB
+ MCB
+ENDIF
+REM lots of hysteresis.. back off the limit
+MG "Move Off the limit"
+JGB=50000
+BGB
+#jumpb
+JP #jumpb,(_LRB=0);'jump back until the limit is deactivated
+STB
+AMB
+MG "	Seeking Index marker..."
+FIB
+BGB
+MCB
+IF (hoff[1]<>0)
+ MG "Applying offset: ", hoff[1]
+ PRB=hoff[1]
+ BGB
+ MCB
+ENDIF
+IF (mdelay[1]>0)
+ WT mdelay[1]
+ENDIF
+MG "Setting encoder to zero position."
+DPB=0
+MG "Motor B (ATS) homed."
+ae[1]=0
+homing[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveB
+ae[1]=1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=dmd[1]
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+ WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B (ATS) MOVE to ",_TPB," in ",dtime1/tcon," sec"
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopB
+ae[1]=1
+STB
+MG "Motor B STOP"
+homing[1]=0
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis C - AVS
+REM ----------------------------------------------------------------------------
+#HomeC
+ae[2]=1
+homing[2]=1
+MG "Home Motor C (AVS) started"
+HVC=hspd[2]
+SHC
+IF (_LRC=1); ' we are not on the negative limit
+ MG "Finding negative limit"
+ JGC=-20000
+ BGC
+ MCC
+ENDIF
+MG "	Seeking Index marker positive..."
+JGC=10000
+FIC
+BGC
+MCC
+IF (hoff[2]<>0)
+ MG "Applying offset: ", hoff[2]
+ PRC=hoff[2]
+ BGC
+ MCC
+ENDIF
+IF (mdelay[2]>0)
+ WT mdelay[2]
+ENDIF
+MG "Setting encoder to zero position."
+DPC=0
+MG "Motor C (AVS) homed."
+ae[2]=0
+homing[2]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveC
+ae[2]=1
+SPC=speed[2]
+ACC=accel[2]
+DCC=decel[2]
+SHC
+PAC=dmd[2]
+stime2=TIME
+BGC
+MCC
+IF (mdelay[2]>0)
+ WT mdelay[2]
+ENDIF
+etime2=TIME
+dtime2=etime2-stime2
+tcon=1000000/_TM
+MG "Motor C (AVS) MOVE to ",_TPC," in ",dtime2/tcon," sec"
+ae[2]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopC
+ae[2]=1
+STC
+MG "Motor C (AVS) STOP"
+homing[2]=0
+ae[2]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis D - ALAR
+REM ----------------------------------------------------------------------------
+#HomeD
+ae[3]=1
+MG "Home Axis D (ALAR) started"
+HVD=hspd[3]
+SHD
+JGD=50000
+MG "	Seeking Index marker..."
+FID
+BGD
+MCD
+IF (hoff[3]<>0)
+ MG "Applying offset: ", hoff[3]
+ PRD=hoff[3]
+ BGD
+ MCD
+ENDIF
+IF (mdelay[3]>0)
+ WT mdelay[3]
+ENDIF
+MG "Setting encoder to zero position."
+DPD=0
+MG "Motor D (ALAR) homed."
+ae[3]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveD
+ae[3]=1
+SPD=speed[3]
+ACD=accel[3]
+DCD=decel[3]
+SHD
+PAD=dmd[3]
+stime3=TIME
+BGD
+MCD
+IF (mdelay[3]>0)
+ WT mdelay[3]
+ENDIF
+etime3=TIME
+dtime3=etime3-stime3
+tcon=1000000/_TM
+MG "Motor D (ALAR) MOVE to ",_TPD," in ",dtime3/tcon," sec"
+ae[3]=0
+EN
+REM ----------------------------------------------------------------------------
+#SelectD
+ae[3]=1
+' Move rotational device A to one of 8 angular positions (like a filter wheel)
+' each position is 45 degrees away from the next.
+' dmd should be an integer between 0 and 7 (though it will wrap fine)
+whlpos[3]=-1
+SPB=speed[3]
+ACB=accel[3]
+DCB=decel[3]
+SHD
+PAD=(dmd[3]-1)*(cpr[3]/8)
+stime3=TIME
+BGD
+MCD
+IF (mdelay[3]>0)
+  WT mdelay[3]
+ENDIF
+etime3=TIME
+dtime3=etime3-stime3
+tcon=1000000/_TM
+whlpos[3]=dmd[3]
+MG "Motor D select #", dmd[3]," move to ",_TPD," in ", dtime3/tcon," sec"
+ae[3]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopD
+ae[3]=1
+STD
+MG "Motor D (ALAR) STOP"
+ae[3]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis E - FSP-X
+REM ----------------------------------------------------------------------------
+#HomeE
+ae[4]=1
+homing[4]=1
+MG "Home Axis E (FSP-X) starting"
+SHE
+IF (_LRE=0); ' If already on the limit switch'
+ MG "Moving off the negative limit"
+ PRE=2000; ' move off the limit'
+ BGE
+ MCE
+ENDIF
+MG "Jogging to negative limit"
+JGE=(-1*speed[4])
+BGE
+MCE
+MG "Slowly move Off the limit"
+JGE=(hspd[4])
+BGE
+#jumpe
+JP #jumpe,(_LRE=0);'jump back until the limit is deactivated
+STE
+AME
+IF (hoff[4]>0); ' only apply positive offset
+ MG "Applying offset: ", hoff[4]
+ PRE=hoff[4]
+ BGE
+ AME
+ENDIF
+IF (mdelay[4]>0)
+ WT mdelay[4]
+ENDIF
+MG "Setting here as 0"
+DPE=0
+FLE=195000; 'Setting a soft limit to protect the stage
+MG "Motor E (FSP-X) homed",_TDE," OK",{^22}{^10},":"
+ae[4]=0
+homing[4]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveE
+ae[4]=1
+SPE=speed[4]
+ACE=accel[4]
+DCE=decel[4]
+SHE
+PAE=dmd[4]
+stime4=TIME
+BGE
+MCE
+IF (mdelay[4]>0)
+ WT mdelay[4]
+ENDIF
+etime4=TIME
+dtime4=etime4-stime4
+tcon=1000000/_TM
+MG "Motor E (FSP-X) MOVE to ",_TDE," in ",dtime4/tcon," sec"
+ae[4]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopE
+ae[4]=1
+STE
+MG "Motor E (FSP-X) STOP"
+homing[4]=0
+ae[4]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis F - FSP-Y
+REM ----------------------------------------------------------------------------
+#HomeF
+ae[5]=1
+homing[5]=1
+REM HVF=hspd[5]
+MG "Home Axis F (FSP-Y) starting"
+SHF
+IF (_LRF=0); ' If already on the limit switch'
+ MG "Moving off the negative limit"
+ PRF=2000; ' move off the limit'
+ BGF
+ MCF
+ENDIF
+MG "Jogging to negative limit"
+JGF=(-1*speed[5])
+BGF
+MCF
+MG "Slowly move Off the limit"
+JGF=(hspd[5])
+BGF
+#jumpf
+JP #jumpf,(_LRF=0);'jump back until the limit is deactivated
+STF
+AMF
+IF (hoff[5]>0); ' only apply positive offset
+ MG "Applying offset: ", hoff[5]
+ PRF=hoff[5]
+ BGF
+ AMF
+ENDIF
+IF (mdelay[5]>0)
+ WT mdelay[5]
+ENDIF
+MG "Setting here as 0"
+DPF=0
+FLF=195000; 'Setting a soft limit to protect the stage
+MG "Motor F (FSP-Y) homed",_TDF," OK",{^22}{^10},":"
+ae[5]=0
+homing[5]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveF
+ae[5]=1
+SPF=speed[5]
+ACF=accel[5]
+DCF=decel[5]
+SHF
+PAF=dmd[5]
+stime5=TIME
+BGF
+MCF
+IF (mdelay[5]>0)
+ WT mdelay[5]
+ENDIF
+etime5=TIME
+dtime5=etime5-stime5
+tcon=1000000/_TM
+MG "Motor F (FSP-Y) MOVE to ",_TDF," in ",dtime5/tcon," sec"
+ae[5]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopF
+ae[5]=1
+STF
+MG "Motor F (FSP-Y) STOP"
+homing[5]=0
+ae[5]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis G - FSP-Z
+REM ----------------------------------------------------------------------------
+#HomeG
+ae[6]=1
+homing[6]=1
+REM HVG=hspd[6]
+MG "Home Axis G (FSP-Z) starting"
+SHG
+IF (_LRG==0); ' If already on the limit switch'
+ MG "Moving off the negative limit"
+ PRG=2000; ' move off the limit'
+ BGG
+ MCG
+ENDIF
+MG "Jogging to negative limit"
+JGG=(-1*speed[6])
+BGG
+MCG
+MG "Slowly move Off the limit"
+JGG=(hspd[6])
+BGG
+#jumpg
+JP #jumpg,(_LRG=0);'jump back until the limit is deactivated
+STG
+AMG
+IF (hoff[6]>0); ' only apply positive offset
+ MG "Applying offset: ", hoff[6]
+ PRG=hoff[6]
+ BGG
+ AMG
+ENDIF
+IF (mdelay[6]>0)
+ WT mdelay[6]
+ENDIF
+MG "Setting here as 0"
+DPG=0
+FLG=195000; 'Setting a soft limit to protect the stage
+MG "Motor G (FSP-Z) homed",_TDG," OK",{^22}{^10},":"
+ae[6]=0
+homing[6]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveG
+ae[6]=1
+SPG=speed[6]
+ACG=accel[6]
+DCG=decel[6]
+SHG
+PAG=dmd[6]
+stime6=TIME
+BGG
+MCG
+IF (mdelay[6]>0)
+ WT mdelay[6]
+ENDIF
+etime6=TIME
+dtime6=etime6-stime6
+tcon=1000000/_TM
+MG "Motor G (FSP-Z) MOVE to ",_TDG," in ",dtime6/tcon," sec"
+ae[6]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopG
+ae[6]=1
+STG
+MG "Motor G (FSP-Z) STOP"
+homing[6]=0
+ae[6]=0
+EN

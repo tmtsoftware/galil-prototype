@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "target": "ES2024",
+    "module": "ESNext",
+    "allowJs": true,
+    "checkJs": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "strict": true,
+    "baseUrl": "./",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "jsx": "react",
+    "noEmit": true,
+    "strictNullChecks": true
+  },
+  "include": [
+    "src",
+    "types",
+    "test"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

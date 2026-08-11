@@ -14,6 +14,8 @@ object Libs {
 
   val `scalatest`       = "org.scalatest"          %% "scalatest"       % "3.2.19"  //Apache License 2.0
   val `dotty-cps-async` = "com.github.rssh" %% "dotty-cps-async" % "0.9.23"
+  val `pekko-actor-testkit-typed` = "org.apache.pekko" %% "pekko-actor-testkit-typed" % "1.1.3"
+  val `pekko-http`               = "org.apache.pekko" %% "pekko-http" % "1.1.0"
 //  val `junit`           = "junit"                  %  "junit"           % "4.13.1"  //Eclipse Public License 1.0
 //  val `junit-interface` = "com.novocode"           %  "junit-interface" % "0.13.2"   //BSD 2-clause "Simplified" License
   val `mockito-scala`   = "org.mockito"            %% "mockito-scala"   % "2.0.0"

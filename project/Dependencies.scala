@@ -5,8 +5,10 @@ object Dependencies {
 
   val GalilHcd = Seq(
     CSW.`csw-framework`,
+    Libs.`pekko-http`,
     CSW.`csw-testkit` % Test,
     Libs.`scalatest` % Test,
+    Libs.`pekko-actor-testkit-typed` % Test 
 //    Libs.`junit` % Test,
 //    Libs.`junit-interface` % Test
   )
@@ -17,6 +19,14 @@ object Dependencies {
     Libs.`scalatest` % Test,
 //    Libs.`junit` % Test,
 //    Libs.`junit-interface` % Test
+  )
+
+  val IcsAssemblies = Seq(
+    CSW.`csw-framework`,
+    Libs.`pekko-http`,                     // VbdsImagePublisher: HTTP client for the VBDS transfer/admin routes
+    CSW.`csw-testkit` % Test,
+    Libs.`scalatest` % Test,
+    Libs.`pekko-actor-testkit-typed` % Test
   )
 
   val GalilClient = Seq(
@@ -32,7 +42,8 @@ object Dependencies {
 
   val GalilSimulator = Seq(
     CSW.`csw-framework`,
-    Libs.scalatest % Test
+    Libs.scalatest % Test,
+    Libs.`pekko-actor-testkit-typed` % Test
   )
 
   val GalilRepl = Seq(

@@ -10,11 +10,11 @@ object GalilSimulatorApp {
 
   implicit val typedSystem: ActorSystem[SpawnProtocol.Command] = ActorSystem(SpawnProtocol(), "GalilSimulatorApp")
 
-  private case class Options(host: String = "127.0.0.1", port: Int = 8888)
+  private case class Options(host: String = "127.0.0.1", port: Int = 8888, debug: Boolean = false)
 
   // Parses the command line options
   private val parser = new scopt.OptionParser[Options]("test-pekko-service-app") {
-    head("simulator", System.getProperty("VERSION"))
+    head("simulator", Option(System.getProperty("VERSION")).getOrElse("dev"))
 
     opt[String]("host") valueName "<hostname>" action { (x, c) =>
       c.copy(host = x)
@@ -23,6 +23,10 @@ object GalilSimulatorApp {
     opt[Int]("port") valueName "<n>" action { (x, c) =>
       c.copy(port = x)
     } text "the port number on host (default: 8888)"
+
+    opt[Unit]("debug") action { (_, c) =>
+      c.copy(debug = true)
+    } text "enable verbose debug logging"
 
     help("help")
     version("version")
@@ -47,6 +51,11 @@ object GalilSimulatorApp {
 
   private def run(options: Options): Unit = {
     import options._
-    GalilSimulator(host, port)
+    val simulator = GalilSimulator(host, port, debug)
+    println(s"Simulator started on $host:$port - press Ctrl+C to exit")
+    if (debug) println("Debug logging enabled")
+    
+    // Keep the main thread alive indefinitely
+    Thread.currentThread().join()
   }
 }

@@ -1,0 +1,546 @@
+package csw.proto.galil.hcd
+
+import org.apache.pekko.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
+import org.apache.pekko.actor.typed.{ActorRef, Behavior}
+import csw.framework.CurrentStatePublisher
+import csw.params.core.states.{CurrentState, StateName}
+import csw.prefix.models.Prefix
+import csw.logging.api.scaladsl.Logger
+import csw.logging.client.scaladsl.LoggerFactory
+import csw.proto.galil.GalilMotionKeys
+import csw.time.core.models.{TAITime, UTCTime}
+
+import scala.concurrent.duration.*
+
+/**
+ * CurrentStatePublisher Actor - Transforms internal state to CSW CurrentState publications.
+ * 
+ * As described in ICD TIO.CTR.SPE.25.001, this actor:
+ * - Subscribes to InternalStateActor for state changes
+ * - Publishes CurrentState events at specified rates (1 Hz and 10 Hz)
+ * - Transforms StateModel types to CSW Parameter types using generated keys
+ * 
+ * Publications (per ICD):
+ * - CurrentState (1 Hz) - HCD lifecycle state, global errors
+ * - CurrentStateAxis[A-H] (10 Hz) - Per-axis position, velocity, state, errors  
+ * - InputOutputState (1 Hz) - Digital/analog I/O
+ * - CommandStateAxis[A-H] (10 Hz) - Command execution status per axis
+ * 
+ * All keys are generated from ICD using icd-db tool and defined in GalilMotionKeys.
+ */
+object CurrentStatePublisherActor:
+  
+  // ========================================
+  // Protocol
+  // ========================================
+  
+  sealed trait Command
+  
+  /**
+   * Internal timer message for 1 Hz publications
+   */
+  private case object Publish1Hz extends Command
+  
+  /**
+   * Idle republish floor for the per-axis publication gate.
+   *
+   * Deliberately below 1000 ms: at the 1 Hz standby polling rate consecutive scans land
+   * ~1000 ms apart WITH JITTER, so a 1000 ms threshold would fail on roughly every other
+   * scan and halve the idle publication rate to ~0.5 Hz. 900 ms guarantees every standby
+   * scan republishes, while still throttling an idle axis to ~1 Hz when the poller is at
+   * the 10 Hz action rate because some OTHER axis is moving.
+   */
+  private[hcd] val IdleRepublishMs: Long = 900L
+
+  /**
+   * Axis states meaning "something is happening on this axis right now" -- a consumer
+   * wants these at full acquisition rate rather than as a 1 Hz sample.
+   */
+  private[hcd] def isAxisActive(s: AxisState): Boolean =
+    s.axisState == AxisStateEnum.Moving ||
+    s.axisState == AxisStateEnum.Homing ||
+    s.axisState == AxisStateEnum.Tracking
+
+  /**
+   * The per-axis publication rule, extracted as a pure function so it can be tested
+   * exhaustively without a running HCD, services, or a clock (the CpuLoadMonitor
+   * precedent: test the decision, not the scheduling around it).
+   *
+   * @param axisActive       axis is Moving/Homing/Tracking -- publish every scan
+   * @param axisStateChanged this scan carried an axisState transition -- never drop one,
+   *                         a ~100 ms command can pass through Moving entirely between
+   *                         two idle republishes
+   * @param elapsedMs        since this axis last published
+   * @param idleFloorMs      the idle republish floor
+   */
+  private[hcd] def shouldPublishAxis(
+    axisActive: Boolean,
+    axisStateChanged: Boolean,
+    elapsedMs: Long,
+    idleFloorMs: Long = IdleRepublishMs
+  ): Boolean =
+    axisActive || axisStateChanged || elapsedMs >= idleFloorMs
+
+  /**
+   * Notification from InternalStateActor that state changed
+   */
+  private case class StateUpdate(stateChanged: InternalStateActor.StateChanged) extends Command
+  
+  /**
+   * Shutdown the publisher
+   */
+  case object Shutdown extends Command
+  
+  // ========================================
+  // Factory
+  // ========================================
+  
+  def behavior(
+    prefix: Prefix,
+    internalStateActor: ActorRef[InternalStateActor.Command],
+    currentStatePublisher: CurrentStatePublisher,  // CSW's publisher directly!
+    loggerFactory: LoggerFactory
+  ): Behavior[Command] =
+    Behaviors.setup { ctx =>
+      Behaviors.withTimers { timers =>
+        new CurrentStatePublisherActor(
+          ctx,
+          timers,
+          prefix,
+          internalStateActor,
+          currentStatePublisher,
+          loggerFactory.getLogger(ctx)
+        )
+      }
+    }
+
+/**
+ * Implementation of CurrentStatePublisher Actor
+ */
+class CurrentStatePublisherActor(
+  ctx: ActorContext[CurrentStatePublisherActor.Command],
+  timers: TimerScheduler[CurrentStatePublisherActor.Command],
+  prefix: Prefix,
+  internalStateActor: ActorRef[InternalStateActor.Command],
+  currentStatePublisher: CurrentStatePublisher,  // CSW's publisher!
+  logger: Logger
+) extends AbstractBehavior[CurrentStatePublisherActor.Command](ctx):
+  
+  import CurrentStatePublisherActor.*
+  import GalilMotionKeys.`ICS.HCD.GalilMotion`.*  // Import generated keys
+  
+  // Latest state snapshot
+  private var latestState: Option[HcdState] = None
+
+  // Last-published snapshots for change detection.
+  // CurrentState and InputOutputState are published only on change.
+  private var lastPublishedHcdState: Option[HcdState] = None
+
+  // Per-axis publish bookkeeping for the scan-driven gate below.
+  private var lastAxisPublishMs: Map[Axis, Long] = Map.empty
+  
+  // Subscribe to state changes
+  private val stateUpdateAdapter = ctx.messageAdapter[InternalStateActor.StateChanged](StateUpdate(_))
+  internalStateActor ! InternalStateActor.Subscribe(stateUpdateAdapter, None)
+  
+  // Start timers for periodic publication.
+  //
+  // There is no longer a 10 Hz timer.  Per-axis publication is driven by the QR scan
+  // (see the StateUpdate handler): InternalStateActor notifies subscribers once per axis
+  // per scan, so publishing from that signal makes each published sample correspond to
+  // exactly one controller read.  The previous fixed 100 ms timer resampled IS state
+  // independently of acquisition, which produced ten identical publishes per real
+  // reading at the 1 Hz standby rate and an uncorrelated beat against the scan at the
+  // 10 Hz action rate.  Neither artefact was visible to consumers, because nothing
+  // published carried the acquisition time -- which is what sampleTime now fixes.
+  timers.startTimerWithFixedDelay(Publish1Hz, 1.second)
+  
+  logger.info("CurrentStatePublisherActor started - using generated ICD keys")
+  
+  // ========================================
+  // Message Handling
+  // ========================================
+  
+  override def onMessage(msg: Command): Behavior[Command] = msg match
+    case StateUpdate(InternalStateActor.StateChanged(newState, changedFields, changedAxes)) =>
+      latestState = Some(newState)
+
+      // SCAN-DRIVEN PER-AXIS PUBLICATION.
+      //
+      // InternalStateActor calls notifyStateSubscribers unconditionally at the end of
+      // handleUpdateAxisState, and ControllerStatusActor calls that once per axis per QR
+      // scan -- so this message IS the scan signal, and publishing from it makes one
+      // published sample correspond to exactly one controller read.
+      //
+      // The gate below is what makes "more events while moving, fewer while idle" true
+      // PER AXIS rather than per controller.  The QR poll rate is global: it rises to
+      // 10 Hz when ANY axis is active, so publishing every axis on every scan would push
+      // seven idle axes to 10 Hz because the eighth is moving. An idle axis is therefore
+      // republished at ~1 Hz regardless of what the poller is doing.
+      //
+      // Three reasons to publish:
+      //   1. the axis is active           -- a moving axis is exactly what a consumer
+      //                                      wants at full acquisition rate;
+      //   2. axisState changed            -- transitions must never be dropped. A fast
+      //                                      command (~100 ms) can pass through Moving
+      //                                      entirely between two idle republishes, and
+      //                                      an assembly watching for Idle->Moving->Idle
+      //                                      would never see it;
+      //   3. the idle floor elapsed       -- keeps a standing signal for late subscribers
+      //                                      and for anything ageing the data.
+      if newState.state != HcdStateEnum.Uninitialized then
+        val nowMs = System.currentTimeMillis()
+        val axisStateChanged = changedFields.contains("axisState")
+        // The acquisition instant for this scan, shared by every axis read in it.
+        // lastPollingTime is stamped once per scan by ControllerStatusActor, so it is the
+        // moment the controller was READ -- not the moment we happen to publish, which is
+        // what an event receipt time would give a consumer. Converted UTC -> TAI here at
+        // the ICD boundary because the model declares sampleTime as taiTime, matching
+        // trackAxis.validTime and the assembly axisMotionMetrics times. (CSW TAI runs
+        // +37 s ahead of UTC; UTCTime.toTAI applies the offset.)
+        val sampleTime = UTCTime(newState.lastPollingTime).toTAI
+        changedAxes.foreach { axis =>
+          newState.getAxis(axis).foreach { axisState =>
+            val elapsed = nowMs - lastAxisPublishMs.getOrElse(axis, 0L)
+            if shouldPublishAxis(isAxisActive(axisState), axisStateChanged, elapsed) then
+              publishAxisState(axis, axisState, sampleTime)
+              // CommandStateAxis is derived from the same scan, so it is gated with its
+              // CurrentStateAxis sibling: publishing them on different schedules would
+              // let a consumer correlate a position with a stale moving/activeThread.
+              newState.getCmdState(axis).foreach(cs => publishCommandState(axis, cs))
+              lastAxisPublishMs = lastAxisPublishMs + (axis -> nowMs)
+          }
+        }
+
+      this
+      
+    case Publish1Hz =>
+      // CurrentState (HCD lifecycle state, controllerId, controllerErrorMsg) is
+      // published unconditionally at 1Hz, including during Uninitialized; the
+      // ICD defines "Uninitialized" as a valid choice value precisely so
+      // assemblies can see this state.  Late subscribers always receive a
+      // message within 1 second.  Change-detection caused starvation: after
+      // initialization state stabilizes, hcdChanged stays false and a
+      // subscriber that arrives after the first publish never receives anything.
+      //
+      // InputOutputState is suppressed during Uninitialized; digital/analog
+      // values are at default zeros until the QR poll starts reading the
+      // controller.  Once Ready, normal change-detection applies.
+      latestState.foreach { state =>
+        publishCurrentState(state)
+
+        if state.state != HcdStateEnum.Uninitialized then
+          val prev = lastPublishedHcdState
+          val ioChanged = prev.isEmpty ||
+            prev.get.digitalInputs  != state.digitalInputs  ||
+            prev.get.digitalOutputs != state.digitalOutputs ||
+            prev.get.analogInputs   != state.analogInputs
+          if ioChanged then publishInputOutputState(state)
+
+          lastPublishedHcdState = Some(state)
+      }
+      this
+
+    // Publish10Hz is retired: per-axis publication is now driven by the scan signal in
+    // the StateUpdate handler above.  The Uninitialized suppression it carried moved
+    // there -- before the controller is read, axis values are construction defaults
+    // (position=0, velocity=0, axisState=Lost), and publishing those would both add
+    // noise for subscribing assemblies and misleadingly trip logic watching for
+    // axisState transitions ("axis is Lost, home it").
+      
+    case Shutdown =>
+      logger.info("CurrentStatePublisherActor shutting down")
+      Behaviors.stopped
+  
+  // ========================================
+  // Publication Methods (Using Generated Keys)
+  // ========================================
+  
+  /**
+   * Publish CurrentState - HCD lifecycle state (1 Hz)
+   * Uses keys from CurrentStateCurrentState
+   */
+  private def publishCurrentState(hcdState: HcdState): Unit =
+    // Map internal enum to ICD choice string.  Names are identical to the
+    // ICD's stateKey choices (Uninitialized, Ready, Faulted); see
+    // GalilMotionKeys.CurrentStateCurrentState.stateKey.
+    val stateValue = hcdState.state match
+      case HcdStateEnum.Uninitialized => "Uninitialized"
+      case HcdStateEnum.Ready         => "Ready"
+      case HcdStateEnum.Faulted       => "Faulted"
+    
+    val cs = CurrentState(
+      CurrentStateCurrentState.eventKey.source,
+      StateName(CurrentStateCurrentState.eventKey.eventName.name),
+      Set(
+        CurrentStateCurrentState.stateKey.set(stateValue),
+        CurrentStateCurrentState.controllerIdKey.set(hcdState.controllerId),
+        CurrentStateCurrentState.controllerErrorMsgKey.set(hcdState.controllerErrorMsg)
+      )
+    )
+    
+    currentStatePublisher.publish(cs)  // Use CSW directly!
+  
+  /**
+   * Publish InputOutputState - Digital/analog I/O (1 Hz)
+   * Uses keys from InputOutputStateCurrentState
+   * 
+   * Note: ICD defines digitalInputs/Outputs as Boolean arrays,
+   * but analogInputs as FloatArrayKey (not individual Float keys)
+   */
+  private def publishInputOutputState(hcdState: HcdState): Unit =
+    val cs = CurrentState(
+      InputOutputStateCurrentState.eventKey.source,
+      StateName(InputOutputStateCurrentState.eventKey.eventName.name),
+      Set(
+        InputOutputStateCurrentState.digitalInputsKey.setAll(hcdState.digitalInputs),
+        InputOutputStateCurrentState.digitalOutputsKey.setAll(hcdState.digitalOutputs),
+        // Convert Double array to Float array per ICD
+        InputOutputStateCurrentState.analogInputsKey.set(hcdState.analogInputs.map(_.toFloat))
+      )
+    )
+    
+    currentStatePublisher.publish(cs)
+  
+  /**
+   * Publish CurrentStateAxis for a single axis.
+   *
+   * Called from the scan-driven gate in the StateUpdate handler, so the cadence is the
+   * QR poll rate for an active axis and ~1 Hz for an idle one -- not a fixed timer.
+   *
+   * Note: ICD defines position/velocity as Float (encoder counts), we convert from Double
+   */
+  private def publishAxisState(axis: Axis, axisState: AxisState, sampleTime: TAITime): Unit =
+    // Get keys and eventKey based on axis letter
+    // Note: We need to extract both eventKey and parameter keys to avoid union type issues
+    val (eventKey, posKey, velKey, stateKey, inPosKey, errKey) = axis match
+      case Axis.A => (
+        CurrentStateAxisACurrentState.eventKey,
+        CurrentStateAxisACurrentState.positionKey,
+        CurrentStateAxisACurrentState.velocityKey,
+        CurrentStateAxisACurrentState.axisStateKey,
+        CurrentStateAxisACurrentState.inPositionKey,
+        CurrentStateAxisACurrentState.axisErrorMsgKey
+      )
+      case Axis.B => (
+        CurrentStateAxisBCurrentState.eventKey,
+        CurrentStateAxisBCurrentState.positionKey,
+        CurrentStateAxisBCurrentState.velocityKey,
+        CurrentStateAxisBCurrentState.axisStateKey,
+        CurrentStateAxisBCurrentState.inPositionKey,
+        CurrentStateAxisBCurrentState.axisErrorMsgKey
+      )
+      case Axis.C => (
+        CurrentStateAxisCCurrentState.eventKey,
+        CurrentStateAxisCCurrentState.positionKey,
+        CurrentStateAxisCCurrentState.velocityKey,
+        CurrentStateAxisCCurrentState.axisStateKey,
+        CurrentStateAxisCCurrentState.inPositionKey,
+        CurrentStateAxisCCurrentState.axisErrorMsgKey
+      )
+      case Axis.D => (
+        CurrentStateAxisDCurrentState.eventKey,
+        CurrentStateAxisDCurrentState.positionKey,
+        CurrentStateAxisDCurrentState.velocityKey,
+        CurrentStateAxisDCurrentState.axisStateKey,
+        CurrentStateAxisDCurrentState.inPositionKey,
+        CurrentStateAxisDCurrentState.axisErrorMsgKey
+      )
+      case Axis.E => (
+        CurrentStateAxisECurrentState.eventKey,
+        CurrentStateAxisECurrentState.positionKey,
+        CurrentStateAxisECurrentState.velocityKey,
+        CurrentStateAxisECurrentState.axisStateKey,
+        CurrentStateAxisECurrentState.inPositionKey,
+        CurrentStateAxisECurrentState.axisErrorMsgKey
+      )
+      case Axis.F => (
+        CurrentStateAxisFCurrentState.eventKey,
+        CurrentStateAxisFCurrentState.positionKey,
+        CurrentStateAxisFCurrentState.velocityKey,
+        CurrentStateAxisFCurrentState.axisStateKey,
+        CurrentStateAxisFCurrentState.inPositionKey,
+        CurrentStateAxisFCurrentState.axisErrorMsgKey
+      )
+      case Axis.G => (
+        CurrentStateAxisGCurrentState.eventKey,
+        CurrentStateAxisGCurrentState.positionKey,
+        CurrentStateAxisGCurrentState.velocityKey,
+        CurrentStateAxisGCurrentState.axisStateKey,
+        CurrentStateAxisGCurrentState.inPositionKey,
+        CurrentStateAxisGCurrentState.axisErrorMsgKey
+      )
+      case Axis.H => (
+        CurrentStateAxisHCurrentState.eventKey,
+        CurrentStateAxisHCurrentState.positionKey,
+        CurrentStateAxisHCurrentState.velocityKey,
+        CurrentStateAxisHCurrentState.axisStateKey,
+        CurrentStateAxisHCurrentState.inPositionKey,
+        CurrentStateAxisHCurrentState.axisErrorMsgKey
+      )
+
+    // Keys for rotating-axis fields; countsPerRevKey for A,B,D-H; axis C pending ICD fix
+    val (angPosKey, cpdKey) = axis match
+      case Axis.A => (CurrentStateAxisACurrentState.angularPositionKey, CurrentStateAxisACurrentState.countsPerRevKey)
+      case Axis.B => (CurrentStateAxisBCurrentState.angularPositionKey, CurrentStateAxisBCurrentState.countsPerRevKey)
+      case Axis.C => (CurrentStateAxisCCurrentState.angularPositionKey, CurrentStateAxisCCurrentState.countsPerRevKey)
+      case Axis.D => (CurrentStateAxisDCurrentState.angularPositionKey, CurrentStateAxisDCurrentState.countsPerRevKey)
+      case Axis.E => (CurrentStateAxisECurrentState.angularPositionKey, CurrentStateAxisECurrentState.countsPerRevKey)
+      case Axis.F => (CurrentStateAxisFCurrentState.angularPositionKey, CurrentStateAxisFCurrentState.countsPerRevKey)
+      case Axis.G => (CurrentStateAxisGCurrentState.angularPositionKey, CurrentStateAxisGCurrentState.countsPerRevKey)
+      case Axis.H => (CurrentStateAxisHCurrentState.angularPositionKey, CurrentStateAxisHCurrentState.countsPerRevKey)
+
+    // homed flag; reflects AxisState.homed (true iff a valid home reference exists).
+    // Published so assemblies can surface their `indexed` field from HCD truth rather than inferring it.
+    val homedKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.homedKey
+      case Axis.B => CurrentStateAxisBCurrentState.homedKey
+      case Axis.C => CurrentStateAxisCCurrentState.homedKey
+      case Axis.D => CurrentStateAxisDCurrentState.homedKey
+      case Axis.E => CurrentStateAxisECurrentState.homedKey
+      case Axis.F => CurrentStateAxisFCurrentState.homedKey
+      case Axis.G => CurrentStateAxisGCurrentState.homedKey
+      case Axis.H => CurrentStateAxisHCurrentState.homedKey
+
+    // Achieved wheel slot (1-based); -1 = unknown / not a wheel axis. Wheel assemblies
+    // surface their `wheelPositionNum` from this; non-wheel assemblies ignore it.
+    val wheelPosKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.wheelPositionKey
+      case Axis.B => CurrentStateAxisBCurrentState.wheelPositionKey
+      case Axis.C => CurrentStateAxisCCurrentState.wheelPositionKey
+      case Axis.D => CurrentStateAxisDCurrentState.wheelPositionKey
+      case Axis.E => CurrentStateAxisECurrentState.wheelPositionKey
+      case Axis.F => CurrentStateAxisFCurrentState.wheelPositionKey
+      case Axis.G => CurrentStateAxisGCurrentState.wheelPositionKey
+      case Axis.H => CurrentStateAxisHCurrentState.wheelPositionKey
+
+    // Acquisition timestamp key (ADR-002 / S88 ICD revision).
+    val sampleTimeKey = axis match
+      case Axis.A => CurrentStateAxisACurrentState.sampleTimeKey
+      case Axis.B => CurrentStateAxisBCurrentState.sampleTimeKey
+      case Axis.C => CurrentStateAxisCCurrentState.sampleTimeKey
+      case Axis.D => CurrentStateAxisDCurrentState.sampleTimeKey
+      case Axis.E => CurrentStateAxisECurrentState.sampleTimeKey
+      case Axis.F => CurrentStateAxisFCurrentState.sampleTimeKey
+      case Axis.G => CurrentStateAxisGCurrentState.sampleTimeKey
+      case Axis.H => CurrentStateAxisHCurrentState.sampleTimeKey
+
+    // Map internal enum to ICD choice string
+    val stateValue = axisState.axisState match
+      case AxisStateEnum.Lost => "lost"
+      case AxisStateEnum.Homing => "homing"
+      case AxisStateEnum.Idle => "idle"
+      case AxisStateEnum.Moving => "moving"
+      case AxisStateEnum.Tracking => "tracking"
+      case AxisStateEnum.Error => "error"
+
+    val cs = CurrentState(
+      eventKey.source,
+      StateName(eventKey.eventName.name),
+      Set(
+        // Publish motorPosition (wrapped 0..cpr for rotating axes; equals raw position for linear).
+        // Assemblies send demands in 0..cpr space, so published position matches that frame.
+        // Raw accumulated encoder count is retained in AxisState.position for internal math.
+        posKey.set(axisState.motorPosition.toFloat),
+        velKey.set(axisState.velocity.toFloat),
+        stateKey.set(stateValue),
+        inPosKey.set(axisState.inPosition),
+        errKey.set(axisState.axisError),
+        // Angular position [0,360°); non-zero only for rotating axes with countsPerRevolution set
+        angPosKey.set(axisState.angularPosition.getOrElse(0.0).toFloat),
+        // Counts per revolution; integer, published so Assembly can do its own unit conversions
+        cpdKey.set(axisState.countsPerRevolution.getOrElse(0.0).toFloat),
+        // Valid-home-reference flag; assemblies map this to their `indexed` field
+        homedKey.set(axisState.homed),
+        // Achieved wheel slot (1-based); -1 = unknown / not a wheel axis.
+        wheelPosKey.set(axisState.wheelPosition),
+        // Acquisition instant for this sample.  Publication is decoupled from the poll
+        // (an idle axis is republished at ~1 Hz however fast the poller is running), so a
+        // consumer that ages or orders this data by receipt time is measuring our
+        // scheduling, not the mechanism.
+        sampleTimeKey.set(sampleTime)
+      )
+    )
+
+    currentStatePublisher.publish(cs)
+  
+  /**
+   * Publish CommandStateAxis for a single axis.
+   *
+   * Published in lockstep with its CurrentStateAxis sibling by the same scan-driven
+   * gate, so a consumer can never pair a fresh position with a stale moving flag.
+   * Uses keys from CommandStateAxis[A-H]CurrentState; reads AxisCmdState directly.
+   */
+  private def publishCommandState(axis: Axis, cmdState: AxisCmdState): Unit =
+    // Get keys and eventKey based on axis letter
+    // Note: We need to extract both eventKey and parameter keys to avoid union type issues
+    val (eventKey, threadKey, errKey, inPosKey, movKey) = axis match
+      case Axis.A => (
+        CommandStateAxisACurrentState.eventKey,
+        CommandStateAxisACurrentState.activeThreadKey,
+        CommandStateAxisACurrentState.axisErrorMsgKey,
+        CommandStateAxisACurrentState.inPositionKey,
+        CommandStateAxisACurrentState.movingKey
+      )
+      case Axis.B => (
+        CommandStateAxisBCurrentState.eventKey,
+        CommandStateAxisBCurrentState.activeThreadKey,
+        CommandStateAxisBCurrentState.axisErrorMsgKey,
+        CommandStateAxisBCurrentState.inPositionKey,
+        CommandStateAxisBCurrentState.movingKey
+      )
+      case Axis.C => (
+        CommandStateAxisCCurrentState.eventKey,
+        CommandStateAxisCCurrentState.activeThreadKey,
+        CommandStateAxisCCurrentState.axisErrorMsgKey,
+        CommandStateAxisCCurrentState.inPositionKey,
+        CommandStateAxisCCurrentState.movingKey
+      )
+      case Axis.D => (
+        CommandStateAxisDCurrentState.eventKey,
+        CommandStateAxisDCurrentState.activeThreadKey,
+        CommandStateAxisDCurrentState.axisErrorMsgKey,
+        CommandStateAxisDCurrentState.inPositionKey,
+        CommandStateAxisDCurrentState.movingKey
+      )
+      case Axis.E => (
+        CommandStateAxisECurrentState.eventKey,
+        CommandStateAxisECurrentState.activeThreadKey,
+        CommandStateAxisECurrentState.axisErrorMsgKey,
+        CommandStateAxisECurrentState.inPositionKey,
+        CommandStateAxisECurrentState.movingKey
+      )
+      case Axis.F => (
+        CommandStateAxisFCurrentState.eventKey,
+        CommandStateAxisFCurrentState.activeThreadKey,
+        CommandStateAxisFCurrentState.axisErrorMsgKey,
+        CommandStateAxisFCurrentState.inPositionKey,
+        CommandStateAxisFCurrentState.movingKey
+      )
+      case Axis.G => (
+        CommandStateAxisGCurrentState.eventKey,
+        CommandStateAxisGCurrentState.activeThreadKey,
+        CommandStateAxisGCurrentState.axisErrorMsgKey,
+        CommandStateAxisGCurrentState.inPositionKey,
+        CommandStateAxisGCurrentState.movingKey
+      )
+      case Axis.H => (
+        CommandStateAxisHCurrentState.eventKey,
+        CommandStateAxisHCurrentState.activeThreadKey,
+        CommandStateAxisHCurrentState.axisErrorMsgKey,
+        CommandStateAxisHCurrentState.inPositionKey,
+        CommandStateAxisHCurrentState.movingKey
+      )
+    
+    val cs = CurrentState(
+      eventKey.source,
+      StateName(eventKey.eventName.name),
+      Set(
+        threadKey.set(cmdState.activeThread),
+        errKey.set(cmdState.axisErrorMsg),
+        inPosKey.set(cmdState.inPosition),
+        movKey.set(cmdState.moving)
+      )
+    )
+    
+    currentStatePublisher.publish(cs)
