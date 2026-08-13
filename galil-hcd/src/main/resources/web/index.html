@@ -158,6 +158,18 @@ function useHmiConnection() {
   const lastFrameAtRef = useRef(0);
   const watchdogRef = useRef(null);
   const FRAME_TIMEOUT_MS = 3000;
+  // Watchdog self-suspension detection: when the interval's own ticks are
+  // spaced far beyond their 1 s period, the tab's timers were throttled or the
+  // page was frozen outright (Chrome background-tab behavior, aggressive under
+  // memory pressure). Silence measured across such a gap says nothing about
+  // the connection, so the first tick after a resume re-seeds the frame clock
+  // instead of killing a probably-healthy socket. Tick-gap detection is used
+  // rather than a visibilitychange listener because the ordering of the
+  // visibility event vs the first resumed timer callback is not guaranteed.
+  // Threshold well above the 1 s period but below anything a merely-busy
+  // main thread produces.
+  const lastWatchdogTickRef = useRef(0);
+  const WATCHDOG_SUSPEND_GAP_MS = 5000;
   // Reconnect backoff: start at 2s, double up to a 30s ceiling on each failed
   // connection.  Reset to the floor whenever a connection succeeds.  Without
   // this, a long-term HCD outage (overnight, weekend) leaves the browser tab
@@ -214,8 +226,24 @@ function useHmiConnection() {
         // are healthy but haven't pushed their first frame yet.
         lastFrameAtRef.current = Date.now();
         if (watchdogRef.current) clearInterval(watchdogRef.current);
+        lastWatchdogTickRef.current = Date.now();
         watchdogRef.current = setInterval(() => {
-          const silence = Date.now() - lastFrameAtRef.current;
+          const now = Date.now();
+          const tickGap = now - lastWatchdogTickRef.current;
+          lastWatchdogTickRef.current = now;
+          // Hidden tab: timers are throttled and frame delivery may be paused,
+          // so silence here is not evidence of a dead connection. Skip; the
+          // suspend-gap check below covers the moment we come back.
+          if (document.hidden) return;
+          // Timers just resumed after throttling/freeze: grant a fresh
+          // FRAME_TIMEOUT_MS window instead of reading the whole suspended
+          // period as silence (that misread disconnected + reloaded a healthy
+          // HMI on every tab switch under memory pressure, 2026-08-13).
+          if (tickGap > WATCHDOG_SUSPEND_GAP_MS) {
+            lastFrameAtRef.current = now;
+            return;
+          }
+          const silence = now - lastFrameAtRef.current;
           if (silence > FRAME_TIMEOUT_MS) {
             console.log(`WS watchdog: no frames for ${silence}ms — abandoning connection (readyState=${ws.readyState})`);
             // Stop the watchdog

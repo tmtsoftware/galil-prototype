@@ -26,6 +26,33 @@ export type StatusSnapshot = {
   coolingHealth?: string // detector only: Good | Degraded | Bad
   cameraPresent?: boolean // detector only
   cameraAcquisitionState?: string // detector only: IDLE | BUSY | STREAMING | PAUSED | FAULT | RECOVERING
+  // ABE Shutter mock only
+  shutterBladeAState?: string // OPEN | CLOSED
+  shutterBladeBState?: string // OPEN | CLOSED
+  shutterErrorIndicator?: string // YES | NO
+  // ABE Enclosure mock only
+  purgeAirFlowRate?: number // liters/sec
+  coolantPressure?: number // bar
+  benchCoolantLeakSensorFaultDetection?: string // READY | FAULTED
+  rackToBenchCoolantLeakSensorFaultDetection?: string // READY | FAULTED
+  rackCoolantLeakSensorFaultDetection?: string // READY | FAULTED
+  benchCoolantLeakSensorDetectionState?: string // NONE | LEAK_DETECTED
+  rackToBenchCoolantLeakSensorDetectionState?: string // NONE | LEAK_DETECTED
+  rackCoolantLeakSensorDetectionState?: string // NONE | LEAK_DETECTED
+  pshCoolantFlowRate?: number // liters/sec
+  pitCoolantFlowRate?: number // liters/sec
+  aptCoolantFlowRate?: number // liters/sec
+  lowfsCoolantFlowRate?: number // liters/sec
+  shutterTemperature?: number // degC
+  shutterHumidity?: number // %RH
+  shutterDewPoint?: number // degC
+  pshTemperature?: number // degC
+  pshHumidity?: number // %RH
+  pshDewPoint?: number // degC
+  electronicsCabinetTemperature?: number // degC
+  electronicsCabinetHumidity?: number // %RH
+  electronicsCabinetDewPoint?: number // degC
+  placeholderCurrentTemperature?: number // degC
 }
 export type AxisSnapshot = {
   axisState?: string
@@ -49,7 +76,32 @@ export const readStatus = (e: Event): StatusSnapshot => ({
   trackingModeState: firstValue(e, 'trackingModeState') as string | undefined,
   coolingHealth: firstValue(e, 'coolingHealth') as string | undefined,
   cameraPresent: firstValue(e, 'cameraPresent') as boolean | undefined,
-  cameraAcquisitionState: firstValue(e, 'cameraAcquisitionState') as string | undefined
+  cameraAcquisitionState: firstValue(e, 'cameraAcquisitionState') as string | undefined,
+  shutterBladeAState: firstValue(e, 'shutterBladeAState') as string | undefined,
+  shutterBladeBState: firstValue(e, 'shutterBladeBState') as string | undefined,
+  shutterErrorIndicator: firstValue(e, 'shutterErrorIndicator') as string | undefined,
+  benchCoolantLeakSensorFaultDetection: firstValue(e, 'benchCoolantLeakSensorFaultDetection') as string | undefined,
+  rackToBenchCoolantLeakSensorFaultDetection: firstValue(e, 'rackToBenchCoolantLeakSensorFaultDetection') as string | undefined,
+  rackCoolantLeakSensorFaultDetection: firstValue(e, 'rackCoolantLeakSensorFaultDetection') as string | undefined,
+  benchCoolantLeakSensorDetectionState: firstValue(e, 'benchCoolantLeakSensorDetectionState') as string | undefined,
+  rackToBenchCoolantLeakSensorDetectionState: firstValue(e, 'rackToBenchCoolantLeakSensorDetectionState') as string | undefined,
+  rackCoolantLeakSensorDetectionState: firstValue(e, 'rackCoolantLeakSensorDetectionState') as string | undefined,
+  purgeAirFlowRate: firstValue(e, 'purgeAirFlowRate') as number | undefined,
+  coolantPressure: firstValue(e, 'coolantPressure') as number | undefined,
+  pshCoolantFlowRate: firstValue(e, 'pshCoolantFlowRate') as number | undefined,
+  pitCoolantFlowRate: firstValue(e, 'pitCoolantFlowRate') as number | undefined,
+  aptCoolantFlowRate: firstValue(e, 'aptCoolantFlowRate') as number | undefined,
+  lowfsCoolantFlowRate: firstValue(e, 'lowfsCoolantFlowRate') as number | undefined,
+  shutterTemperature: firstValue(e, 'shutterTemperature') as number | undefined,
+  shutterHumidity: firstValue(e, 'shutterHumidity') as number | undefined,
+  shutterDewPoint: firstValue(e, 'shutterDewPoint') as number | undefined,
+  pshTemperature: firstValue(e, 'pshTemperature') as number | undefined,
+  pshHumidity: firstValue(e, 'pshHumidity') as number | undefined,
+  pshDewPoint: firstValue(e, 'pshDewPoint') as number | undefined,
+  electronicsCabinetTemperature: firstValue(e, 'electronicsCabinetTemperature') as number | undefined,
+  electronicsCabinetHumidity: firstValue(e, 'electronicsCabinetHumidity') as number | undefined,
+  electronicsCabinetDewPoint: firstValue(e, 'electronicsCabinetDewPoint') as number | undefined,
+  placeholderCurrentTemperature: firstValue(e, 'placeholderCurrentTemperature') as number | undefined
 })
 
 export const readAxis = (e: Event): AxisSnapshot => ({

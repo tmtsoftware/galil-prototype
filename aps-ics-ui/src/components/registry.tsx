@@ -221,6 +221,28 @@ import {
 
 import { AptDetectorCommands } from './AptDetectorCommands'
 import { AptDetectorStatus } from './AptDetectorStatus'
+
+import { AbeShutterCommands } from './AbeShutterCommands'
+import { AbeShutterStatus } from './AbeShutterStatus'
+import {
+  STATUS_EVENT as ABESH_STATUS_EVENT,
+  ABESH_COMPONENT_ID,
+  ABESH_CONFIG_PATH,
+  ABESH_CONFIG_VIEW,
+  ABESH_PREFIX,
+  ABESH_PREFIX_STR
+} from '../models/abeShutter'
+
+import { AbeEnclosureCommands } from './AbeEnclosureCommands'
+import { AbeEnclosureStatus } from './AbeEnclosureStatus'
+import {
+  STATUS_EVENT as ABEEN_STATUS_EVENT,
+  ABEEN_COMPONENT_ID,
+  ABEEN_CONFIG_PATH,
+  ABEEN_CONFIG_VIEW,
+  ABEEN_PREFIX,
+  ABEEN_PREFIX_STR
+} from '../models/abeEnclosure'
 import {
   STATUS_EVENT as APT_STATUS_EVENT,
   TEMPERATURE_EVENT as APT_TEMPERATURE_EVENT,
@@ -709,6 +731,38 @@ const pshDetector: ComponentDescriptor = {
   }
 }
 
+// ABE mocks (self-contained, no HCD): status-only telemetry (no axis events),
+// unseeded config paths (Configuration tab shows the snapshot fallback).
+const abeShutter: ComponentDescriptor = {
+  key: ABESH_PREFIX_STR,
+  label: 'ABE Shutter',
+  prefix: ABESH_PREFIX,
+  componentId: ABESH_COMPONENT_ID,
+  configPath: ABESH_CONFIG_PATH,
+  staticConfig: ABESH_CONFIG_VIEW,
+  statusEvent: ABESH_STATUS_EVENT,
+  axisEvents: [],
+  renderCommands: (p) => (
+    <AbeShutterCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => <AbeShutterStatus status={p.status} lifecycle={p.lifecycle} />
+}
+
+const abeEnclosure: ComponentDescriptor = {
+  key: ABEEN_PREFIX_STR,
+  label: 'ABE Enclosure',
+  prefix: ABEEN_PREFIX,
+  componentId: ABEEN_COMPONENT_ID,
+  configPath: ABEEN_CONFIG_PATH,
+  staticConfig: ABEEN_CONFIG_VIEW,
+  statusEvent: ABEEN_STATUS_EVENT,
+  axisEvents: [],
+  renderCommands: (p) => (
+    <AbeEnclosureCommands status={p.status} ready={p.ready} busy={p.busy} run={p.run} />
+  ),
+  renderStatus: (p) => <AbeEnclosureStatus status={p.status} lifecycle={p.lifecycle} />
+}
+
 export const DESCRIPTORS: ComponentDescriptor[] = [
   insertionStage,
   steeringBeamSplitter,
@@ -728,7 +782,9 @@ export const DESCRIPTORS: ComponentDescriptor[] = [
   tiltPlate,
   focKMirror,
   fiberSourceStage,
-  pupilMaskStage
+  pupilMaskStage,
+  abeShutter,
+  abeEnclosure
 ]
 
 export const REGISTRY: Record<string, ComponentDescriptor> = Object.fromEntries(

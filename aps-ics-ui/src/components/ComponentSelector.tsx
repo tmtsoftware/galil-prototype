@@ -34,6 +34,8 @@ import { PMS_PREFIX_STR } from '../models/pupilMaskStage'
 import { APT_PREFIX_STR } from '../models/aptDetector'
 import { PIT_PREFIX_STR } from '../models/pitDetector'
 import { PSH_PREFIX_STR } from '../models/pshDetector'
+import { ABESH_PREFIX_STR } from '../models/abeShutter'
+import { ABEEN_PREFIX_STR } from '../models/abeEnclosure'
 
 // Disabled placeholder node helper.
 const ph = (key: string, title: string): DataNode => ({ key, title, disabled: true })
@@ -82,7 +84,12 @@ const treeData: DataNode[] = [
       { key: PMS_PREFIX_STR, title: 'Pupil Mask Stage' }
     ]
   },
-  { key: 'grp-abe', title: 'ABE assemblies', disabled: true, children: [ph('abe-x', '—')] },
+  {
+    key: 'grp-abe',
+    title: 'ABE assemblies',
+    selectable: false,
+    children: [{ key: ABESH_PREFIX_STR, title: 'Shutter' }, { key: ABEEN_PREFIX_STR, title: 'Enclosure' }]
+  },
   {
     key: 'grp-sw',
     title: 'Software assemblies',
