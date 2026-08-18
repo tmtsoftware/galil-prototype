@@ -21,6 +21,27 @@ MG "axis ",^c, " is ",^a[^c]
 ^c=^c+1
 JP #print_h,(^c<^a[-1])
 EN
+REM Helper routine to clear all axis error messages
+#ae0
+JS #fill("ae",0)
+EN
+#Status
+REM generate a status message
+ MG "HCD STATUS threads: "{N}
+ MG (_NO&128)/128{N}{F1.0}
+ MG (_NO&64)/64{N}{F1.0}
+ MG (_NO&32)/32{N}{F1.0}
+ MG (_NO&16)/16{N}{F1.0}
+ MG (_NO&8)/8{N}{F1.0}
+ MG (_NO&4)/4{N}{F1.0}
+ MG (_NO&2)/2{N}{F1.0}
+ MG (_NO&1)/1{F1.0}
+ MG "HCD STATUS error code:  ", _TC, _TA0
+REM MG "axisErr error codes:  "; JS #print("ae")
+ MG "axis error codes: ",ae[0]{F1.0}, ae[1]
+ MG "HCD STATUS positions: ", _TPA, _TPB
+ MG "HCD STATUS version: ",version{F8.0}
+EN
 REM ----------------------------------------------------------------------------
 #AUTO
 REM Code here runs automatically when the controller starts
@@ -116,8 +137,8 @@ ENDIF
 EN1
 REM ----------------------------------------------------------------------------
 REM Init - setup controller and initialize variables
-#Init
 REM ----------------------------------------------------------------------------
+#Init
 REM Global configuration
 CN -1,1,-1,0,0
 MO
@@ -186,30 +207,6 @@ mdelay[6]=100
 MG "Controller Initialized"
 EN
 REM ----------------------------------------------------------------------------
-REM End of #INIT
-REM ----------------------------------------------------------------------------
-REM 
-REM Helper routine to clear all axis error messages
-#ae0
-JS #fill("ae",0)
-EN
-#Status
-REM generate a status message
- MG "HCD STATUS threads: "{N}
- MG (_NO&128)/128{N}{F1.0}
- MG (_NO&64)/64{N}{F1.0}
- MG (_NO&32)/32{N}{F1.0}
- MG (_NO&16)/16{N}{F1.0}
- MG (_NO&8)/8{N}{F1.0}
- MG (_NO&4)/4{N}{F1.0}
- MG (_NO&2)/2{N}{F1.0}
- MG (_NO&1)/1{F1.0}
- MG "HCD STATUS error code:  ", _TC, _TA0
-REM MG "axisErr error codes:  "; JS #print("ae")
- MG "axis error codes: ",ae[0]{F1.0}, ae[1]
- MG "HCD STATUS positions: ", _TPA, _TPB
- MG "HCD STATUS version: ",version{F8.0}
-EN
 REM Call all Setup Routines in parallel
 REM Call this on thread 0, spawn the others
 #Setup
@@ -217,14 +214,6 @@ MG "Starting all Setup programs"
 XQ #SetupA,1
 WT 2
 XQ #SetupB,2
-EN
-REM Call all Init(Home) Routines in parallel
-REM Call this on thread 0, spawn the others
-#HomeAll
-MG "Starting all Home programs"
-XQ #HomeA,1
-WT 2
-XQ #HomeB,2
 EN
 REM
 REM ----------------------------------------------------------------------------
@@ -237,7 +226,7 @@ MTA=1.0
 CEA=0
 LDA=0
 
-REM No AF: M-230.10 uses incremental rotary encoder, not sin/cos feedback
+REM No AF. M-230.10 uses incremental rotary encoder, not sin/cos feedback
 REM AFA=5
 REM AGA=2
 
@@ -248,7 +237,7 @@ KPA=23.63
 KIA=0.2002
 KDA=861
 
-REM No BA/BM/BZ/BZA: DC gear motor does not need controller commutation
+REM No BA/BM/BZ/BZA. DC gear motor does not need controller commutation
 REM BAA
 REM BMA=51200
 REM BZ <1000>1000
@@ -260,13 +249,12 @@ SPA=100000
 accel[0]=100000
 decel[0]=100000
 speed[0]=100000
-hspd[0]=2000
+hspd[0]=5000
 STA
 MOA
 MG "Axis A setup done"
 ae[0]=0
 EN
-REM         Axis A done
 REM ----------------------------------------------------------------------------
 REM Axis B - PI M230.10 linear actuator setup
 REM Single axis linear actuator
@@ -276,7 +264,7 @@ MTB=1.0
 CEB=0
 LDB=0
 
-REM No AF: M-230.10 uses incremental rotary encoder, not sin/cos feedback
+REM No AF. M-230.10 uses incremental rotary encoder, not sin/cos feedback
 REM AFB=5
 REM AGB=2
 
@@ -287,7 +275,7 @@ KPB=23.63
 KIB=0.2002
 KDB=861
 
-REM No BA/BM/BZ/BZA: DC gear motor does not need controller commutation
+REM No BA/BM/BZ/BZA. DC gear motor does not need controller commutation
 REM BAB
 REM BMB=51200
 REM BZ <1000>1000
@@ -299,13 +287,14 @@ SPB=100000
 accel[1]=100000
 decel[1]=100000
 speed[1]=100000
-hspd[1]=2000
+hspd[1]=5000
 STB
 MOB
 MG "Axis B setup done"
 ae[1]=0
 EN
-REM         Axis B done
+REM ----------------------------------------------------------------------------
+REM  Motion Routines
 REM ----------------------------------------------------------------------------
 REM   ----- HOME AXIS A ----
 #HomeA
@@ -462,6 +451,7 @@ ENDIF
 LDA=0
 homing[0]=0
 EN
+REM ----------------------------------------------------------------------------
 REM   ----- HOME AXIS B ----
 #HomeB
 ae[1]=1
@@ -618,13 +608,15 @@ LDB=0
 homing[1]=0
 EN
 REM
+REM ----------------------------------------------------------------------------
+REM   ----- MOVE A ----
 #MoveA
 ae[0]=1
 SPA=speed[0]
 ACA=accel[0]
 DCA=decel[0]
 SHA
-REM Consider checking dmd[0] against software travel limits before BGA.
+REM dmd[0] checked against software travel limits in calling HCD code
 PAA=dmd[0]
 distance=@ABS[dmd[0]-_TPA]
 timeout=(distance/_SPA)*1000
@@ -656,13 +648,15 @@ MG "Motor A MOVE to ",_TPA," in ",dtime0/tcon," sec"
 ae[0]=0
 EN
 REM
+REM ----------------------------------------------------------------------------
+REM   ----- MOVE B ----
 #MoveB
 ae[1]=1
 SPB=speed[1]
 ACB=accel[1]
 DCB=decel[1]
 SHB
-REM Consider checking dmd[1] against software travel limits before BGB.
+REM dmd[1] checked against software travel limits in calling HCD code
 PAB=dmd[1]
 distance=@ABS[dmd[1]-_TPB]
 timeout=(distance/_SPB)*1000
@@ -682,6 +676,8 @@ MG "Motor B MOVE to ",_TPB," in ",dtime1/tcon," sec"
 ae[1]=0
 EN
 REM
+REM ----------------------------------------------------------------------------
+REM   ----- STOP A ----
 #StopA
 REM a command to stop the motor
 ae[0]=1
@@ -692,6 +688,8 @@ homing[0]=0
 ae[0]=0
 EN
 REM
+REM ----------------------------------------------------------------------------
+REM   ----- STOP B ----
 #StopB
 REM a command to stop the motor
 ae[1]=1
@@ -700,4 +698,14 @@ MG "Motor B STOP"
 LDB=0
 homing[1]=0
 ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+REM   ----- Home All ----
+REM Call all Init(Home) Routines in parallel
+REM Call this on thread 0, spawn the others
+#HomeAll
+MG "Starting all Home programs"
+XQ #HomeA,1
+WT 2
+XQ #HomeB,2
 EN
