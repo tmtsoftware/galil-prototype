@@ -311,7 +311,7 @@ class GalilIoTest extends AnyFunSuite with Matchers:
   // These tests verify the encapsulation contract:
   //   - Pre-drain (buffer hygiene before DL)
   //   - Stream program text via writeRaw (DL then program)
-  //   - Post-stream drain → throw if '?' detected (line count + preview in msg)
+  //   - Per-line/post-stream drain → throw if '?' detected (line number/preview in msg)
   //   - sendAndWaitForPrompt for '\' terminator
   //   - Second drain for DL's deferred ack
   //   - Read timeout extended to 10000ms for the upload window, restored finally
@@ -335,22 +335,25 @@ class GalilIoTest extends AnyFunSuite with Matchers:
     writes(2) shouldBe "\\\r\n"
   }
 
-  test("uploadProgram: post-stream '?' rejection throws with line count and preview") {
+  test("uploadProgram: line-level '?' rejection throws with line number and preview") {
     val io = new StubGalilIo
     io.queueDrain("")             // pre-drain clean
-    io.queueDrain("?\r\n?\r\n")   // two rejections
+    io.queueDrain("?\r\n")        // rejection after the first program line
     val ex = intercept[RuntimeException](io.uploadProgram("BADPROG"))
     ex.getMessage should include("DL rejected")
-    ex.getMessage should include("2 line(s)")  // count
-    ex.getMessage should include("?")           // preview shows the chars
+    ex.getMessage should include("upload line 1")
+    ex.getMessage should include("BADPROG")
+    ex.getMessage should include("?")          // preview shows the char
   }
 
-  test("uploadProgram: single '?' rejection counts as 1 line") {
+  test("uploadProgram: second-line '?' rejection reports line 2") {
     val io = new StubGalilIo
     io.queueDrain("")
+    io.queueDrain("")
     io.queueDrain("?")
-    val ex = intercept[RuntimeException](io.uploadProgram("PROG"))
-    ex.getMessage should include("1 line(s)")
+    val ex = intercept[RuntimeException](io.uploadProgram("GOOD\r\nBAD"))
+    ex.getMessage should include("upload line 2")
+    ex.getMessage should include("BAD")
   }
 
   test("uploadProgram: '?' rejection prevents writing the '\\' terminator") {
