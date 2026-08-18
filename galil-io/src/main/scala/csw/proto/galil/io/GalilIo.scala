@@ -199,15 +199,27 @@ abstract class GalilIo {
       drainAndShowBuffer(timeoutMs = 100)
 
       // Begin download.  Controller is silent until "\" arrives if DL is
-      // healthy; any "?" in the post-stream drain means at least one line
-      // was rejected (typically a line >80 chars — see ProgramFileManager).
+      // healthy. Stream one program line at a time so a parser rejection can
+      // be attributed to the exact source line instead of surfacing later as
+      // a misleading rejection of the "\" terminator.
       writeRaw("DL")
-      writeRaw(program)
-      val drained = drainAndShowBuffer(timeoutMs = 50)
+      program.linesIterator.zipWithIndex.foreach { case (line, idx) =>
+        writeRaw(line)
+        val lineDrain = drainAndShowBuffer(timeoutMs = 20)
+        if (lineDrain.contains('?')) {
+          val preview = lineDrain.replace("\r", "\\r").replace("\n", "\\n").take(120)
+          throw new RuntimeException(
+            s"DL rejected upload line ${idx + 1}: '$line'. Drain content: '$preview'"
+          )
+        }
+      }
+
+      val drained = drainAndShowBuffer(timeoutMs = 200)
       if (drained.contains('?')) {
         val preview = drained.replace("\r", "\\r").replace("\n", "\\n").take(120)
         throw new RuntimeException(
-          s"DL rejected ${drained.count(_ == '?')} line(s). Drain content: '$preview'"
+          s"DL rejected ${drained.count(_ == '?')} line(s) after streaming program. " +
+          s"Drain content: '$preview'"
         )
       }
 

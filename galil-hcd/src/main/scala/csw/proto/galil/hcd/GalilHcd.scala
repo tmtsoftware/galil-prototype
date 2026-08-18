@@ -1159,7 +1159,12 @@ class GalilHcdHandlers(ctx: ActorContext[TopLevelActorMessage], cswCtx: CswConte
     // reference: "If there are too many lines or too many characters per
     // line, the controller will return a ?."), validates that every line
     // is within the 80-char limit, and joins with CR+LF.
-    val cleanedProgram = ProgramFileManager.prepareProgramForUpload(programText)
+    val cleanedProgram = Try {
+      ProgramFileManager.prepareProgramForUpload(programText)
+    } match {
+      case scala.util.Success(text) => text
+      case scala.util.Failure(ex)   => return Left(s"prepareProgramForUpload failed: ${ex.getMessage}")
+    }
     log.info(s"Prepared program for DL: ${cleanedProgram.length} chars (raw was ${programText.length})")
 
     // Step 2: upload to controller via DL (galilIo.uploadProgram)

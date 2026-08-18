@@ -1,0 +1,711 @@
+REM ----------------------------------------------------------------------------
+REM Programs to control a testbench with 2 servo actuators (PI M230.10)
+REM axes A and B
+REM Source file name: lgsfHCD_lab.dmc
+REM Based on existing programs: galilHCD_lab.dmc and protoHCD_lab.dmc
+REM
+REM ----------------------------------------------------------------------------
+REM Helper Routines
+REM ----------------------------------------------------------------------------
+#fill
+^c= 0
+#fill_h
+^a[^c]= ^b
+^c= ^c+1
+JP #fill_h,(^c<^a[-1])
+EN
+#print
+^c= 0
+#print_h
+MG "axis ",^c, " is ",^a[^c]
+^c=^c+1
+JP #print_h,(^c<^a[-1])
+EN
+REM Helper routine to clear all axis error messages
+#ae0
+JS #fill("ae",0)
+EN
+#Status
+REM generate a status message
+ MG "HCD STATUS threads: "{N}
+ MG (_NO&128)/128{N}{F1.0}
+ MG (_NO&64)/64{N}{F1.0}
+ MG (_NO&32)/32{N}{F1.0}
+ MG (_NO&16)/16{N}{F1.0}
+ MG (_NO&8)/8{N}{F1.0}
+ MG (_NO&4)/4{N}{F1.0}
+ MG (_NO&2)/2{N}{F1.0}
+ MG (_NO&1)/1{F1.0}
+ MG "HCD STATUS error code:  ", _TC, _TA0
+REM MG "axisErr error codes:  "; JS #print("ae")
+ MG "axis error codes: ",ae[0]{F1.0}, ae[1]
+ MG "HCD STATUS positions: ", _TPA, _TPB
+ MG "HCD STATUS version: ",version{F8.0}
+EN
+REM ----------------------------------------------------------------------------
+#AUTO
+REM Code here runs automatically when the controller starts
+REM Call INIT here for now. May want to eventually call Init from the HCD only.
+REM XQ #Init,7
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM Start of ERROR Handling
+REM ----------------------------------------------------------------------------
+REM Ensure EEPROM errors are reported.
+#AUTOERR
+MG "HCD EEPROM ERROR ", _RS,{^17}{^10},":"
+WT 3000
+REM Impacts all axes
+JP #fill("ae",1)
+JS #AUTOERR
+EN
+REM  Report any position errors
+#POSERR
+MG "HCD POSERR"
+REM Check each axis
+~a=0
+b=0
+#pe_h
+IF ((@ABS[_TE~a]>=_ER~a) & (_ER~a<>-1))
+  MG "Position Error ",_TE~a, " occurred on ",~a{F1.0}," axis "
+  ae[b]=2
+ENDIF
+~a=~a+1; b=b+1
+JP#pe_h,~a<_BV
+ZS
+RE
+REM  Report any lost TCP connections
+#TCPERR
+MG "HCD TCPERR ", _IA4
+RE
+REM Trap program errors so threads are not killed
+#CMDERR
+MG "HCD CMDERR ",_ED,_TA,_TC,_XQ
+EN
+REM Handle limits, ignoring expected hits during homing
+#LIMSWI
+IF ((_LFA=0) | (_LRA=0))
+ IF (homing[0])
+  STA
+  lmask=0
+  IF (_LFA=0)
+   lmask=lmask+1
+  ENDIF
+  IF (_LRA=0)
+   lmask=lmask+2
+  ENDIF
+  LDA=lmask
+  MG "Limit Hit axis A during homing"
+ ELSE
+  STA
+  MG "Limit Hit axis A"
+  ae[0]=3
+ ENDIF
+ENDIF
+IF ((_LFB=0) | (_LRB=0))
+ IF (homing[1])
+  STB
+  lmask=0
+  IF (_LFB=0)
+   lmask=lmask+1
+  ENDIF
+  IF (_LRB=0)
+   lmask=lmask+2
+  ENDIF
+  LDB=lmask
+  MG "Limit Hit axis B during homing"
+ ELSE
+  STB
+  MG "Limit Hit axis B"
+  ae[1]=3
+ ENDIF
+ENDIF
+WT500
+RE1
+REM Handle motion timeouts, per axis
+#MCTIME
+MG "Motion Timeout"
+IF (_SCA=99)
+  MG "Motion Timeout occurred on A axis"
+  ae[0]=4
+ENDIF
+IF (_SCB=99)
+  MG "Motion Timeout occurred on B axis"
+  ae[1]=4
+ENDIF
+EN1
+REM ----------------------------------------------------------------------------
+REM Init - setup controller and initialize variables
+REM ----------------------------------------------------------------------------
+#Init
+REM Global configuration
+CN -1,1,-1,0,0
+MO
+REM create arrays, variables
+DM ae[8]
+DM dmd[8]
+DM accel[8]
+DM decel[8]
+DM speed[8]
+DM hspd[8]
+DM hoff[8]
+DM mdelay[8]
+DM cpr[8]
+DM homing[8]
+DM whlpos[8]
+aeBusy=0
+REM default the motor parameters to those in flash EEPROM
+accel[0]=_ACA
+accel[1]=_ACB
+accel[2]=_ACC
+accel[3]=_ACD
+accel[4]=_ACE
+accel[5]=_ACF
+accel[6]=_ACG
+REM
+decel[0]=_DCA
+decel[1]=_DCB
+decel[2]=_DCC
+decel[3]=_DCD
+decel[4]=_DCE
+decel[5]=_DCF
+decel[6]=_DCG
+REM
+speed[0]=_SPA
+speed[1]=_SPB
+speed[2]=_SPC
+speed[3]=_SPD
+speed[4]=_SPE
+speed[5]=_SPF
+speed[6]=_SPG
+REM
+hspd[0]=_HVA
+hspd[1]=_HVB
+hspd[2]=_HVC
+hspd[3]=_HVD
+hspd[4]=_HVE
+hspd[5]=_HVF
+hspd[6]=_HVG
+REM
+JS #fill("ae",0)
+JS #fill("homing",0)
+REM setup home offset values
+REM (motion after index before setting position to 0)
+JS #fill("hoff",0)
+JS #fill("whlpos",-1)
+REM
+REM setup motor delay values (wait/settling times after moves before 
+REM the move is considered done - needed before MO cmd)
+mdelay[0]=100
+mdelay[1]=100
+mdelay[2]=100
+mdelay[3]=100
+mdelay[4]=100
+mdelay[5]=100
+mdelay[6]=100
+MG "Controller Initialized"
+EN
+REM ----------------------------------------------------------------------------
+REM Call all Setup Routines in parallel
+REM Call this on thread 0, spawn the others
+#Setup
+MG "Starting all Setup programs"
+XQ #SetupA,1
+WT 2
+XQ #SetupB,2
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM Axis A - PI M230.10 linear actuator setup
+REM Single axis linear actuator
+REM
+#SetupA
+ae[0]=1
+MTA=1.0
+CEA=0
+LDA=0
+
+REM No AF. M-230.10 uses incremental rotary encoder, not sin/cos feedback
+REM AFA=5
+REM AGA=2
+
+TLA=3
+TKA=0
+
+KPA=23.63
+KIA=0.2002
+KDA=861
+
+REM No BA/BM/BZ/BZA. DC gear motor does not need controller commutation
+REM BAA
+REM BMA=51200
+REM BZ <1000>1000
+REM BZA=-1
+
+ACA=100000
+DCA=100000
+SPA=100000
+accel[0]=100000
+decel[0]=100000
+speed[0]=100000
+hspd[0]=5000
+STA
+MOA
+MG "Axis A setup done"
+ae[0]=0
+EN
+REM ----------------------------------------------------------------------------
+REM Axis B - PI M230.10 linear actuator setup
+REM Single axis linear actuator
+#SetupB
+ae[1]=1
+MTB=1.0
+CEB=0
+LDB=0
+
+REM No AF. M-230.10 uses incremental rotary encoder, not sin/cos feedback
+REM AFB=5
+REM AGB=2
+
+TLB=3
+TKB=0
+
+KPB=23.63
+KIB=0.2002
+KDB=861
+
+REM No BA/BM/BZ/BZA. DC gear motor does not need controller commutation
+REM BAB
+REM BMB=51200
+REM BZ <1000>1000
+REM BZB=-1
+
+ACB=100000
+DCB=100000
+SPB=100000
+accel[1]=100000
+decel[1]=100000
+speed[1]=100000
+hspd[1]=5000
+STB
+MOB
+MG "Axis B setup done"
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+REM  Motion Routines
+REM ----------------------------------------------------------------------------
+REM   ----- HOME AXIS A ----
+#HomeA
+ae[0]=1
+homing[0]=1
+MG "Home Motor A started"
+SHA
+hspeed=@ABS[hspd[0]]
+rspeed=5*hspeed
+SPA=speed[0]
+hback=1000;    ' Amount to back off from the Hall edge.
+REM Reverse moves use LD=2 and poll _LRA so #LIMSWI does not abort #HomeA.
+JGA=(-1*rspeed)
+JP #ha_rhit,(_LRA=0)
+JP #ha_clr,(_HMA=1)
+MG "Motor A seeking reverse limit"
+LDA=2
+BGA
+#ha_rv
+WT10
+JP #ha_rv,((_LRA<>0) & (_BGA<>0))
+STA;     ' stop when reverse limit is hit
+#ha_srv
+WT10;    ' wait for motion to complete
+JP #ha_srv,(_BGA<>0)
+REM Check reverse limit hit
+IF (_LRA<>0)
+  MG "Motor A home failed: reverse limit not found"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+#ha_rhit
+REM We are on the reverse limit now; keep reverse disabled until clear.
+IF (_LRA=0)
+  LDA=2
+ENDIF
+MG "Motor A moving off reverse limit"
+JGA=speed[0]
+BGA
+#ha_off
+WT10
+JP #ha_off,((_LRA=0) & (_BGA<>0))
+STA
+#ha_sof
+WT10;   ' wait for motion to complete
+JP #ha_sof,(_BGA<>0)
+LDA=0;  ' turn limits back on'
+REM Coarse positive find gets onto the high side of the Hall edge.
+MG "Motor A seeking Hall high side"
+JP #ha_clr,(_HMA=1)
+SPA=rspeed
+FEA
+BGA
+#ha_hi
+WT10
+JP #ha_hi,((_HMA<>1) & (_BGA<>0))
+#ha_shi
+WT10
+JP #ha_shi,(_BGA<>0)
+IF (_HMA<>1)
+  MG "Motor A home failed: Hall high side not found"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+#ha_clr
+REM Back through the Hall edge so final home always approaches positive.
+MG "Motor A clearing Hall sensor reverse"
+JP #ha_rhit,(_LRA=0)
+JGA=(-1*rspeed)
+LDA=2
+BGA
+#ha_lo
+WT10
+JP #ha_lo,((_HMA=1) & (_LRA<>0) & (_BGA<>0))
+STA
+#ha_slo
+WT10
+JP #ha_slo,(_BGA<>0)
+IF (_LRA=0)
+  MG "Motor A home failed: reverse limit hit during Hall clear"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+IF (_HMA<>0)
+  MG "Motor A home failed: Hall low side not found"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+LDA=0
+REM Add reverse margin past the Hall edge to avoid hysteresis ambiguity.
+MG "Motor A applying reverse Hall backoff"
+IF (_LRA=0)
+  MG "Motor A home failed: reverse limit blocks Hall backoff"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+PRA=(-1*hback)
+SPA=rspeed
+LDA=2
+BGA
+#ha_bk
+WT10
+JP #ha_bk,((_LRA<>0) & (_BGA<>0))
+STA
+#ha_sbk
+WT10
+JP #ha_sbk,(_BGA<>0)
+IF (_LRA=0)
+  MG "Motor A home failed: reverse limit hit during backoff"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+LDA=0
+MG "Motor A seeking final positive Hall edge"
+IF (_LFA=0)
+  MG "Motor A home failed: forward limit blocks final Hall search"
+  ae[0]=3
+  LDA=0
+  homing[0]=0
+  EN
+ENDIF
+SPA=hspeed
+REM Final slow positive FE defines the repeatable home edge.
+FEA
+BGA
+#ha_fin
+WT10
+JP #ha_fin,(_BGA<>0)
+SPA=speed[0]
+LDA=0
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+IF (_HMA=1)
+  DPA=0
+  MG "Motor A Homed",_TPA," OK",{^13}{^10},":"
+  ae[0]=0
+ELSE
+  MG "Motor A home failed: Hall sensor not active"
+  ae[0]=3
+ENDIF
+LDA=0
+homing[0]=0
+EN
+REM ----------------------------------------------------------------------------
+REM   ----- HOME AXIS B ----
+#HomeB
+ae[1]=1
+homing[1]=1
+MG "Home Motor B started"
+SHB
+hspeed=@ABS[hspd[1]]
+rspeed=5*hspeed
+SPB=speed[1]
+hback=1000;    ' Amount to back off from the Hall edge.
+REM Reverse moves use LD=2 and poll _LRB so #LIMSWI does not abort #HomeB.
+JGB=(-1*rspeed)
+JP #hb_rhit,(_LRB=0)
+JP #hb_clr,(_HMB=1)
+MG "Motor B seeking reverse limit"
+LDB=2
+BGB
+#hb_rv
+WT10
+JP #hb_rv,((_LRB<>0) & (_BGB<>0))
+STB;     ' stop when reverse limit is hit
+#hb_srv
+WT10;    ' wait for motion to complete
+JP #hb_srv,(_BGB<>0)
+REM Check reverse limit hit
+IF (_LRB<>0)
+  MG "Motor B home failed: reverse limit not found"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+#hb_rhit
+REM We are on the reverse limit now; keep reverse disabled until clear.
+IF (_LRB=0)
+  LDB=2
+ENDIF
+MG "Motor B moving off reverse limit"
+JGB=speed[1]
+BGB
+#hb_off
+WT10
+JP #hb_off,((_LRB=0) & (_BGB<>0))
+STB
+#hb_sof
+WT10;   ' wait for motion to complete
+JP #hb_sof,(_BGB<>0)
+LDB=0;  ' turn limits back on'
+REM Coarse positive find gets onto the high side of the Hall edge.
+MG "Motor B seeking Hall high side"
+JP #hb_clr,(_HMB=1)
+SPB=rspeed
+FEB
+BGB
+#hb_hi
+WT10
+JP #hb_hi,((_HMB<>1) & (_BGB<>0))
+#hb_shi
+WT10
+JP #hb_shi,(_BGB<>0)
+IF (_HMB<>1)
+  MG "Motor B home failed: Hall high side not found"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+#hb_clr
+REM Back through the Hall edge so final home always approaches positive.
+MG "Motor B clearing Hall sensor reverse"
+JP #hb_rhit,(_LRB=0)
+JGB=(-1*rspeed)
+LDB=2
+BGB
+#hb_lo
+WT10
+JP #hb_lo,((_HMB=1) & (_LRB<>0) & (_BGB<>0))
+STB
+#hb_slo
+WT10
+JP #hb_slo,(_BGB<>0)
+IF (_LRB=0)
+  MG "Motor B home failed: reverse limit hit during Hall clear"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+IF (_HMB<>0)
+  MG "Motor B home failed: Hall low side not found"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+LDB=0
+REM Add reverse margin past the Hall edge to avoid hysteresis ambiguity.
+MG "Motor B applying reverse Hall backoff"
+IF (_LRB=0)
+  MG "Motor B home failed: reverse limit blocks Hall backoff"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+PRB=(-1*hback)
+SPB=rspeed
+LDB=2
+BGB
+#hb_bk
+WT10
+JP #hb_bk,((_LRB<>0) & (_BGB<>0))
+STB
+#hb_sbk
+WT10
+JP #hb_sbk,(_BGB<>0)
+IF (_LRB=0)
+  MG "Motor B home failed: reverse limit hit during backoff"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+LDB=0
+MG "Motor B seeking final positive Hall edge"
+IF (_LFB=0)
+  MG "Motor B home failed: forward limit blocks final Hall search"
+  ae[1]=3
+  LDB=0
+  homing[1]=0
+  EN
+ENDIF
+SPB=hspeed
+REM Final slow positive FE defines the repeatable home edge.
+FEB
+BGB
+#hb_fin
+WT10
+JP #hb_fin,(_BGB<>0)
+SPB=speed[1]
+LDB=0
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+IF (_HMB=1)
+  DPB=0
+  MG "Motor B Homed",_TPB," OK",{^13}{^10},":"
+  ae[1]=0
+ELSE
+  MG "Motor B home failed: Hall sensor not active"
+  ae[1]=3
+ENDIF
+LDB=0
+homing[1]=0
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM   ----- MOVE A ----
+#MoveA
+ae[0]=1
+SPA=speed[0]
+ACA=accel[0]
+DCA=decel[0]
+SHA
+REM dmd[0] checked against software travel limits in calling HCD code
+PAA=dmd[0]
+distance=@ABS[dmd[0]-_TPA]
+timeout=(distance/_SPA)*1000
+timeout=timeout+((_SPA/(2*_ACA))*1000)
+timeout=timeout+((_SPA/(2*_DCA))*1000)+1000
+TWA=timeout
+stime0=TIME
+BGA
+tcon=1000000/_TM
+#ma_wait
+WT10
+IF (ae[0]<>1)
+  EN
+ENDIF
+etime0=TIME
+dtime0=(etime0-stime0)*1000/tcon
+IF (dtime0>timeout)
+  MG "Motor A MOVE timeout"
+  ae[0]=4
+  EN
+ENDIF
+JP #ma_wait,(_BGA<>0)
+IF (mdelay[0]>0)
+  WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+MG "Motor A MOVE to ",_TPA," in ",dtime0/tcon," sec"
+ae[0]=0
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM   ----- MOVE B ----
+#MoveB
+ae[1]=1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+REM dmd[1] checked against software travel limits in calling HCD code
+PAB=dmd[1]
+distance=@ABS[dmd[1]-_TPB]
+timeout=(distance/_SPB)*1000
+timeout=timeout+((_SPB/(2*_ACB))*1000)
+timeout=timeout+((_SPB/(2*_DCB))*1000)+1000
+TWB=timeout
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B MOVE to ",_TPB," in ",dtime1/tcon," sec"
+ae[1]=0
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM   ----- STOP A ----
+#StopA
+REM a command to stop the motor
+ae[0]=1
+STA
+MG "Motor A STOP"
+LDA=0
+homing[0]=0
+ae[0]=0
+EN
+REM
+REM ----------------------------------------------------------------------------
+REM   ----- STOP B ----
+#StopB
+REM a command to stop the motor
+ae[1]=1
+STB
+MG "Motor B STOP"
+LDB=0
+homing[1]=0
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+REM   ----- Home All ----
+REM Call all Init(Home) Routines in parallel
+REM Call this on thread 0, spawn the others
+#HomeAll
+MG "Starting all Home programs"
+XQ #HomeA,1
+WT 2
+XQ #HomeB,2
+EN
