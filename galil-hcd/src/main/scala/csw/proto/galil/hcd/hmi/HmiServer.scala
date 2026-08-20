@@ -727,6 +727,12 @@ class HmiServer(
     log.info(s"HMI engStop axis=$axisChar (axisState=${axState.axisState}, homed=${axState.homed}) → '$cmdString' " +
       s"→ completion state $completionState")
 
+    // Poll-scan timestamp before the ST: the settle wait below requires a scan
+    // NEWER than this before it will declare the stop complete, so a stale
+    // observation snapshotted during the jog can never land after our state
+    // transition (it is delivered, in order, before the newer scan we wait for).
+    val preStopScan = hcdState.lastPollingTime
+
     try
       val result = Await.result(
         AskPattern.Askable(controllerCommandActor).ask[GalilCommandMessage.SendCommandResult](
@@ -739,13 +745,52 @@ class HmiServer(
           log.warn(s"HMI engStop axis=$axisChar: controller rejected '$cmdString' — $err")
           commandResponseJson(runId.id, "Error", s"engStop: $err")
         case None =>
-          // ST succeeded; transition axisState.  The QR poll will follow with
-          // moving=false shortly; no need to also clear cmdStates.moving here
-          // (CS owns that field).
-          internalStateActor ! InternalStateActor.UpdateAxisState(axis,
-            Map("axisState" -> completionState),
-            system.ignoreRef)
-          commandResponseJson(runId.id, "Completed")
+          if axState.axisState != AxisStateEnum.Moving then
+            // No motion was declared, so no observation can contradict the
+            // transition; keep the historical immediate behaviour.
+            internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+              Map("axisState" -> completionState),
+              system.ignoreRef)
+            commandResponseJson(runId.id, "Completed")
+          else
+            // The axis was declared Moving (engineering jog).  Do NOT declare
+            // the completion state until it is OBSERVED: transitioning to Idle
+            // while a stale moving=true scan is still in flight trips the
+            // spontaneous-motion detector (root cause of the S92 incident).
+            //
+            // Settle condition, provably stale-proof under per-sender FIFO
+            // delivery from ControllerStatusActor to InternalStateActor:
+            //   1. a scan NEWER than preStopScan has been applied, and
+            //   2. that state shows moving == false, and
+            //   3. a second query still shows moving == false.  The scan's
+            //      time update and its per-axis moving update are separate
+            //      messages; the confirming query is enqueued behind any
+            //      still-undelivered moving update from the observed scan,
+            //      so it cannot miss one.
+            // On timeout the axis is left declared Moving: an axis that will
+            // not stop must look like one, not like Idle.
+            val deadline = System.nanoTime() + 3.seconds.toNanos
+            var settled = false
+            while !settled && System.nanoTime() < deadline do
+              val q = queryHcdStateForHmi()
+              val stillMoving = q.cmdStates.get(axis).exists(_.moving)
+              if q.lastPollingTime.isAfter(preStopScan) && !stillMoving then
+                val confirm = queryHcdStateForHmi()
+                if !confirm.cmdStates.get(axis).exists(_.moving) then
+                  settled = true
+              if !settled then Thread.sleep(50)
+            if settled then
+              internalStateActor ! InternalStateActor.UpdateAxisState(axis,
+                Map("axisState" -> completionState),
+                system.ignoreRef)
+              log.info(s"HMI engStop axis=$axisChar settled (observed moving=false " +
+                s"on a post-stop scan) → $completionState")
+              commandResponseJson(runId.id, "Completed")
+            else
+              log.warn(s"HMI engStop axis=$axisChar: axis still reports motion " +
+                s"3s after ST — leaving axisState=Moving")
+              commandResponseJson(runId.id, "Error",
+                s"engStop: axis $axisChar still reports motion after ST; state left as Moving")
     catch
       case ex: Exception =>
         log.error(s"HMI engStop axis=$axisChar failed: ${ex.getMessage}")

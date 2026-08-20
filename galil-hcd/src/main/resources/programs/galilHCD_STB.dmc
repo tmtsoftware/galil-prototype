@@ -188,7 +188,7 @@ hspd[6]=_HVG
 REM
 JS #fill("ae",0)
 JS #fill("homing",0)
-JS #fill("whlpos",0)
+JS #fill("whlpos",-1)
 REM setup home offset values
 REM (motion after index before setting position to 0)
 JS #fill("hoff",0); 'default to 0 home offset

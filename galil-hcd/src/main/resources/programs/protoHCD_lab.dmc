@@ -86,6 +86,7 @@ DM hspd[8]
 DM hoff[8]
 DM mdelay[8]
 DM cpr[8]
+DM homing[8]
 DM whlpos[8]
 aeBusy=0
 ' default the motor parameters to those in flash EEPROM
@@ -122,6 +123,7 @@ hspd[5]=_HVF
 hspd[6]=_HVG
 REM
 JS #fill("ae",0)
+JS #fill("homing",0)
 REM setup home offset values
 REM (motion after index before setting position to 0)
 JS #fill("hoff",0); 'default to 0 home offset
@@ -218,6 +220,7 @@ REM Axis B done
 '
 #HomeA
 ae[0]=1
+homing[0]=1
 HVA=hspd[0]
 SHA
 IF (mdelay[0]>0)
@@ -225,11 +228,13 @@ IF (mdelay[0]>0)
 ENDIF
 DPA=0
 MG "Motor A Homed",_TDA," OK",{^13}{^10},":"
+homing[0]=0
 ae[0]=0
 EN
 '
 #HomeB
 ae[1]=1
+homing[1]=1
 HVB=hspd[1]
 SHB
 IF (mdelay[1]>0)
@@ -237,6 +242,7 @@ IF (mdelay[1]>0)
 ENDIF
 DPB=0
 MG "Motor B Homed",_TDB," OK",{^13}{^10},":"
+homing[1]=0
 ae[1]=0
 EN
 '
@@ -286,9 +292,9 @@ ae[0]=1
 ' each position is 45 degrees away from the next.
 ' dmd should be an integer between 0 and 7 (though it will wrap fine)
 whlpos[0]=-1
-SPB=speed[0]
-ACB=accel[0]
-DCB=decel[0]
+SPA=speed[0]
+ACA=accel[0]
+DCA=decel[0]
 SHA
 PAA=(dmd[0]-1)*(cpr[0]/8)
 stime0=TIME
@@ -335,6 +341,7 @@ EN
 ae[0]=1
 STA
 MG "Motor A STOP"
+homing[0]=0
 ae[0]=0
 EN
 '
@@ -343,5 +350,6 @@ EN
 ae[1]=1
 STB
 MG "Motor B STOP"
+homing[1]=0
 ae[1]=0
 EN

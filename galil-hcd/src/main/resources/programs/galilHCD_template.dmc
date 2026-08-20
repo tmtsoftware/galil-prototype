@@ -1,0 +1,441 @@
+REM ----------------------------------------------------------------------------
+REM GalilMotion HCD embedded program template
+REM Source file name: galilHCD_template.dmc
+REM ----------------------------------------------------------------------------
+REM This file is the starting point for the embedded programs of a new
+REM controller or mechanism set. It is not loaded by any HCD configuration;
+REM copy it, name the copy for your controller, and point the HCD
+REM configuration at the copy.
+REM
+REM How to use this file:
+REM   1. Copy to a new file named for your controller (e.g. galilHCD_XYZ.dmc).
+REM   2. Work through the "»» CUSTOMIZE" markers. Everything else is the
+REM      fixed framework the HCD relies on; see the SDD appendix
+REM      "Galil DMC Programming" for the contract behind it.
+REM   3. Two worked examples are provided and should be replaced:
+REM      Axis A: linear servo stage, limit-aware index home.
+REM      Axis B: 8-position wheel (stepper), index home, #SelectB.
+REM   4. Test from a console before running under the HCD:
+REM      download, BP, then XQ #Init,0 / XQ #Setup,0 / XQ #Status,0 etc.
+REM      per the testing section of the SDD appendix.
+REM
+REM Rules the controller imposes:
+REM   - 80 characters per line, 4000 lines, 510 variables max.
+REM   - Labels: # plus at most 7 characters. Variables: 8 chars, start alpha.
+REM   - Comments (REM lines and ' remarks) are stripped by the HCD (or GDK)
+REM      on upload; document freely, controller memory is not affected.
+REM
+REM Contract with the HCD (per axis letter X, array index n = X - A):
+REM   - Labels #SetupX #HomeX #MoveX #StopX (#SelectX for wheels) exist and
+REM      are invoked by the HCD by name on a thread it chooses.
+REM   - Parameters arrive in variables before XQ: dmd[n], speed[n],
+REM      accel[n], decel[n], hspd[n]. Never hardcode a target.
+REM   - ae[n]=1 on entry, ae[n]=0 as the last line before EN. The automatic
+REM      handlers write 2..4. The HCD attributes success/failure from this.
+REM   - homing[n]=1 during a home so the automatic limit routine (#LIMSWI)
+REM      ignores expected limit hits while homing is active; cleared on
+REM      every exit path including #StopX.
+REM   - Arrays read by the HCD must be dimensioned in the BURNED #Init.
+REM ----------------------------------------------------------------------------
+REM FIXED FRAMEWORK - Helper Routines
+REM ----------------------------------------------------------------------------
+#fill;              'simple subroutine to fill array with values
+^c= 0;              'use local scope ^c for iterator
+#fill_h;            'fill loop
+^a[^c]= ^b;         'set each value of the array
+^c= ^c+1
+JP #fill_h,(^c<^a[-1]);'keep setting array values for length of array
+EN
+#print;             'simple subroutine to print all values of an array
+^c= 0;              'use local scope ^c for iterator
+#print_h;           'print loop
+MG "axis ",^c, " is ",^a[^c]
+^c=^c+1
+JP #print_h,(^c<^a[-1])
+EN
+REM ----------------------------------------------------------------------------
+#AUTO
+REM Code here runs automatically when the controller starts
+REM Will call Init, during HCD Initialization.
+REM XQ #Init,7
+EN
+REM ----------------------------------------------------------------------------
+REM FIXED FRAMEWORK - Automatic error handlers (run in thread 0)
+REM ----------------------------------------------------------------------------
+REM Ensure EEPROM errors are reported.
+#AUTOERR
+MG "HCD EEPROM ERROR ", _RS,{^17}{^10},":"
+WT 3000
+REM Impacts all axes
+JP #fill("ae",1)
+JS #AUTOERR
+EN
+REM  Report any position errors (per axis)
+#POSERR
+MG "HCD POSERR"
+REM Check each axis
+~a=0; ' axis designator
+b=0;  ' array index
+#pe_h
+IF ((@ABS[_TE~a]>=_ER~a) & (_ER~a<>-1))
+  MG "Position Error ",_TE~a, " occured on ",~a{F1.0}," axis "
+  ae[b]=2
+ENDIF
+~a=~a+1; b=b+1
+JP#pe_h,~a<_BV
+ZS
+RE
+REM  Report any lost TCP connections
+#TCPERR
+MG "HCD TCPERR ", _IA4
+RE
+REM Trap program errors so threads are not killed
+#CMDERR
+MG "HCD CMDERR ",_ED,_TA,_TC,_XQ
+EN
+REM Handle limits, treatment varies by mechanism
+REM Ignore limits if used while homing
+REM »» CUSTOMIZE: one IF block per populated axis. Two examples below;
+REM »» replicate for each axis you add, keeping the homing[] guard.
+#LIMSWI
+IF ((_LFA = 0) | (_LRA = 0))
+ IF (homing[0])
+  MG "Ignoring Limit Hit axis A during homing"
+ ELSE
+  MG "Limit Hit axis A"
+  ae[0]=3
+ ENDIF
+ENDIF
+IF ((_LFB = 0) | (_LRB = 0))
+ IF (homing[1])
+  MG "Ignoring Limit Hit axis B during homing"
+ ELSE
+  MG "Limit Hit axis B"
+  ae[1]=3
+ ENDIF
+ENDIF
+WT500
+RE1
+REM Handle motion timeouts, per axis
+#MCTIME
+MG "Motion Timeout"
+REM Check each axis
+~a=0; ' axis designator
+b=0;  ' array index
+#mct_h
+IF (_SC~a==99)
+  MG "Motion Timeout occured on ",~a{F1.0}," axis "
+  ae[b]=4
+ENDIF
+~a=~a+1; b=b+1
+JP#mct_h,~a<_BV
+EN1
+REM ----------------------------------------------------------------------------
+REM FIXED FRAMEWORK - Init: setup controller and initialize variables
+REM The arrays dimensioned here are read by the HCD's status polling.
+REM They must exist in the BURNED program or every poll errors (TC 57).
+REM ----------------------------------------------------------------------------
+#Init
+REM Global configuration
+CN 1;   'All Limit Switches active high
+MO;     'All motors OFF - necessary or some commands fail
+' create arrays, variables
+DM ae[8]
+DM dmd[8]
+DM accel[8]
+DM decel[8]
+DM speed[8]
+DM hspd[8]
+DM hoff[8]
+DM mdelay[8]
+DM cpr[8]
+DM homing[8]
+DM whlpos[8]
+' default the motor parameters to those in flash EEPROM
+accel[0]=_ACA
+accel[1]=_ACB
+decel[0]=_DCA
+decel[1]=_DCB
+speed[0]=_SPA
+speed[1]=_SPB
+hspd[0]=_HVA
+hspd[1]=_HVB
+REM »» CUSTOMIZE: extend the EEPROM defaults above for each populated axis
+REM »» (accel[n]=_ACx etc.), following the pattern.
+JS #fill("ae",0)
+JS #fill("homing",0)
+JS #fill("whlpos",0)
+JS #fill("hoff",0); 'default to 0 home offset
+REM »» CUSTOMIZE: per-axis constants.
+REM »» hoff[n]   = encoder counts from the home reference (index or
+REM »»             switch) to the mechanism's true zero; the home
+REM »»             routine moves this far before DP sets position 0.
+REM »»             0 means zero is at the reference itself.
+REM »» mdelay[n] = settling time (ms) after a move completes
+REM »» cpr[n]    = counts per revolution (rotating mechanisms only)
+hoff[0]=0;      'A: example stage, zero at the index
+hoff[1]=0;      'B: example wheel, zero at the index
+mdelay[0]=300
+mdelay[1]=200
+cpr[1]=51200;   'B: example wheel counts per revolution
+REM limit on the size of IP offset when tracking
+DIPLim=500
+MG "Controller Initialized"
+EN
+REM ----------------------------------------------------------------------------
+REM End of #INIT
+REM ----------------------------------------------------------------------------
+REM
+REM Helper routine to clear all axis error messages
+#ae0
+JS #fill("ae",0)
+EN
+REM print some Status info, useful during testing
+#Status
+' generate a status message
+ MG "HCD STATUS threads: "{N}
+ MG (_NO&128)/128{N}{F1.0}
+ MG (_NO&64)/64{N}{F1.0}
+ MG (_NO&32)/32{N}{F1.0}
+ MG (_NO&16)/16{N}{F1.0}
+ MG (_NO&8)/8{N}{F1.0}
+ MG (_NO&4)/4{N}{F1.0}
+ MG (_NO&2)/2{N}{F1.0}
+ MG (_NO&1)/1{F1.0}
+ MG "HCD STATUS error code:  ", _TC, _TA0
+ MG "axis error codes: ",ae[0]{F1.0}, ae[1]
+ MG "HCD STATUS positions: ", _TPA, _TPB
+EN
+REM Call all Setup Routines in parallel
+REM Call this on thread 0, spawn the others
+REM »» CUSTOMIZE: spawn one #SetupX per populated axis, as below.
+#Setup
+MG "Starting all Setup programs"
+XQ #SetupA,1
+WT 2
+XQ #SetupB,2
+EN
+REM Call all Home Routines in parallel
+REM Call this on thread 0, spawn the others
+REM »» CUSTOMIZE: spawn one #HomeX per populated axis, as below.
+#HomeAll
+MG "Starting all Home programs"
+XQ #HomeA,1
+WT 2
+XQ #HomeB,2
+EN
+REM ----------------------------------------------------------------------------
+REM ============================================================================
+REM EXAMPLE Axis A - linear servo stage
+REM »» CUSTOMIZE: this whole block is a worked example. Replace the
+REM »» hardware settings with your mechanism's, keep the structure.
+REM ============================================================================
+#SetupA
+ae[0]=1
+MTA=1.0;    '»» motor type (1.0 servo, 2/2.5 stepper, see MT)
+LDA=0;      '»» limit switch enable for this axis
+ERA=5000;   '»» position error limit (counts), pairs with #POSERR
+KPA=30;     '»» servo proportional constant
+KIA=1.5;    '»» servo integrator constant
+KDA=200;    '»» servo derivative constant
+SPA=20000;  '»» default speed (counts/s) for independent moves
+speed[0]=20000; 'sync embedded speed array to the SP above
+REM »» amplifier gain, torque limits, commutation (AG TL TK BA BM BZ)
+REM »» go here when the hardware needs them; see the STB file for a
+REM »» worked brushless example.
+STA;        'SAFETY: Stop Axis A
+MOA;        'SAFETY: Motor off; #SetupX always exits stopped and off
+MG "Axis A setup done"
+ae[0]=0
+EN
+REM ----------------------------------------------------------------------------
+#HomeA
+ae[0]=1; 'Flag to detect if this program halts/errors before finishing
+homing[0]=1
+MG "Home Motor A started"
+HVA=hspd[0]
+SHA
+REM »» CUSTOMIZE: homing strategy. This example seeks the index marker,
+REM »» reversing off the forward limit if it starts there. Other
+REM »» mechanisms home to a limit, a hard stop, or not at all.
+IF (_LFA=0); 'we are on the positive limit
+ MG "Positive Limit Hit, Seeking Index Marker negative..."
+ JGA=-10000
+ FIA
+ BGA
+ MCA
+ELSE
+ JGA=10000
+ MG "	Seeking Index marker..."
+ FIA
+ BGA
+ MCA
+ IF (_LFA=0); 'we hit the positive limit
+  MG "Positive Limit Hit, Seeking Index Marker negative..."
+  JGA=-10000
+  FIA
+  BGA
+  MCA
+ ENDIF
+ENDIF
+IF (hoff[0]<>0)
+ MG "Applying offset: ", hoff[0]
+ PRA=hoff[0]
+ BGA
+ MCA
+ENDIF
+IF (mdelay[0]>0)
+ WT mdelay[0]
+ENDIF
+MG "Setting encoder to zero position."
+DPA=0
+MG "Motor A homed."
+ae[0]=0; 'successful home
+homing[0]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveA
+ae[0]=1
+SPA=speed[0]
+ACA=accel[0]
+DCA=decel[0]
+SHA
+REM »» CUSTOMIZE: auxiliary actuation for this mechanism (e.g. brake
+REM »» release) goes where the hardware requires. Keep the TW timeout
+REM »» below covering every added step.
+PAA=dmd[0]
+REM Set a timeout so a stalled move fires #MCTIME instead of hanging:
+REM (distance/speed)*1000 +1000
+dist0=@ABS[dmd[0]-_TPA]
+tmo0=((dist0/_SPA)*1000)+1000
+REM tmo0=1;  uncomment to test the #MCTIME subroutine
+TWA=tmo0
+stime0=TIME
+BGA
+MCA
+IF (mdelay[0]>0)
+ WT mdelay[0]
+ENDIF
+etime0=TIME
+dtime0=etime0-stime0
+tcon=1000000/_TM
+MG "Motor A MOVE to ",_TPA," in ",dtime0/tcon," sec"
+ae[0]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopA
+ae[0]=1
+STA
+REM »» CUSTOMIZE: auxiliary actuation after halt (e.g. brake, pin) is
+REM »» hardware specific and invisible to the HCD; it only sees this
+REM »» thread finish and ae[0].
+MG "Motor A STOP"
+homing[0]=0
+ae[0]=0
+EN
+REM ============================================================================
+REM EXAMPLE Axis B - 8-position wheel (discrete-position mechanism)
+REM »» CUSTOMIZE: worked example of a wheel. #SelectB is the extra
+REM »» label the HCD invokes for selectWheel; whlpos[] is the achieved
+REM »» slot the HCD reads back.
+REM ============================================================================
+#SetupB
+ae[1]=1
+MTB=2;      '»» motor type: stepper in this example
+LDB=3;      '»» limits disabled: continuous rotation mechanism
+SPB=20000;  '»» default speed (counts/s)
+speed[1]=20000; 'sync embedded speed array
+STB;        'SAFETY: Stop Axis B
+MOB;        'SAFETY: Motor off
+MG "Axis B setup done"
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#HomeB
+ae[1]=1
+homing[1]=1
+MG "Home Motor B started"
+HVB=hspd[1]
+SHB
+JGB=50000
+MG "	Seeking Index marker..."
+FIB
+BGB
+MCB
+IF (hoff[1]<>0)
+ MG "Applying offset: ", hoff[1]
+ PRB=hoff[1]
+ BGB
+ MCB
+ENDIF
+IF (mdelay[1]>0)
+ WT mdelay[1]
+ENDIF
+MG "Setting encoder to zero position."
+DPB=0
+MG "Motor B homed."
+ae[1]=0
+homing[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#MoveB
+ae[1]=1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=dmd[1]
+dist1=@ABS[dmd[1]-_TPB]
+tmo1=((dist1/_SPB)*1000)+1000
+TWB=tmo1
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+ WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+MG "Motor B MOVE to ",_TPB," in ",dtime1/tcon," sec"
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#SelectB
+ae[1]=1
+' Move the wheel to one of 8 discrete positions (like a filter wheel).
+' dmd[1] is the commanded slot number; slots are cpr/8 counts apart.
+' whlpos[1] = -1 means undefined; set to the achieved slot once parked.
+REM »» CUSTOMIZE: slot count and any detent/pin engagement for this
+REM »» hardware. whlpos[] handling must stay: the HCD reads it.
+whlpos[1]=-1
+SPB=speed[1]
+ACB=accel[1]
+DCB=decel[1]
+SHB
+PAB=(dmd[1]-1)*(cpr[1]/8)
+stime1=TIME
+BGB
+MCB
+IF (mdelay[1]>0)
+  WT mdelay[1]
+ENDIF
+etime1=TIME
+dtime1=etime1-stime1
+tcon=1000000/_TM
+whlpos[1]=dmd[1]
+MG "Motor B select #", dmd[1]," move to ",_TPB," in ", dtime1/tcon," sec"
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+#StopB
+ae[1]=1
+STB
+MG "Motor B STOP"
+homing[1]=0
+ae[1]=0
+EN
+REM ----------------------------------------------------------------------------
+REM End of template. Add further axes by replicating an example block,
+REM then extend #Init defaults, #Setup, #HomeAll and #LIMSWI to match.
+REM ----------------------------------------------------------------------------

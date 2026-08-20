@@ -1054,7 +1054,7 @@ const IOPanel = memo(function IOPanel({state, onCommand}) {
 // re-initialized whenever the `axis` prop changes — switching tabs in the bay
 // is therefore a state reset, not a preserve.  That matches the chosen UX
 // (simpler state model, single source of truth: the live axState).
-function ConfigPanel({axis, axState, cmdSt, onCommand}) {
+function ConfigPanel({axis, axState, cmdSt, onCommand, jogSpeeds, setJogSpeeds}) {
   const cs = cmdSt || {};
 
   const [cfgVel, setCfgVel] = useState('');
@@ -1066,7 +1066,12 @@ function ConfigPanel({axis, axState, cmdSt, onCommand}) {
   const [cfgAlgorithm, setCfgAlgorithm] = useState('shortest');
   const [cfgUpperLimit, setCfgUpperLimit] = useState('');
   const [cfgLowerLimit, setCfgLowerLimit] = useState('');
-  const [jogSpeed, setJogSpeed] = useState('');
+  // Jog speed is PER-AXIS and lives in GalilHMI (jogSpeeds map), unlike the
+  // config fields below: those are re-seeded from live axState on every tab
+  // switch, but jog speed has no live-state backing, so local state would
+  // silently discard the operator's entry whenever the tab changes.
+  const jogSpeed = (jogSpeeds && jogSpeeds[axis]) || '';
+  const setJogSpeed = v => setJogSpeeds(prev => ({...prev, [axis]: v}));
 
   // Populate form from current axState whenever the axis tab changes, and only
   // then — subsequent axState polls would otherwise stomp on in-progress edits.
@@ -1082,7 +1087,6 @@ function ConfigPanel({axis, axState, cmdSt, onCommand}) {
     if (axState.algorithm) setCfgAlgorithm(axState.algorithm.toLowerCase());
     setCfgUpperLimit(axState.upperLimit ? String(axState.upperLimit) : '');
     setCfgLowerLimit(axState.lowerLimit ? String(axState.lowerLimit) : '');
-    setJogSpeed('');
   }, [axis]); // intentionally not [axState] — see comment above
 
   if (!axState) {
@@ -1255,7 +1259,7 @@ function ConfigPanel({axis, axState, cmdSt, onCommand}) {
 // just a thin vertical strip with an expand button.  When expanded, a tab bar
 // across the top (one tab per active axis) and the selected axis's ConfigPanel
 // below.  Tab switching resets the form (see ConfigPanel comment).
-function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelectAxis, onCommand, innerRef}) {
+function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelectAxis, onCommand, innerRef, jogSpeeds, setJogSpeeds}) {
   // Collapsed: thin strip with expand chevron.
   if (!expanded) {
     return e('div',{ref:innerRef, style:{flexShrink:0,width:24,height:'100%',backgroundColor:'#111827',
@@ -1312,7 +1316,7 @@ function ConfigBay({state, activeAxes, expanded, onToggle, selectedAxis, onSelec
             axis:selectedAxis,
             axState:state?.axes?.[selectedAxis],
             cmdSt:state?.cmdState?.[selectedAxis],
-            onCommand})
+            onCommand, jogSpeeds, setJogSpeeds})
         : e('div',{style:{padding:8,fontFamily:'var(--mono)',fontSize:10.5,color:'#6B7280'}},
             'Click an axis tab above to view its config.')));
 }
@@ -1391,7 +1395,7 @@ function PlotChannel({axis, times, col, tEnd, xDomain, height}) {
 // state would die with it -- so every trip to the log and back would silently reset the
 // axis selection and drop a freeze the operator had deliberately taken.
 function PlotPanel({buf, panelHeight, bayExpanded, tab, onTab, setPlotLive,
-                    selected, setSelected, frozenSnap, setFrozenSnap}) {
+                    selected, setSelected, frozenSnap, setFrozenSnap, activeAxes}) {
   const frozen = !!frozenSnap;
 
   // Tell the connection hook to start bumping its render tick while this panel is
@@ -1421,7 +1425,13 @@ function PlotPanel({buf, panelHeight, bayExpanded, tab, onTab, setPlotLive,
   const view = frozenSnap || buf;
   const times = view.t;
   const available = Object.keys(view.axes).sort();
-  const shown = available.filter(a => selected === null || selected.includes(a));
+  // Default selection: the ACTIVE axes only.  The history buffer records all
+  // eight axes, so `available` includes inactive ones sitting at a constant
+  // position; they are noise until deliberately enabled via their chip.
+  // Falls back to everything if the active set is empty or has no data yet.
+  const activeDefault = available.filter(a => (activeAxes || []).includes(a));
+  const baseDefault = activeDefault.length ? activeDefault : available;
+  const shown = available.filter(a => (selected === null ? baseDefault : selected).includes(a));
 
   const tEnd = times.length ? times[times.length - 1] : 0;
   const xMin = times.length ? (times[0] - tEnd) / 1000 : -1;
@@ -1458,7 +1468,7 @@ function PlotPanel({buf, panelHeight, bayExpanded, tab, onTab, setPlotLive,
     const on = shown.includes(a);
     return e('span', {key:a,
       onClick: () => setSelected(prev => {
-        const base = prev === null ? available.slice() : prev.slice();
+        const base = prev === null ? baseDefault.slice() : prev.slice();
         const i = base.indexOf(a);
         if (i >= 0) base.splice(i, 1); else base.push(a);
         return base;
@@ -1798,6 +1808,9 @@ function GalilHMI() {
   // the first active axis.
   const [configExpanded, setConfigExpanded] = useState(false);
   const [selectedConfigAxis, setSelectedConfigAxis] = useState(null);
+  // Per-axis engineering jog speeds; lives here so it survives config-bay tab
+  // switches (ConfigPanel deliberately resets its own state per tab).
+  const [jogSpeeds, setJogSpeeds] = useState({});
   // Bottom-row height alignment: the ConfigBay sizes to its natural content
   // (which varies by axis type — Linear has Soft Lim row, Rotating doesn't),
   // and HcdLogPanel needs an explicit pixel height to match (flex stretch
@@ -1997,7 +2010,7 @@ function GalilHMI() {
         // the posTick state change re-renders this component and the panel along with it,
         // reading the latest contents of the (stable) posRef buffer.
         ? e(PlotPanel,{buf:posRef.current, panelHeight, bayExpanded:configExpanded,
-            tab:bottomTab, onTab:setBottomTab, setPlotLive,
+            tab:bottomTab, onTab:setBottomTab, setPlotLive, activeAxes,
             selected:plotAxes, setSelected:setPlotAxes,
             frozenSnap:plotFrozenSnap, setFrozenSnap:setPlotFrozenSnap})
         : e(HcdLogPanel,{lines:logLines, panelHeight, bayExpanded:configExpanded,
@@ -2007,7 +2020,7 @@ function GalilHMI() {
         selectedAxis:selectedConfigAxis,
         onSelectAxis:setSelectedConfigAxis,
         onCommand:handleCommand,
-        innerRef:bayRef})),
+        innerRef:bayRef, jogSpeeds, setJogSpeeds})),
 
     // Footer
     e('div',{style:{marginTop:6,display:'flex',justifyContent:'space-between',fontSize:9,color:'#374151',

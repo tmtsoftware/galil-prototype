@@ -1687,3 +1687,105 @@ class InternalStateActorTest extends AnyFunSuite with Matchers with BeforeAndAft
     actor ! InternalStateActor.GetAxisThread(Axis.H, q.ref)
     q.receiveMessage() shouldBe None
   }
+
+  // ========================================
+  // Spontaneous-Motion Detector (S92)
+  // ========================================
+  // The detector lives in handleUpdateAxisCmdState: a cmd-state update that
+  // leaves moving=true while the axis is Idle/Lost and the HCD is Ready must
+  // latch "Spontaneous Motion" and transition the axis to Error. These tests
+  // pin the semantics that both HMI engineering handlers depend on: engJog
+  // declares Moving BEFORE issuing JG;BG, and engStop declares the completion
+  // state only AFTER a post-stop scan is observed with moving=false (see
+  // HmiServer.handleEngJog / handleEngStop).
+
+  test("spontaneous motion: moving=true while Idle and Ready latches Error") {
+    val initial = HcdState(state = HcdStateEnum.Ready).initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initial))
+    val ack = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+
+    actor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("axisState" -> AxisStateEnum.Idle), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    // A scan observation reporting motion on a quiescent axis.
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("moving" -> true, "stopCode" -> 0), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Error
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe "Spontaneous Motion"
+  }
+
+  test("spontaneous motion: suppressed while axis is declared Moving (engJog premise)") {
+    val initial = HcdState(state = HcdStateEnum.Ready).initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initial))
+    val ack = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+
+    // engJog declares Moving before the controller ever reports motion.
+    actor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("axisState" -> AxisStateEnum.Moving), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("moving" -> true, "stopCode" -> 0), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Moving
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe ""
+  }
+
+  test("spontaneous motion: suppressed while HCD is not Ready (init/BZ exemption)") {
+    val initial = HcdState(state = HcdStateEnum.Uninitialized).initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initial))
+    val ack = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+
+    actor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("axisState" -> AxisStateEnum.Idle), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    // BZ commutation and recovery sequences move axes during init; the
+    // detector must stay quiet until the HCD is Ready.
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("moving" -> true, "stopCode" -> 0), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Idle
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe ""
+  }
+
+  test("spontaneous motion: stale moving=true after Moving→Idle latches Error (S92 engStop race)") {
+    // This replays the S92 lab incident: an engineering jog is running
+    // (Moving, moving=true — detector quiet), the state is then declared Idle
+    // while a scan snapshotted during the jog is still in flight, and that
+    // stale observation lands afterwards. The detector cannot distinguish a
+    // stale observation from a real runaway, so it MUST latch Error here —
+    // which is exactly why HmiServer.handleEngStop waits for a post-stop scan
+    // (fresh lastPollingTime, moving=false, confirmed) before declaring the
+    // completion state. If this expectation is ever relaxed, revisit that
+    // settle logic before simplifying it.
+    val initial = HcdState(state = HcdStateEnum.Ready).initializeAxis(Axis.A)
+    val actor = testKit.spawn(InternalStateActor(initial))
+    val ack = testKit.createTestProbe[InternalStateActor.UpdateResponse]()
+
+    actor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("axisState" -> AxisStateEnum.Moving), ack.ref)
+    ack.receiveMessage().success shouldBe true
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("moving" -> true, "stopCode" -> 0), ack.ref)
+    ack.receiveMessage().success shouldBe true
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Moving  // quiet during jog
+
+    // Premature Idle declaration (what engStop used to do)...
+    actor ! InternalStateActor.UpdateAxisState(Axis.A,
+      Map("axisState" -> AxisStateEnum.Idle), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    // ...followed by the stale in-flight scan.
+    actor ! InternalStateActor.UpdateAxisCmdState(Axis.A,
+      Map("moving" -> true, "stopCode" -> 0), ack.ref)
+    ack.receiveMessage().success shouldBe true
+
+    axisStateOf(actor, Axis.A).axisState shouldBe AxisStateEnum.Error
+    cmdStateOf(actor, Axis.A).axisErrorMsg shouldBe "Spontaneous Motion"
+  }

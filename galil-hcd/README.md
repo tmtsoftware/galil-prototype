@@ -57,7 +57,7 @@ csw-services start
 sbt stage
 ./target/universal/stage/bin/galil-hcd \
   -main csw.proto.galil.hcd.GalilHcdApp \
-  --local galil-hcd/src/main/resources/GalilHcd1.conf \
+  --local galil-hcd/src/main/resources/GalilHcdLab.conf \
   -Dgalil.config.path=GalilHcdConfig-Hardware.conf
 ```
 
